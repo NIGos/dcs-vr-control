@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "set-by-build-release",
+  "correspondingSource": "set-by-build-release",
+  "components": [
+    { "id": "manager", "delivery": "Bundled", "license": "MIT", "notice": "licenses/Manager-MIT.txt" },
+    { "id": "ofxr", "delivery": "Bundled", "license": "LGPL-3.0-or-later", "notice": "licenses/OFXR-LGPL-3.0.txt", "additionalNotices": "Inside original OFXR ZIP" },
+    { "id": "cheeky", "delivery": "Bundled", "license": "GPL-3.0", "notice": "licenses/Cheeky-GPL-3.0.txt", "additionalNotices": "licenses/Cheeky-dependencies" },
+    { "id": "quadviews", "delivery": "Bundled", "license": "MIT", "notice": "licenses/QuadViews-MIT.txt", "additionalNotices": "licenses/QuadViews-THIRD-PARTY.txt" },
+    { "id": "sboys", "delivery": "OfficialDownloadOrImport", "reason": "Release contains private functionality; no redistribution grant established for those binaries.", "url": "https://github.com/sboys3/CustomHeadsetOpenVR/releases/tag/1.3.0" },
+    { "id": "nvidia-dlssnr", "delivery": "UserSupplied", "reason": "Proprietary neural runtime; not included." },
+    { "id": "pimax", "delivery": "OfficialInstall", "reason": "Vendor driver, service and runtime are installed separately." },
+    { "id": "steamvr", "delivery": "OfficialInstall", "reason": "Install through Steam." },
+    { "id": "gaze-bridge", "delivery": "OfficialInstallAndHardwareValidation", "reason": "Archived Crystal instructions do not establish Crystal Super compatibility." },
+    { "id": "webview2-runtime", "delivery": "MicrosoftDownloadIfMissing", "reason": "Official bootstrapper, Microsoft signature checked; SDK notices bundled." },
+    { "id": "cpp-runtime", "delivery": "MicrosoftDownloadIfMissing", "reason": "Official x64 installer, Microsoft signature checked; not bundled." }
+  ]
+}

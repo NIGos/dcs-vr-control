@@ -1,0 +1,3217 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8a3a350..63cbfec 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -892,6 +892,44 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+         set_tests_properties(xrfg_layer_d3d11_bridge_unsubmitted PROPERTIES TIMEOUT 60)
+ 
++        # DCS VR Control (0006): while generation runs the bridge leaves the
++        # runtime's images alone, and a frame that falls back to the
++        # application's own composition mid-run (a sub-image change
++        # quarantines generation) finds them caught up at its submission;
++        # and a colour swapchain no frame names never takes a history ring.
++        add_test(
++            NAME xrfg_layer_d3d11_bridge_fallback
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_d3d11_bridge_logging.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/d3d11-bridge-fallback"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_lazy_history.cmake")
++        set_tests_properties(xrfg_layer_d3d11_bridge_fallback PROPERTIES TIMEOUT 60)
++
++        # DCS VR Control (0006): late submissions and the 3X late-frame skip
++        # on a runtime that paces like a display, with the skip on (the
++        # default) and turned off by the ini.
++        foreach(skip_case on off)
++            if(skip_case STREQUAL "on")
++                set(skip_ini "${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_late_skip.ini")
++                set(skip_expected ON)
++            else()
++                set(skip_ini "${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_late_skip_off.ini")
++                set(skip_expected OFF)
++            endif()
++            add_test(
++                NAME xrfg_layer_late_skip_${skip_case}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DSKIP_INI=${skip_ini}"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/late-skip-${skip_case}"
++                    "-DEXPECT_SKIP=${skip_expected}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_late_skip.cmake")
++            set_tests_properties(xrfg_layer_late_skip_${skip_case} PROPERTIES TIMEOUT 120)
++        endforeach()
++
+         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
+         # device, so an ini asking for it exercises the layer's fallback to
+         # FidelityFX: the default scenario's exact expectations only hold if
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index dfe9318..7e9d29c 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -205,7 +205,35 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     time per application frame (synthesis and bridge copies), c= the
+     //     pipeline latency, release to first synthetic written (what the
+     //     first version of adaptive control judged; diagnostic now).
++    //     DCS VR Control (0006): b counts synthesis shader work only (the
++    //     pack and the final draw), not the NVIDIA optical-flow engine waits.
++    //   result=3 (0006): a= the layer queue's wait for the NVIDIA
++    //     optical-flow engine per application frame, b= first synthetics
++    //     handed over late in the second (3X), c= 0.
++    // latency_status's b carries the same late first synthetics in bits
++    // 32-47 (0006).
+     adaptive_throughput,
++    // DCS VR Control (0006). The presenter's submissions timed from the
++    // return of the runtime's xrWaitFrame for their slot to the call into the
++    // runtime's xrEndFrame; late past 2 ms (kLateSubmissionThreshold). Kinds:
++    // real (an application frame), gen1 (the first synthetic after a real
++    // frame), gen2 (3X's second synthetic), repeat (nothing new: the previous
++    // frame again, including a slot the late-frame skip re-presents).
++    //   result=1, once a second while the presenter runs: a= submissions by
++    //     kind, 16 bits each: real 0-15, gen1 16-31, gen2 32-47, repeat
++    //     48-63; b= the late ones, packed the same; c= the latest gen1 in
++    //     microseconds (bits 0-31) and the latest of any kind (bits 32-63).
++    //   result=2, once a second in 3X: the late-frame skip. a= 1 while on;
++    //     b= slots it re-presented in the second (bits 0-15) and slots it
++    //     wanted to but could not, for want of a frame safe to re-present
++    //     (bits 16-31); c= skipped slots whose first synthetic would have
++    //     been ready (the exit test).
++    //   result=3: the skip turned on (a=1) or off (a=2); b= the window's
++    //     late first synthetics (bits 0-15) and its ready skipped slots
++    //     (bits 16-31); c= the dwell in force, in milliseconds.
++    //   result=4: a first synthetic arrived for a slot the skip had already
++    //     re-presented and was dropped; a= its sequence, b= 0, c= 0.
++    submission_timing,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/d3d11_bridge.hpp b/include/xrfg/d3d11_bridge.hpp
+index e473c87..d1233cc 100644
+--- a/include/xrfg/d3d11_bridge.hpp
++++ b/include/xrfg/d3d11_bridge.hpp
+@@ -60,8 +60,11 @@ struct D3D11BridgeSwapchainDescription {
+ // shared one. See SessionState::d3d11_bridge in the layer for why the
+ // runtime is handed a D3D12 session at all.
+ //
+-// Every method returns immediately; the two sides are ordered on one shared
+-// fence, and the only CPU wait is wait_for_idle at teardown.
++// Every method returns immediately; the two sides are ordered on shared
++// fences, and the only CPU wait is wait_for_idle at teardown. DCS VR Control
++// (0006): two fences, one per direction - the application's context signals
++// the hand-over on one, the layer's queue its reads on the other - so that
++// neither fence ever has two signallers racing it backwards.
+ class D3D11BridgeSwapchain final {
+ public:
+     D3D11BridgeSwapchain();
+@@ -124,6 +127,26 @@ public:
+     // Whether a release copies into the runtime's image right now.
+     [[nodiscard]] bool copies_on_release() const noexcept;
+ 
++    // DCS VR Control (0006). While frame generation rewrites the frames onto
++    // the layer's own private swapchains and nothing the runtime is given
++    // names this swapchain, nothing reads the runtime's image of it, and the
++    // copies into it were for nothing (2 x 116 MB per frame for DCS, 0.3-0.4
++    // ms of GPU). With deferral on, a release still
++    // hands the shared texture over to the layer's queue - the history
++    // capture reads it - and returns S_OK, but copies nothing; the image is
++    // remembered. Whatever submission does name the swapchain directly (a
++    // pass-through, a quarantine, a disarm, a fallback of any kind) must call
++    // catch_up() before it goes downstream, exactly as frame_ended does for
++    // a skipped swapchain. A release that copies again (deferral off) drops
++    // whatever was left behind. Skipping (above) takes precedence.
++    void set_defer_copies(bool defer) noexcept;
++    [[nodiscard]] bool defers_copies() const noexcept;
++    // The image a deferred release left without its copy, copied now on the
++    // session's queue. S_FALSE when a copy was queued (the caller then marks
++    // the release for the runtime's queue), S_OK when nothing was left
++    // behind. An image the unsubmitted skip left behind is frame_ended's.
++    [[nodiscard]] HRESULT catch_up() noexcept;
++
+     static constexpr std::uint32_t kUnsubmittedFramesBeforeSkip = 30;
+ 
+     // Everything the layer will read from image `index` this frame has been
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index 26e5333..30cb97c 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -110,6 +110,13 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_display_time_correction(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS VR Control (0006). `[ofxr] late_frame_skip`: in 3X, on a runtime other
++// than SteamVR, a first synthetic that keeps reaching the runtime late is not
++// made while that lasts, and its slot re-presents the previous real frame on
++// time instead. On unless set to 0. Read once per session.
++[[nodiscard]] bool read_late_frame_skip(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // Held by every running session that cannot follow the "3X Frame Gen"
+ // switch live - one started with "Prefer FPS over latency" off, or one the
+ // runtime's swapchain limit pushed back to a single synthetic. The tray asks
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index 20da322..58de77b 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -9,6 +9,12 @@
+ //                              told must move to name the scanout its real
+ //                              frame actually lands on
+ //   AdaptiveFrameGenController when to run 2X and when 3X
++//   SubmissionTally            (0006) which submissions reached the runtime
++//                              late after its wait for their slot
++//   LateFrameSkipController    (0006) when 3X stops making a first synthetic
++//                              that keeps missing its slot
++//   split_synthesis_gpu_time   (0006) synthesis shader time apart from the
++//                              optical-flow engine waits
+ //
+ // All times are nanoseconds on one monotonic timeline the caller chooses.
+ 
+@@ -116,6 +122,162 @@ inline constexpr Nanoseconds kMaxSlackRaise = 4 * kMillisecond;
+ TripleReleaseWindow observe_triple_slack(
+     TripleReleaseTuner& tuner, Nanoseconds period, Nanoseconds slack) noexcept;
+ 
++// ---------------------------------------------------------------------------
++// DCS VR Control (0006): late submissions.
++//
++// Live DCS flights on Pimax OpenXR in 3X (90 Hz) logged "a:~90 fps" from the
++// runtime with "Missed:30, Discard:30" every second. The first synthetic after
++// each real frame reached the runtime 4.8-8.5 ms (p50) and 9.9-17.4 ms (p90)
++// after the runtime's xrWaitFrame for its slot had returned, against 1.1 ms or
++// less on a healthy slot: it needs the application's next real frame, and
++// with the GPU over budget that frame came late. The runtime then shows the
++// previous image again for that slot and throws one of the next two away, so
++// the headset sees about 60 distinct frames a second, unevenly - while every
++// count the layer kept (by display time) read a clean 90.
++//
++// So every presenter submission is timed from the return of the runtime wait
++// for its slot to the moment it is handed to the runtime's xrEndFrame, and is
++// late past kLateSubmissionThreshold. What is late is reported by kind.
++inline constexpr Nanoseconds kLateSubmissionThreshold = 2 * kMillisecond;
++
++enum class SubmissionKind : std::uint32_t {
++    real = 0,    // an application frame (owned real, prime or passed through)
++    gen1 = 1,    // the first synthetic after a real frame
++    gen2 = 2,    // 3X: the second synthetic
++    repeat = 3,  // nothing new: the previous frame again
++};
++inline constexpr std::size_t kSubmissionKinds = 4;
++
++[[nodiscard]] constexpr bool submission_late(
++    Nanoseconds wait_to_submit,
++    Nanoseconds threshold = kLateSubmissionThreshold) noexcept {
++    return wait_to_submit > threshold;
++}
++
++// Per-second tallies of the presenter's submissions, by kind.
++struct SubmissionTally {
++    std::array<std::uint32_t, kSubmissionKinds> frames{};
++    std::array<std::uint32_t, kSubmissionKinds> late{};
++    // The latest a gen1 went out, and the latest of anything, after its wait.
++    Nanoseconds worst_gen1{};
++    Nanoseconds worst{};
++
++    void add(SubmissionKind kind, Nanoseconds wait_to_submit,
++        Nanoseconds threshold = kLateSubmissionThreshold) noexcept;
++    void reset() noexcept { *this = SubmissionTally{}; }
++};
++
++// The 3X release delay's slack sample for a first synthetic, given how late it
++// was handed over. A first synthetic that was written before its hand-over but
++// handed over late (its slot's wait had returned more than the threshold
++// before) is late all the same: the room the slack test measured was room the
++// slot did not have. Its sample is then no larger than minus that excess, so
++// the tuner backs off; on time, the written slack stands.
++[[nodiscard]] Nanoseconds lead_slack_with_lateness(
++    Nanoseconds written_slack,
++    Nanoseconds wait_to_submit,
++    Nanoseconds threshold = kLateSubmissionThreshold) noexcept;
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0006): 3X late-frame skip.
++//
++// While the first synthetic of each application frame keeps missing its slot,
++// it is not made at all: its slot shows the frame the runtime already has
++// (the presenter re-presents the previous real frame on time), the second
++// synthetic - a period further away, so a period more for the application's
++// frame to arrive - and the real frame keep theirs, and synthesis does one
++// interpolation per frame instead of two. The runtime stops missing and
++// discarding, and the GPU time goes to the application's frame.
++//
++// One observation per application frame, at the slot a first synthetic would
++// take:
++//   off: whether the first synthetic went out late (by the test above), or
++//        its slot came with nothing queued
++//   on:  whether it would have been on time - the frame's second synthetic,
++//        made at the same point in the GPU's work, was queued and written
++//        when that slot came
++// Judged kWindowFrames at a time:
++//   off -> on  enter_late or more late in one window
++//   on -> off  exit_windows windows in a row with at least exit_ready ready,
++//              and never sooner than the dwell after entering
++// The dwell starts at min_dwell and doubles, up to max_dwell, when the skip
++// comes back within flap_window of leaving; a full flap_window off resets it.
++struct LateSkipConfig {
++    std::uint32_t window_frames{30};
++    std::uint32_t enter_late{6};
++    std::uint32_t exit_ready{28};
++    std::uint32_t exit_windows{2};
++    Nanoseconds min_dwell{3 * kSecond};
++    Nanoseconds max_dwell{24 * kSecond};
++    Nanoseconds flap_window{15 * kSecond};
++};
++
++enum class LateSkipTransition : std::uint32_t {
++    none = 0,
++    entered = 1,
++    left = 2,
++};
++
++struct LateSkipStep {
++    LateSkipTransition transition{LateSkipTransition::none};
++    // A window closed with this observation; its counts are below.
++    bool window_closed{};
++    std::uint32_t window_late{};
++    std::uint32_t window_ready{};
++    Nanoseconds dwell{};
++};
++
++class LateFrameSkipController {
++public:
++    explicit LateFrameSkipController(LateSkipConfig config = {}) noexcept;
++
++    // Starts over, off, keeping nothing.
++    void reset() noexcept;
++    // Off: one first synthetic's slot, late or not.
++    LateSkipStep observe_leader(Nanoseconds now, bool late) noexcept;
++    // On: one skipped slot, and whether its first synthetic would have been
++    // ready for it.
++    LateSkipStep observe_skipped(Nanoseconds now, bool would_be_ready) noexcept;
++    [[nodiscard]] bool active() const noexcept { return active_; }
++    [[nodiscard]] Nanoseconds dwell() const noexcept { return dwell_; }
++
++private:
++    LateSkipStep close_window(Nanoseconds now) noexcept;
++    LateSkipConfig config_;
++    bool active_{};
++    std::uint32_t window_frames_{};
++    std::uint32_t window_late_{};
++    std::uint32_t window_ready_{};
++    std::uint32_t good_windows_{};
++    Nanoseconds entered_at_{};
++    Nanoseconds left_at_{-1};
++    Nanoseconds dwell_{};
++};
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0006): what synthesis costs the GPU.
++//
++// The NVIDIA path times five points: the pack (downscale) on the layer's
++// queue, each eye's optical flow - which runs on the optical-flow engine while
++// the queue waits for it - and the final draw. Adaptive 2X/3X was given the
++// whole span, so a live DCS flight's synthesis read 7.4 ms when the shader
++// work was about 1.5: 2.9 ms per eye was the graphics queue waiting for the
++// engine, which takes nothing from the application's rendering. The shader
++// part is the pack plus the composition; the waits are reported separately.
++// Without the stage marks (the FidelityFX backend, whose optical flow is
++// shader work on the queue), the span is all shader work.
++struct SynthesisGpuSplit {
++    Nanoseconds shader{};
++    Nanoseconds optical_flow_wait{};
++};
++
++[[nodiscard]] SynthesisGpuSplit split_synthesis_gpu_time(
++    std::uint64_t pack_microseconds,
++    std::uint64_t eye0_microseconds,
++    std::uint64_t eye1_microseconds,
++    std::uint64_t composition_microseconds,
++    std::uint64_t total_microseconds) noexcept;
++
+ // ---------------------------------------------------------------------------
+ // Display time correction.
+ //
+@@ -232,6 +394,13 @@ Nanoseconds rebase_display_time_correction(
+ // says so as well. Frames longer than stall (a pause, a loading screen, a
+ // menu: one sample of 15 s was seen) say nothing about the rate an
+ // application can hold and are not counted at all.
++//
++// DCS VR Control (0006): in 2X a submission handed to the runtime late (see
++// kLateSubmissionThreshold) is a missed slot as well. A pipelined
++// application's presenter has no frame to repeat and waits for the
++// application instead, so its slots were never counted missed at all - they
++// went out late, and the runtime missed them. In 3X late first synthetics are
++// counted (add_late_leaders) but decide nothing.
+ struct AdaptiveConfig {
+     double downshift_fraction{0.85};
+     Nanoseconds downshift_window{3 * kSecond};
+@@ -278,6 +447,10 @@ struct AdaptiveStats {
+     std::uint32_t frames{};
+     std::uint32_t gpu_samples{};
+     AdaptiveLimiter limiter{AdaptiveLimiter::none};
++    // DCS VR Control (0006): first synthetics handed over late in 3X
++    // (add_late_leaders). 3X has nowhere lower to go, so nothing decides on
++    // these; they are what the status record shows.
++    std::uint32_t late_leaders{};
+ };
+ 
+ struct AdaptiveDecision {
+@@ -303,6 +476,9 @@ public:
+     // Missed slots at `at`. Counted as episodes: one that falls within
+     // late_episode_gap of the first miss of the current episode belongs to it.
+     void add_late(Nanoseconds at, std::uint32_t count = 1) noexcept;
++    // DCS VR Control (0006): first synthetics handed over late in 3X, counted
++    // one by one (AdaptiveStats::late_leaders).
++    void add_late_leaders(Nanoseconds at, std::uint32_t count = 1) noexcept;
+     [[nodiscard]] AdaptiveDecision evaluate(
+         Nanoseconds now, Nanoseconds period) const noexcept;
+     // The caller applied a switch.
+@@ -337,6 +513,11 @@ private:
+     std::array<Nanoseconds, kLateEvents> late_at_{};
+     std::size_t late_count_{};
+     std::size_t late_next_{};
++    // 0006: one entry per late first synthetic, with its count.
++    std::array<Nanoseconds, kLateEvents> late_leader_at_{};
++    std::array<std::uint32_t, kLateEvents> late_leader_count_{};
++    std::size_t late_leader_filled_{};
++    std::size_t late_leader_next_{};
+ };
+ 
+ } // namespace xrfg::latency
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index e1a142b..61e4779 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -257,6 +257,20 @@ bool read_adaptive_frame_gen(
+     }
+ }
+ 
++bool read_late_frame_skip(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return true;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        return GetPrivateProfileIntW(
++                   L"ofxr", L"late_frame_skip", 1, ini_path.c_str()) != 0;
++    } catch (...) {
++        return true;
++    }
++}
++
+ bool read_display_time_correction(
+     const std::filesystem::path& module_directory) noexcept {
+     try {
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+index 6e4b5d0..76221e8 100644
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -147,6 +147,132 @@ TripleReleaseWindow observe_triple_slack(
+     return report;
+ }
+ 
++void SubmissionTally::add(
++    SubmissionKind kind, Nanoseconds wait_to_submit, Nanoseconds threshold) noexcept {
++    const auto index = static_cast<std::size_t>(kind);
++    if (index >= kSubmissionKinds) {
++        return;
++    }
++    ++frames[index];
++    if (submission_late(wait_to_submit, threshold)) {
++        ++late[index];
++    }
++    worst = std::max(worst, wait_to_submit);
++    if (kind == SubmissionKind::gen1) {
++        worst_gen1 = std::max(worst_gen1, wait_to_submit);
++    }
++}
++
++Nanoseconds lead_slack_with_lateness(
++    Nanoseconds written_slack,
++    Nanoseconds wait_to_submit,
++    Nanoseconds threshold) noexcept {
++    if (!submission_late(wait_to_submit, threshold)) {
++        return written_slack;
++    }
++    return std::min(written_slack, threshold - wait_to_submit);
++}
++
++LateFrameSkipController::LateFrameSkipController(LateSkipConfig config) noexcept
++    : config_(config), dwell_(config.min_dwell) {
++    if (config_.window_frames == 0) {
++        config_.window_frames = 1;
++    }
++}
++
++void LateFrameSkipController::reset() noexcept {
++    active_ = false;
++    window_frames_ = 0;
++    window_late_ = 0;
++    window_ready_ = 0;
++    good_windows_ = 0;
++    entered_at_ = 0;
++    left_at_ = -1;
++    dwell_ = config_.min_dwell;
++}
++
++LateSkipStep LateFrameSkipController::observe_leader(
++    Nanoseconds now, bool late) noexcept {
++    if (active_) {
++        // A first synthetic made while the skip is on (a frame prepared just
++        // before it engaged) says nothing about the skip.
++        return {};
++    }
++    window_late_ += late ? 1U : 0U;
++    if (++window_frames_ < config_.window_frames) {
++        return {};
++    }
++    return close_window(now);
++}
++
++LateSkipStep LateFrameSkipController::observe_skipped(
++    Nanoseconds now, bool would_be_ready) noexcept {
++    if (!active_) {
++        return {};
++    }
++    window_ready_ += would_be_ready ? 1U : 0U;
++    if (++window_frames_ < config_.window_frames) {
++        return {};
++    }
++    return close_window(now);
++}
++
++LateSkipStep LateFrameSkipController::close_window(Nanoseconds now) noexcept {
++    LateSkipStep step{};
++    step.window_closed = true;
++    step.window_late = window_late_;
++    step.window_ready = window_ready_;
++    window_frames_ = 0;
++    window_late_ = 0;
++    window_ready_ = 0;
++    if (!active_) {
++        if (step.window_late >= config_.enter_late) {
++            // Back within the flap window of leaving: the room it left on
++            // did not last, so it stays longer this time.
++            if (left_at_ >= 0 && now - left_at_ < config_.flap_window) {
++                dwell_ = std::min(dwell_ * 2, config_.max_dwell);
++            } else {
++                dwell_ = config_.min_dwell;
++            }
++            active_ = true;
++            entered_at_ = now;
++            good_windows_ = 0;
++            step.transition = LateSkipTransition::entered;
++        }
++    } else {
++        good_windows_ = step.window_ready >= config_.exit_ready
++            ? good_windows_ + 1
++            : 0;
++        if (good_windows_ >= config_.exit_windows &&
++            now - entered_at_ >= dwell_) {
++            active_ = false;
++            left_at_ = now;
++            good_windows_ = 0;
++            step.transition = LateSkipTransition::left;
++        }
++    }
++    step.dwell = dwell_;
++    return step;
++}
++
++SynthesisGpuSplit split_synthesis_gpu_time(
++    std::uint64_t pack_microseconds,
++    std::uint64_t eye0_microseconds,
++    std::uint64_t eye1_microseconds,
++    std::uint64_t composition_microseconds,
++    std::uint64_t total_microseconds) noexcept {
++    SynthesisGpuSplit split{};
++    const std::uint64_t staged = pack_microseconds + composition_microseconds;
++    const std::uint64_t waits = eye0_microseconds + eye1_microseconds;
++    if (staged == 0 && waits == 0) {
++        split.shader = static_cast<Nanoseconds>(total_microseconds) * 1000;
++        return split;
++    }
++    split.shader = static_cast<Nanoseconds>(staged) * 1000;
++    split.optical_flow_wait = static_cast<Nanoseconds>(waits) * 1000;
++    return split;
++}
++
+ std::size_t display_time_mode(
+     std::uint32_t frames_per_application_frame, bool deep_pipeline) noexcept {
+     if (frames_per_application_frame > 2) {
+@@ -254,6 +380,19 @@ void AdaptiveFrameGenController::start(std::uint32_t mode, Nanoseconds now) noex
+     latency_next_ = 0;
+     late_count_ = 0;
+     late_next_ = 0;
++    late_leader_filled_ = 0;
++    late_leader_next_ = 0;
++}
++
++void AdaptiveFrameGenController::add_late_leaders(
++    Nanoseconds at, std::uint32_t count) noexcept {
++    if (count == 0) {
++        return;
++    }
++    late_leader_at_[late_leader_next_] = at;
++    late_leader_count_[late_leader_next_] = count;
++    late_leader_next_ = (late_leader_next_ + 1) % kLateEvents;
++    late_leader_filled_ = std::min(late_leader_filled_ + 1, kLateEvents);
+ }
+ 
+ void AdaptiveFrameGenController::add_frame(
+@@ -365,6 +504,11 @@ AdaptiveStats AdaptiveFrameGenController::stats(
+             ++result.late;
+         }
+     }
++    for (std::size_t index = 0; index < late_leader_filled_; ++index) {
++        if (inside(late_leader_at_[index])) {
++            result.late_leaders += late_leader_count_[index];
++        }
++    }
+     return result;
+ }
+ 
+diff --git a/src/d3d11/d3d11_bridge.cpp b/src/d3d11/d3d11_bridge.cpp
+index a9484fb..4f58dbf 100644
+--- a/src/d3d11/d3d11_bridge.cpp
++++ b/src/d3d11/d3d11_bridge.cpp
+@@ -71,10 +71,24 @@ struct D3D11BridgeSwapchain::Impl {
+     ComPtr<ID3D11DeviceContext4> d3d11_context4;
+     ComPtr<ID3D12Device> d3d12_device;
+     ComPtr<ID3D12CommandQueue> d3d12_queue;
++    // Signalled by the layer's queue only (copies, reads), waited by the
++    // application's context and the CPU.
+     ComPtr<ID3D12Fence> d3d12_fence;
+     ComPtr<ID3D11Fence> d3d11_fence;
++    // DCS VR Control (0006): signalled by the application's context only (its
++    // rendering is finished: the hand-over), waited by the layer's queue.
++    // One fence used to carry both directions, with values from one counter:
++    // a context signal could reach the GPU before an earlier-numbered signal
++    // of the queue's, and the queue's then moved the fence back below it.
++    // The queue's wait for the hand-over was never satisfied after that, the
++    // queue hung, and with it the device - reproduced by the bridge's own
++    // tests under load (a device removal a few runs in twenty). A fence with
++    // one signaller only ever moves forward.
++    ComPtr<ID3D12Fence> d3d12_render_fence;
++    ComPtr<ID3D11Fence> d3d11_render_fence;
+     HANDLE fence_event{};
+     std::uint64_t next_fence_value{1};
++    std::uint64_t next_render_value{1};
+     std::uint64_t last_signalled{};
+     D3D11BridgePath path{D3D11BridgePath::direct};
+     DXGI_FORMAT shared_format{DXGI_FORMAT_UNKNOWN};
+@@ -114,6 +128,13 @@ struct D3D11BridgeSwapchain::Impl {
+     std::uint32_t unsubmitted_frames{};
+     std::uint32_t stale_index{kNoStaleIndex};
+     static constexpr std::uint32_t kNoStaleIndex = std::numeric_limits<std::uint32_t>::max();
++    // DCS VR Control (0006): releases hand the shared texture to the layer's
++    // queue but leave the runtime's image alone, because the frame goes to
++    // the runtime on the layer's private swapchains; see defer_copies.
++    // `stale_handed_over`: stale_index came from such a release, so its
++    // hand-over is already on the queue and a catch-up only copies.
++    bool deferring{};
++    bool stale_handed_over{};
+ 
+     ~Impl() {
+         if (fence_event != nullptr) {
+@@ -128,6 +149,14 @@ struct D3D11BridgeSwapchain::Impl {
+         return next_fence_value++;
+     }
+ 
++    // DCS VR Control (0006): a value on the hand-over fence.
++    [[nodiscard]] std::uint64_t allocate_render() noexcept {
++        if (next_render_value == std::numeric_limits<std::uint64_t>::max()) {
++            enabled = false;
++        }
++        return next_render_value++;
++    }
++
+     [[nodiscard]] HRESULT create_shared_texture(
+         const D3D12_RESOURCE_DESC& description,
+         ComPtr<ID3D12Resource>* shared,
+@@ -408,6 +437,30 @@ struct D3D11BridgeSwapchain::Impl {
+             *failure_stage = 22;
+             return result;
+         }
++        // DCS VR Control (0006): the hand-over's own fence; see
++        // d3d12_render_fence.
++        result = d3d12_device->CreateFence(
++            0, D3D12_FENCE_FLAG_SHARED,
++            IID_PPV_ARGS(d3d12_render_fence.GetAddressOf()));
++        if (FAILED(result)) {
++            *failure_stage = 24;
++            return result;
++        }
++        UniqueHandle render_fence_handle;
++        result = d3d12_device->CreateSharedHandle(
++            d3d12_render_fence.Get(), nullptr, GENERIC_ALL, nullptr,
++            &render_fence_handle.value);
++        if (FAILED(result)) {
++            *failure_stage = 25;
++            return result;
++        }
++        result = device5->OpenSharedFence(
++            render_fence_handle.value,
++            IID_PPV_ARGS(d3d11_render_fence.GetAddressOf()));
++        if (FAILED(result)) {
++            *failure_stage = 26;
++            return result;
++        }
+         fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+         if (fence_event == nullptr) {
+             *failure_stage = 23;
+@@ -576,14 +629,14 @@ struct D3D11BridgeSwapchain::Impl {
+         move_own_to_shared(index);
+         // The application's rendering into the shared texture, complete on
+         // its context, before the layer's queue reads it.
+-        const std::uint64_t rendered = allocate();
+-        HRESULT result = d3d11_context4->Signal(d3d11_fence.Get(), rendered);
++        const std::uint64_t rendered = allocate_render();
++        HRESULT result = d3d11_context4->Signal(d3d11_render_fence.Get(), rendered);
+         if (FAILED(result)) {
+             enabled = false;
+             return result;
+         }
+         d3d11_context4->Flush1(D3D11_CONTEXT_TYPE_ALL, nullptr);
+-        result = d3d12_queue->Wait(d3d12_fence.Get(), rendered);
++        result = d3d12_queue->Wait(d3d12_render_fence.Get(), rendered);
+         if (FAILED(result)) {
+             enabled = false;
+         }
+@@ -602,11 +655,43 @@ struct D3D11BridgeSwapchain::Impl {
+             // Nothing downstream reads the runtime's image of a swapchain no
+             // frame names; it is brought up to date if a frame ever does.
+             stale_index = index;
++            stale_handed_over = false;
+             return S_FALSE;
+         }
++        if (deferring) {
++            // DCS VR Control (0006): the layer's queue still reads the shared
++            // texture (the history capture), so the hand-over is made; the
++            // copy into the runtime's image waits for a frame that names it.
++            const HRESULT handed = hand_over(index);
++            if (FAILED(handed)) {
++                return handed;
++            }
++            stale_index = index;
++            stale_handed_over = true;
++            return S_OK;
++        }
++        // A newer copy makes any older image left behind irrelevant.
++        stale_index = kNoStaleIndex;
++        stale_handed_over = false;
+         return copy_to_runtime(index);
+     }
+ 
++    // DCS VR Control (0006): the last image a deferred release left without
++    // its copy, copied now. S_FALSE when a copy was queued. An image the
++    // unsubmitted skip left behind is not this: frame_ended copies it when a
++    // frame names the swapchain again, and nothing else may.
++    [[nodiscard]] HRESULT catch_up() noexcept {
++        if (!enabled || path == D3D11BridgePath::depth_private ||
++            stale_index == kNoStaleIndex || !stale_handed_over) {
++            return S_OK;
++        }
++        const std::uint32_t index = stale_index;
++        stale_index = kNoStaleIndex;
++        stale_handed_over = false;
++        const HRESULT result = copy_shared_to_runtime(index);
++        return FAILED(result) ? result : S_FALSE;
++    }
++
+     [[nodiscard]] HRESULT frame_ended(bool submitted) noexcept {
+         if (!enabled || path == D3D11BridgePath::depth_private) {
+             return S_OK;
+@@ -624,8 +709,11 @@ struct D3D11BridgeSwapchain::Impl {
+                 return S_OK;
+             }
+             const std::uint32_t index = stale_index;
++            const bool handed_over = stale_handed_over;
+             stale_index = kNoStaleIndex;
+-            const HRESULT result = copy_to_runtime(index);
++            stale_handed_over = false;
++            const HRESULT result = handed_over ? copy_shared_to_runtime(index)
++                                               : copy_to_runtime(index);
+             return FAILED(result) ? result : S_FALSE;
+         }
+         // Only frames the application released this swapchain into count: a
+@@ -639,12 +727,18 @@ struct D3D11BridgeSwapchain::Impl {
+     }
+ 
+     [[nodiscard]] HRESULT copy_to_runtime(std::uint32_t index) noexcept {
+-        HRESULT result = hand_over(index);
++        const HRESULT result = hand_over(index);
+         if (FAILED(result)) {
+             return result;
+         }
++        return copy_shared_to_runtime(index);
++    }
++
++    // The shared texture into the runtime's image, on the layer's queue,
++    // behind a hand-over of that texture already made.
++    [[nodiscard]] HRESULT copy_shared_to_runtime(std::uint32_t index) noexcept {
+         CopyList* copy = nullptr;
+-        result = take_copy_list(&copy);
++        HRESULT result = take_copy_list(&copy);
+         if (FAILED(result)) {
+             return result;
+         }
+@@ -837,6 +931,32 @@ HRESULT D3D11BridgeSwapchain::frame_ended(bool submitted) noexcept {
+     }
+ }
+ 
++void D3D11BridgeSwapchain::set_defer_copies(bool defer) noexcept {
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        impl_->deferring = defer;
++    } catch (...) {
++    }
++}
++
++bool D3D11BridgeSwapchain::defers_copies() const noexcept {
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        return impl_->deferring;
++    } catch (...) {
++        return false;
++    }
++}
++
++HRESULT D3D11BridgeSwapchain::catch_up() noexcept {
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        return impl_->catch_up();
++    } catch (...) {
++        return E_FAIL;
++    }
++}
++
+ bool D3D11BridgeSwapchain::copies_on_release() const noexcept {
+     try {
+         std::scoped_lock lock(impl_->mutex);
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index 48f6526..7256736 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -102,6 +102,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "display_time_correction";
+     case BridgeFlightOperation::adaptive_throughput:
+         return "adaptive_throughput";
++    case BridgeFlightOperation::submission_timing:
++        return "submission_timing";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 73750aa..6255f1d 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -746,6 +746,10 @@ struct LeadReadiness {
+     std::atomic<std::int64_t> ready_ns{-1};
+     std::atomic<std::int64_t> handed_ns{-1};
+     std::atomic<bool> reported{false};
++    // DCS VR Control (0006): how long after its slot's wait returned it was
++    // handed over; stored before handed_ns. A late hand-over is late however
++    // early it was written (xrfg::latency::lead_slack_with_lateness).
++    std::atomic<std::int64_t> wait_to_handed_ns{0};
+ };
+ 
+ struct TripleSlackSink {
+@@ -764,7 +768,10 @@ void report_lead_slack(LeadReadiness& lead, TripleSlackSink& sink) noexcept {
+         // Drained every presenter cycle; a bound only against a presenter
+         // that has stopped.
+         if (sink.samples.size() < 256) {
+-            sink.samples.emplace_back(lead.epoch, handed - ready);
++            sink.samples.emplace_back(
++                lead.epoch,
++                xrfg::latency::lead_slack_with_lateness(
++                    handed - ready, lead.wait_to_handed_ns.load()));
+         }
+     } catch (...) {
+     }
+@@ -955,27 +962,41 @@ struct ApplicationThroughput {
+     // The layer's own GPU time per frame, averaged over the last frames:
+     // synthesis and copy timings are harvested in bursts.
+     std::array<std::int64_t, 8> layer_ring{};
++    // DCS VR Control (0006): the optical-flow engine waits, averaged the same
++    // way; logged, never judged.
++    std::array<std::int64_t, 8> optical_flow_ring{};
+     std::size_t layer_next{};
+     std::size_t layer_filled{};
+-    // For adaptive_throughput result=2: the two GPU parts per frame.
++    // For adaptive_throughput result=2: the two GPU parts per frame (and,
++    // 0006, the optical-flow waits for result=3).
+     struct Part {
+         std::int64_t at{};
+         std::int64_t app{-1};
+         std::int64_t layer{-1};
++        std::int64_t optical_flow{-1};
+     };
+     std::array<Part, 128> parts{};
+     std::size_t parts_next{};
+ };
+ 
+-// p90s of the two GPU parts over (now - span, now], for adaptive_throughput.
+-[[nodiscard]] std::pair<std::int64_t, std::int64_t> throughput_part_p90s(
++// p90s of the GPU parts over (now - span, now], for adaptive_throughput: the
++// application's, the layer's shader work, and (0006) the optical-flow waits.
++struct ThroughputPartP90s {
++    std::int64_t app{-1};
++    std::int64_t layer{-1};
++    std::int64_t optical_flow{-1};
++};
++
++[[nodiscard]] ThroughputPartP90s throughput_part_p90s(
+     const ApplicationThroughput& throughput,
+     std::int64_t now,
+     std::int64_t span) noexcept {
+     std::array<std::int64_t, 128> app{};
+     std::array<std::int64_t, 128> layer{};
++    std::array<std::int64_t, 128> optical_flow{};
+     std::size_t app_n = 0;
+     std::size_t layer_n = 0;
++    std::size_t optical_flow_n = 0;
+     for (const auto& part : throughput.parts) {
+         if (part.at <= now - span || part.at > now) {
+             continue;
+@@ -986,6 +1007,9 @@ struct ApplicationThroughput {
+         if (part.layer >= 0) {
+             layer[layer_n++] = part.layer;
+         }
++        if (part.optical_flow >= 0) {
++            optical_flow[optical_flow_n++] = part.optical_flow;
++        }
+     }
+     const auto p90 = [](std::array<std::int64_t, 128>& values, std::size_t n) {
+         if (n == 0) {
+@@ -995,7 +1019,8 @@ struct ApplicationThroughput {
+         const std::size_t rank = (n * 9 + 9) / 10;
+         return values[std::max<std::size_t>(rank, 1) - 1];
+     };
+-    return {p90(app, app_n), p90(layer, layer_n)};
++    return {p90(app, app_n), p90(layer, layer_n),
++            p90(optical_flow, optical_flow_n)};
+ }
+ 
+ struct SessionState {
+@@ -1529,11 +1554,51 @@ struct SessionState {
+     // D3D11 bridge's copies - added up until that thread takes it.
+     ApplicationThroughput throughput;
+     std::atomic<std::int64_t> layer_gpu_ns{0};
++    // DCS VR Control (0006): the time the layer's queue waited for the NVIDIA
++    // optical-flow engine, kept out of layer_gpu_ns and logged on its own.
++    std::atomic<std::int64_t> layer_optical_flow_ns{0};
+     // DCS VR Control (0004): the 3X release delay's slack samples off
+     // SteamVR (LeadReadiness), and the tuner epoch they are tagged with,
+     // advanced whenever the tuner is reset.
+     TripleSlackSink triple_slack_sink;
+     std::atomic<std::uint32_t> triple_release_epoch{0};
++    // DCS VR Control (0006): late submissions and the 3X late-frame skip.
++    //
++    // Each submission is timed from the return of the runtime's xrWaitFrame
++    // for its slot to its call into the runtime's xrEndFrame, less the pace's
++    // own deliberate hold (see xrfg::latency::kLateSubmissionThreshold), and
++    // tallied by kind for submission_timing. Presenter thread only.
++    xrfg::latency::SubmissionTally submission_tally;
++    std::chrono::steady_clock::time_point submission_tally_at{};
++    std::uint32_t skip_slots_second{};
++    std::uint32_t skip_unavailable_second{};
++    std::uint32_t skip_ready_second{};
++    // `[ofxr] late_frame_skip`. Fixed for the session.
++    bool late_frame_skip_enabled{true};
++    // The skip itself (see xrfg::latency::LateFrameSkipController): while it
++    // is on, the application's xrEndFrame makes one synthetic per frame, at
++    // the second synthetic's instant, and the presenter re-presents the
++    // previous real frame in the slot the first synthetic would have taken.
++    // The controller and the fields below are guarded by presenter_mutex;
++    // late_skip_active is what the xrEndFrame thread reads.
++    xrfg::latency::LateFrameSkipController late_skip;
++    std::atomic<bool> late_skip_active{false};
++    // The last submission was a fresh real frame, so this slot is the one a
++    // first synthetic takes in 3X.
++    bool presenter_previous_real{};
++    // The last submission was a slot the skip re-presented: a first synthetic
++    // that turns up now (a frame prepared just before the skip engaged) has
++    // had its slot, and is dropped rather than shown a slot late.
++    bool presenter_skip_slot_consumed{};
++    // The real frame the skip re-presents: the last fresh submission when
++    // that was a real frame made entirely of the layer's own projection
++    // layers (no application swapchain, no other layer kinds), and null
++    // otherwise. Reset wherever presenter_last_frame is, for the same
++    // reasons.
++    std::shared_ptr<GeneratedFrameEndInfo> presenter_skip_repeat;
++    // First synthetics handed over late in 3X, for adaptive control's status
++    // (AdaptiveStats::late_leaders); taken by the xrEndFrame thread.
++    std::atomic<std::uint32_t> adaptive_late_leaders{0};
+     // Declared after everything its thread reports into, so it is destroyed
+     // (and its thread joined) before them.
+     std::unique_ptr<ReadinessProbe> readiness_probe;
+@@ -2001,8 +2066,17 @@ struct FrameGenerationSwapchainState {
+ // that adaptive control adds to the application's. nvidia_gpu_total now
+ // carries the total in its dur_us column as well as in b: it read 0 there,
+ // which made a log look as if synthesis was never timed.
++//
++// DCS VR Control (0006): only the shader work goes into layer_gpu_ns - the
++// pack and the final draw (xrfg::latency::split_synthesis_gpu_time). The two
++// eyes' optical flow runs on the NVIDIA optical-flow engine while the queue
++// waits for it, which costs the application's rendering nothing, and counting
++// that wait made a live DCS flight's synthesis read 7.4 ms for 1.5 ms of
++// shader work - pushing adaptive control towards 3X. The waits go into
++// layer_optical_flow_ns, logged beside it (adaptive_throughput result=3).
+ void log_completed_nvidia_gpu_timings(
+     std::atomic<std::int64_t>* layer_gpu_ns,
++    std::atomic<std::int64_t>* layer_optical_flow_ns,
+     const std::shared_ptr<xrfg::D3D12FrameSynthesizer>& synthesizer) noexcept {
+     if (!synthesizer) {
+         return;
+@@ -2026,9 +2100,17 @@ void log_completed_nvidia_gpu_timings(
+             timing.pack_microseconds,
+             timing.eye0_microseconds,
+             timing.eye1_microseconds);
++        const auto split = xrfg::latency::split_synthesis_gpu_time(
++            timing.pack_microseconds,
++            timing.eye0_microseconds,
++            timing.eye1_microseconds,
++            timing.composition_microseconds,
++            timing.total_microseconds);
+         if (layer_gpu_ns != nullptr) {
+-            layer_gpu_ns->fetch_add(
+-                static_cast<std::int64_t>(timing.total_microseconds) * 1000);
++            layer_gpu_ns->fetch_add(split.shader);
++        }
++        if (layer_optical_flow_ns != nullptr) {
++            layer_optical_flow_ns->fetch_add(split.optical_flow_wait);
+         }
+         xrfg::bridge_flight_logger().timed_event(
+             xrfg::BridgeFlightOperation::nvidia_gpu_total,
+@@ -2094,6 +2176,13 @@ enum class SwapchainEligibilityReason : std::int64_t {
+     // with the deeper pipeline; it fell back to the shallow depth and armed
+     // again. `detail` is the runtime's refusal, `auxiliary` the session.
+     deep_pipeline_fallback = 23,
++    // DCS VR Control (0006): the D3D12 history ring (on a bridged D3D11
++    // session, a full-size copy of each image) is taken when the swapchain
++    // first arms, not at enumeration (24, `detail` the image count), and
++    // given back when the swapchain is declined or the session's budget is
++    // (25). A swapchain no projection layer ever names never holds one.
++    history_created = 24,
++    history_released = 25,
+ };
+ 
+ void log_swapchain_eligibility(
+@@ -2783,6 +2872,93 @@ template <typename Initialize>
+                                            : kSyntheticSlotCountShallow;
+ }
+ 
++// DCS VR Control (0006): the D3D12 path's history ring, taken when the
++// swapchain first arms rather than when its images are enumerated. The ring
++// holds a full-size copy per slot, and enumeration cannot tell a stereo
++// view's swapchain from one no projection layer will ever name: DCS through
++// Quad Views enumerates four quad-view swapchains that are never eligible
++// (awaiting_projection_use for the whole session) and held ~132 MB of
++// history for them. Nothing reads a history before its swapchain arms: the
++// arming frame passes through, and the next frame's release is the first
++// capture either way. Callers hold the swapchain's call_mutex and the
++// session's gpu_mutex. S_FALSE: already there; a failure leaves none.
++[[nodiscard]] HRESULT ensure_swapchain_history(
++    const std::shared_ptr<SwapchainState>& state) noexcept {
++    try {
++        std::vector<ID3D12Resource*> resources;
++        {
++            std::scoped_lock lock(state->mutex);
++            if (state->d3d12_history) {
++                return S_FALSE;
++            }
++            for (const auto& image : state->enumerated_d3d12_images) {
++                resources.push_back(image.Get());
++            }
++        }
++        const auto release_state = required_release_state(*state);
++        const bool protected_content =
++            (state->create_info.createFlags &
++             XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) != 0;
++        if (!release_state ||
++            *release_state != D3D12_RESOURCE_STATE_RENDER_TARGET ||
++            protected_content || resources.empty() ||
++            std::find(resources.begin(), resources.end(), nullptr) !=
++                resources.end() ||
++            state->session->d3d12_device == nullptr ||
++            state->session->d3d12_queue == nullptr) {
++            return E_INVALIDARG;
++        }
++        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        const HRESULT result = history->initialize(
++            state->session->d3d12_device.Get(),
++            state->session->d3d12_queue.Get(),
++            std::span<ID3D12Resource* const>(resources.data(), resources.size()),
++            *release_state);
++        if (FAILED(result)) {
++            return result;
++        }
++        {
++            std::scoped_lock lock(state->mutex);
++            state->d3d12_history = std::move(history);
++            state->last_released_capture.reset();
++            state->last_released_motion_vectors.reset();
++        }
++        log_swapchain_eligibility(
++            state,
++            SwapchainEligibilityReason::history_created,
++            resources.size(),
++            (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
++                state->create_info.arraySize);
++        return S_OK;
++    } catch (...) {
++        return E_FAIL;
++    }
++}
++
++// DCS VR Control (0006): a swapchain that will not generate gives its history
++// back. Callers hold call_mutex and have drained the swapchain's GPU work.
++void release_swapchain_history(
++    const std::shared_ptr<SwapchainState>& state) noexcept {
++    try {
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> retired;
++        {
++            std::scoped_lock lock(state->mutex);
++            if (state->session->graphics_binding != SessionGraphicsBinding::d3d12 ||
++                !state->d3d12_history || state->frame_generation) {
++                return;
++            }
++            retired = std::move(state->d3d12_history);
++            state->last_released_capture.reset();
++            state->last_released_motion_vectors.reset();
++        }
++        static_cast<void>(retired->wait_for_idle());
++        retired.reset();
++        log_swapchain_eligibility(
++            state, SwapchainEligibilityReason::history_released);
++    } catch (...) {
++    }
++}
++
+ [[nodiscard]] std::shared_ptr<FrameGenerationSwapchainState>
+ create_d3d12_frame_generation_swapchains(
+     const std::shared_ptr<SwapchainState>& state,
+@@ -2797,6 +2973,20 @@ create_d3d12_frame_generation_swapchains(
+         *failure_detail = 0;
+     }
+     try {
++        // DCS VR Control (0006): taken now, on first use; see
++        // ensure_swapchain_history.
++        if (const HRESULT history_result = ensure_swapchain_history(state);
++            FAILED(history_result) && history_result != E_INVALIDARG) {
++            if (failure_reason != nullptr) {
++                *failure_reason =
++                    SwapchainEligibilityReason::history_initialize_failed;
++            }
++            if (failure_detail != nullptr) {
++                *failure_detail = static_cast<std::uint64_t>(
++                    static_cast<std::uint32_t>(history_result));
++            }
++            return nullptr;
++        }
+         const auto& dispatch = state->session->dispatch;
+         const bool is_color =
+             (state->create_info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+@@ -3183,6 +3373,7 @@ void release_session_generation_budget(
+             // The retained repeat names private swapchains of its own.
+             std::scoped_lock lock(session->presenter_mutex);
+             session->presenter_last_frame.reset();
++            session->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+         }
+         for (const auto& swapchain : find_swapchains(session)) {
+             std::scoped_lock call_lock(swapchain->call_mutex);
+@@ -3190,6 +3381,7 @@ void release_session_generation_budget(
+             swapchain->generation_declined = true;
+             drain_swapchain_gpu(swapchain);
+             destroy_frame_generation_swapchains(swapchain);
++            release_swapchain_history(swapchain); // DCS VR Control (0006)
+         }
+     } catch (...) {
+     }
+@@ -3548,6 +3740,8 @@ create_vulkan_frame_generation_swapchains(
+         if (!candidate) {
+             state->generation_declined = true;
+             log_swapchain_eligibility(state, reason, detail, auxiliary);
++            // DCS VR Control (0006): nothing will capture into it now.
++            release_swapchain_history(state);
+             return !budget_refusal(reason);
+         }
+         {
+@@ -4564,6 +4758,9 @@ XrResult layer_create_session_impl(
+     state->display_time_correction_enabled =
+         xrfg::implicit_layer::read_display_time_correction(
+             current_layer_directory());
++    // DCS VR Control (0006).
++    state->late_frame_skip_enabled =
++        xrfg::implicit_layer::read_late_frame_skip(current_layer_directory());
+     state->adaptive_ini_triple = triple_requested;
+     state->vulkan_support =
+         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
+@@ -5667,6 +5864,7 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
+         {
+             std::scoped_lock presenter_lock(state->session->presenter_mutex);
+             state->session->presenter_last_frame.reset();
++            state->session->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+         }
+         state->session->generation_steady_state_established = false;
+         xrfg::bridge_flight_logger().event(
+@@ -6017,9 +6215,11 @@ XrResult layer_enumerate_swapchain_images_impl(
+         }
+         std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+         bool resources_changed = false;
++        bool first_enumeration = false;
+         {
+             std::scoped_lock lock(state->mutex);
+             history = state->d3d12_history;
++            first_enumeration = state->enumerated_d3d12_images.empty();
+             resources_changed = !state->enumerated_d3d12_images.empty() &&
+                 (state->enumerated_d3d12_images.size() != resources.size() ||
+                  !std::equal(
+@@ -6038,28 +6238,19 @@ XrResult layer_enumerate_swapchain_images_impl(
+                 GenerationQuarantineReason::d3d12_images_changed,
+                 handle_value(state->handle));
+         }
+-        const bool reused_history =
+-            !resources_changed && history && history->initialized();
++        // DCS VR Control (0006): no history is made here any more - it is
++        // taken when the swapchain first arms (ensure_swapchain_history), so
++        // a swapchain no projection layer names never holds one. The same
++        // images enumerated again keep whatever the swapchain has, armed or
++        // not, and an earlier refusal with them.
++        const bool reused_history = !first_enumeration && !resources_changed &&
++            (!history || history->initialized());
+         if (!reused_history) {
+             history.reset();
+         }
+         const auto release_state = required_release_state(*state);
+         const bool protected_content =
+             (state->create_info.createFlags & XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) != 0;
+-        HRESULT history_result = S_OK;
+-        bool history_attempted = false;
+-        if (!history && release_state && !protected_content) {
+-            history_attempted = true;
+-            auto candidate = std::make_shared<xrfg::D3D12SwapchainHistory>();
+-            history_result = candidate->initialize(
+-                state->session->d3d12_device.Get(),
+-                state->session->d3d12_queue.Get(),
+-                std::span<ID3D12Resource* const>(resources.data(), resources.size()),
+-                *release_state);
+-            if (SUCCEEDED(history_result)) {
+-                history = std::move(candidate);
+-            }
+-        }
+         if (!reused_history) {
+             drain_swapchain_gpu(state);
+             destroy_frame_generation_swapchains(state);
+@@ -6093,11 +6284,6 @@ XrResult layer_enumerate_swapchain_images_impl(
+         } else if (protected_content) {
+             eligibility_reason = SwapchainEligibilityReason::protected_content;
+             eligibility_detail = state->create_info.createFlags;
+-        } else if (!history) {
+-            eligibility_reason = SwapchainEligibilityReason::history_initialize_failed;
+-            eligibility_detail = history_attempted
+-                ? static_cast<std::uint64_t>(history_result)
+-                : 0;
+         } else if (*release_state == D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+             eligibility_reason = SwapchainEligibilityReason::depth_only;
+             eligibility_detail = state->create_info.usageFlags;
+@@ -6118,7 +6304,8 @@ XrResult layer_enumerate_swapchain_images_impl(
+         const bool static_image =
+             (state->create_info.createFlags &
+              XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
+-        if (history && release_state == D3D12_RESOURCE_STATE_RENDER_TARGET &&
++        if (release_state == D3D12_RESOURCE_STATE_RENDER_TARGET &&
++            !protected_content &&
+             !has_generation && !state->generation_declined &&
+             !state->session->generation_budget_exhausted.load(
+                 std::memory_order_acquire)) {
+@@ -6427,6 +6614,10 @@ struct GeneratedFrameEndInfo {
+     // The first of an application frame's submissions, when that is a
+     // synthetic: the one the 3X release delay is judged on.
+     bool leads_frame{};
++    // DCS VR Control (0006): made while the 3X late-frame skip was on - the
++    // frame's only synthetic, at the second synthetic's instant, whose slot
++    // is the one after the re-presented first. See late_skip.
++    bool skip_led{};
+     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+     std::vector<ProjectionLayerCopy> projections;
+     std::vector<OwnedCompositionLayer> composition_layers;
+@@ -6897,6 +7088,91 @@ void report_triple_slot_missed(SessionState& state) noexcept {
+         synthetic_output_ready(*front->owned_frame);
+ }
+ 
++// DCS VR Control (0006): whether the late-frame skip may re-present this
++// frame in a later slot: a real frame (not a synthetic) whose every layer is
++// one of the layer's own projection layers - views on private swapchains,
++// chains stripped (make_presenter_owned_frame) - so nothing in it is an
++// application swapchain the application could be writing by then, or a layer
++// kind whose handles the presenter does not own. The space it names is the
++// application's, as on every repeat; destroying one settles the presenter and
++// drops this frame first (PresenterResourceLifetimeGuard).
++[[nodiscard]] bool skip_repeat_safe(const GeneratedFrameEndInfo& frame) noexcept {
++    return !frame.synthetic && frame.composition_layers.empty() &&
++        !frame.projections.empty() &&
++        frame.info.layerCount == frame.projections.size();
++}
++
++// DCS VR Control (0006): this slot - the one after a real frame, in 3X off
++// SteamVR - is re-presented by the late-frame skip: there is a frame to
++// re-present, and either the frame waiting is one made under the skip or
++// nothing is waiting and the skip is on. A first synthetic made before the
++// skip engaged keeps its slot. presenter_mutex held.
++[[nodiscard]] bool late_skip_slot_due_locked(const SessionState& state) noexcept {
++    if (!state.presenter_previous_real || !state.presenter_skip_repeat ||
++        state.frames_per_application_frame <= 2 ||
++        state.dispatch->steamvr_runtime) {
++        return false;
++    }
++    if (state.presenter_submissions.empty()) {
++        return state.late_skip_active.load();
++    }
++    const auto& front = state.presenter_submissions.front();
++    return front->owned_frame && front->owned_frame->synthetic &&
++        front->owned_frame->skip_led;
++}
++
++// DCS VR Control (0006): once a second on the presenter thread, the
++// submission_timing records (see bridge_flight_logger.hpp): result=1 the
++// submissions and the late ones by kind, result=2 in 3X off SteamVR the
++// late-frame skip. Not under presenter_mutex.
++void log_submission_timing(
++    SessionState& state,
++    std::chrono::steady_clock::time_point now,
++    bool skip_controlled) noexcept {
++    if (now < state.submission_tally_at) {
++        return;
++    }
++    const bool first = state.submission_tally_at ==
++        std::chrono::steady_clock::time_point{};
++    state.submission_tally_at = now + std::chrono::seconds(1);
++    if (!first) {
++        const auto& tally = state.submission_tally;
++        const auto pack = [](const std::array<std::uint32_t, 4>& counts) {
++            std::uint64_t packed = 0;
++            for (std::size_t index = 0; index < counts.size(); ++index) {
++                packed |= std::min<std::uint64_t>(counts[index], 0xFFFFU)
++                    << (16 * index);
++            }
++            return packed;
++        };
++        const auto us = [](xrfg::latency::Nanoseconds value) {
++            return std::min<std::uint64_t>(
++                static_cast<std::uint64_t>(std::max<std::int64_t>(0, value / 1000)),
++                0xFFFFFFFFULL);
++        };
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::submission_timing,
++            1,
++            pack(tally.frames),
++            pack(tally.late),
++            us(tally.worst_gen1) | (us(tally.worst) << 32));
++        if (skip_controlled && state.frames_per_application_frame > 2) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::submission_timing,
++                2,
++                state.late_skip_active.load() ? 1U : 0U,
++                std::min<std::uint64_t>(state.skip_slots_second, 0xFFFFU) |
++                    (std::min<std::uint64_t>(state.skip_unavailable_second, 0xFFFFU)
++                     << 16),
++                state.skip_ready_second);
++        }
++    }
++    state.submission_tally.reset();
++    state.skip_slots_second = 0;
++    state.skip_unavailable_second = 0;
++    state.skip_ready_second = 0;
++}
++
+ // One observation for the 3X release delay, and the step when a window of
+ // them closes; see xrfg::latency::TripleReleaseTuner. presenter_mutex held;
+ // the report is for the caller to record once it has let go.
+@@ -7388,6 +7664,11 @@ void continuous_presenter_main(
+             state->presenter_condition.notify_all();
+             break;
+         }
++        // DCS VR Control (0006): this slot's submission is timed from here;
++        // see submission_tally. An adopted frame was waited by the
++        // application, at a time this thread does not know.
++        const auto wait_returned = std::chrono::steady_clock::now();
++        const bool slot_timed = !adopted_frame_state.has_value();
+ 
+         {
+             std::scoped_lock lock(state->presenter_mutex);
+@@ -7491,13 +7772,17 @@ void continuous_presenter_main(
+         // This prevents an unsupported first application layer list from being
+         // alternated with empty presenter frames while still allowing the
+         // virtualized application to advance and enqueue that list.
++        //
++        // DCS VR Control (0006): nor a slot the late-frame skip re-presents,
++        // which is not to wait for the application at all.
+         {
+             std::unique_lock lock(state->presenter_mutex);
+             state->presenter_condition.wait(lock, [&] {
+                 return state->presenter_stop_requested ||
+                        XR_FAILED(state->presenter_failure) ||
+                        state->presenter_last_frame != nullptr ||
+-                       !state->presenter_submissions.empty();
++                       !state->presenter_submissions.empty() ||
++                       late_skip_slot_due_locked(*state);
+             });
+         }
+ 
+@@ -7532,7 +7817,12 @@ void continuous_presenter_main(
+         // frame open across the pace is what every ordinary application does
+         // - begin, render, end - and lets the queue timestamps span the work
+         // actually being done.
++        //
++        // DCS VR Control (0006): the pace's hold is deliberate, so it is not
++        // counted against the submission's timing.
++        const auto pace_started = std::chrono::steady_clock::now();
+         pace_presenter_submission(state);
++        const auto pace_hold = std::chrono::steady_clock::now() - pace_started;
+ 
+         std::shared_ptr<PresenterSubmission> request;
+         std::shared_ptr<GeneratedFrameEndInfo> repeated_frame;
+@@ -7541,6 +7831,12 @@ void continuous_presenter_main(
+         // Which half of the pair the presenter submitted, kept at this scope so
+         // the flight record below can carry it.
+         bool fresh_synthetic = false;
++        // DCS VR Control (0006): whether this slot is the one a first
++        // synthetic takes in 3X, whether the late-frame skip re-presented it,
++        // and, if so, whether the first synthetic would have been ready.
++        bool gen1_slot = false;
++        bool skip_slot = false;
++        bool skip_would_be_ready = false;
+         // Same, for the vsync lock. Recorded after presenter_mutex is released:
+         // the presenter thread takes it every frame and logging under it has
+         // deadlocked the layer twice.
+@@ -7609,6 +7905,12 @@ void continuous_presenter_main(
+             std::uint32_t missed_slots = 0;
+             xrfg::latency::DisplayTimeStep display_time_step{};
+             std::size_t display_time_mode = 0;
++            // DCS VR Control (0006): how long after its slot's wait this goes
++            // out, less the pace's own hold; and the late-frame skip's part in
++            // this slot, all decided under the lock and acted on after it.
++            const auto wait_to_pop = std::chrono::duration_cast<
++                std::chrono::nanoseconds>(pop_now - wait_returned - pace_hold);
++            std::shared_ptr<PresenterSubmission> dropped_leader;
+             {
+                 std::scoped_lock lock(state->presenter_mutex);
+                 // The boundary the application's release is steered against;
+@@ -7620,7 +7922,44 @@ void continuous_presenter_main(
+                     state->frames_per_application_frame > 2 &&
+                     !state->dispatch->steamvr_runtime;
+                 state->triple_leader_due = false;
++                // DCS VR Control (0006): the slot after a real frame, in 3X,
++                // is the one a first synthetic takes.
++                gen1_slot = state->presenter_previous_real &&
++                    state->frames_per_application_frame > 2;
++                // A first synthetic whose slot the late-frame skip has
++                // already re-presented - its frame was prepared just before
++                // the skip engaged - is dropped rather than shown a slot late,
++                // which would put every later frame a slot behind. Its images
++                // are released and its deferred copy queued below.
++                if (state->presenter_skip_slot_consumed &&
++                    !state->presenter_stop_requested &&
++                    !state->presenter_submissions.empty()) {
++                    const auto& front = state->presenter_submissions.front();
++                    if (front->owned_frame && front->owned_frame->synthetic &&
++                        front->owned_frame->leads_frame &&
++                        !front->owned_frame->skip_led) {
++                        dropped_leader = front;
++                        state->presenter_submissions.pop_front();
++                    }
++                }
++                state->presenter_skip_slot_consumed = false;
+                 if (!state->presenter_stop_requested &&
++                    late_skip_slot_due_locked(*state)) {
++                    // DCS VR Control (0006): re-presented on time. Nothing
++                    // is popped: the frame's synthetic, if it is here
++                    // already, takes the next slot - its own.
++                    skip_slot = true;
++                    repeated_frame = state->presenter_skip_repeat;
++                    if (!state->presenter_submissions.empty()) {
++                        const auto& front = state->presenter_submissions.front();
++                        // Made at the same point in the GPU's work as the
++                        // first synthetic would have been: written now, the
++                        // first would have made this slot.
++                        skip_would_be_ready = front->owned_frame &&
++                            front->owned_frame->skip_led &&
++                            synthetic_output_ready(*front->owned_frame);
++                    }
++                } else if (!state->presenter_stop_requested &&
+                     !state->presenter_submissions.empty()) {
+                     const auto& front = state->presenter_submissions.front();
+                     const auto age = pop_now - front->queued_at;
+@@ -7698,6 +8037,13 @@ void continuous_presenter_main(
+                                 const auto& lead =
+                                     request->owned_frame->lead_readiness;
+                                 if (judge_leader && lead) {
++                                    // DCS VR Control (0006): handed over
++                                    // late is late however early it was
++                                    // written.
++                                    lead->wait_to_handed_ns = slot_timed
++                                        ? std::max<std::int64_t>(
++                                              0, wait_to_pop.count())
++                                        : 0;
+                                     lead->handed_ns =
+                                         steady_nanoseconds(pop_now);
+                                     report_lead_slack(
+@@ -7754,6 +8100,13 @@ void continuous_presenter_main(
+                         report_triple_slot_missed(*state);
+                     }
+                 }
++                // DCS VR Control (0006): the skip is on and this was its
++                // slot, but there was no frame it could safely re-present.
++                if (gen1_slot && !skip_slot &&
++                    state->late_skip_active.load() &&
++                    state->presenter_skip_repeat == nullptr) {
++                    ++state->skip_unavailable_second;
++                }
+                 // DCS VR Control (0004): whatever slack has been reported,
+                 // judged now. Off SteamVR, 3X only.
+                 if (state->frames_per_application_frame > 2 &&
+@@ -7793,6 +8146,40 @@ void continuous_presenter_main(
+                         state->presenter_display_period / 1000),
+                     held_sequence);
+             }
++            // DCS VR Control (0006): a dropped first synthetic still owns its
++            // private images and, where the copy is deferred, its real frame's
++            // current copy: release the one and queue the other now, ahead of
++            // that real frame, as its hand-over would have. Then it is done.
++            if (dropped_leader) {
++                run_private_releases(
++                    state.get(), dropped_leader->owned_frame->pending_releases);
++                for (const auto& pending :
++                     dropped_leader->owned_frame->pending_current_copies) {
++                    if (pending.synthesizer) {
++                        static_cast<void>(
++                            pending.synthesizer->flush_current_copy(
++                                state->d3d12_synthesis_queue
++                                    ? runtime_queue(*state)
++                                    : nullptr,
++                                pending.fence_value));
++                    }
++                }
++                {
++                    std::scoped_lock lock(state->presenter_mutex);
++                    dropped_leader->result = XR_SUCCESS;
++                    dropped_leader->completed = true;
++                    if (state->outstanding_presenter_submissions != 0) {
++                        --state->outstanding_presenter_submissions;
++                    }
++                }
++                state->presenter_condition.notify_all();
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::submission_timing,
++                    4,
++                    dropped_leader->sequence,
++                    0,
++                    0);
++            }
+             // A fresh frame whose images were left acquired: join the
+             // application's queue to synthesis and hand them to the runtime
+             // now, immediately before the frame that names them goes down.
+@@ -8750,6 +9137,27 @@ void continuous_presenter_main(
+                          << 56));
+             }
+         }
++        // DCS VR Control (0006): what this submission was, and how long after
++        // its slot's wait it reached the runtime, less the pace's own hold.
++        using xrfg::latency::SubmissionKind;
++        const SubmissionKind submission_kind = !request
++            ? SubmissionKind::repeat
++            : !request->owned_frame || !request->owned_frame->synthetic
++                ? SubmissionKind::real
++                : request->owned_frame->leads_frame &&
++                        !request->owned_frame->skip_led
++                    ? SubmissionKind::gen1
++                    : SubmissionKind::gen2;
++        const std::int64_t wait_to_submit = std::max<std::int64_t>(
++            0,
++            std::chrono::duration_cast<std::chrono::nanoseconds>(
++                downstream_end_started - wait_returned - pace_hold)
++                .count());
++        const bool submitted_late = slot_timed &&
++            xrfg::latency::submission_late(wait_to_submit);
++        xrfg::latency::LateSkipStep skip_step{};
++        const bool skip_controlled = state->late_frame_skip_enabled &&
++            !state->dispatch->steamvr_runtime;
+         {
+             std::scoped_lock lock(state->presenter_mutex);
+             if (request) {
+@@ -8769,12 +9177,79 @@ void continuous_presenter_main(
+                     // the last submitted image until the next owned pair.
+                     state->presenter_last_frame.reset();
+                 }
++                // DCS VR Control (0006): what the late-frame skip may
++                // re-present is always the last fresh submission, and only a
++                // real frame made of the layer's own projection layers - so
++                // it never shows anything older than what the runtime last
++                // had, nor any handle of the application's.
++                state->presenter_previous_real =
++                    submission_kind == SubmissionKind::real &&
++                    XR_SUCCEEDED(end_result);
++                state->presenter_skip_repeat =
++                    state->presenter_previous_real && request->owned_frame &&
++                        skip_repeat_safe(*request->owned_frame)
++                    ? request->owned_frame
++                    : nullptr;
++            } else {
++                state->presenter_previous_real = false;
++                state->presenter_skip_slot_consumed = skip_slot;
++            }
++            // The skip's evidence: one observation per first synthetic's
++            // slot, 3X off SteamVR only.
++            if (skip_controlled && slot_timed && gen1_slot &&
++                state->frames_per_application_frame > 2) {
++                const auto now_ns = steady_nanoseconds(downstream_end_started);
++                if (skip_slot) {
++                    skip_step = state->late_skip.observe_skipped(
++                        now_ns, skip_would_be_ready);
++                } else if (submission_kind == SubmissionKind::gen1) {
++                    skip_step = state->late_skip.observe_leader(
++                        now_ns, submitted_late);
++                } else if (submission_kind == SubmissionKind::repeat) {
++                    // The slot came with nothing queued: its first synthetic
++                    // missed it entirely.
++                    skip_step = state->late_skip.observe_leader(now_ns, true);
++                }
++                if (skip_step.transition !=
++                    xrfg::latency::LateSkipTransition::none) {
++                    state->late_skip_active = state->late_skip.active();
++                }
+             }
+             if (XR_FAILED(end_result)) {
+                 fail_pending_presenter_submissions_locked(*state, end_result);
+             }
+         }
+         state->presenter_condition.notify_all();
++        // Recorded and passed on outside presenter_mutex.
++        if (slot_timed) {
++            state->submission_tally.add(submission_kind, wait_to_submit);
++            if (skip_slot) {
++                ++state->skip_slots_second;
++                state->skip_ready_second += skip_would_be_ready ? 1U : 0U;
++            }
++            // A wait past the stall bound is a pause or a loading screen, not
++            // a rate (see AdaptiveConfig::stall).
++            if (submitted_late && state->adaptive_active.load() &&
++                wait_to_submit <= xrfg::latency::AdaptiveConfig{}.stall) {
++                if (state->frames_per_application_frame == 2 && request) {
++                    // 2X: a slot that went out late is a slot missed.
++                    state->adaptive_missed_slots.fetch_add(1);
++                } else if (submission_kind == SubmissionKind::gen1) {
++                    state->adaptive_late_leaders.fetch_add(1);
++                }
++            }
++        }
++        if (skip_step.transition != xrfg::latency::LateSkipTransition::none) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::submission_timing,
++                3,
++                static_cast<std::uint64_t>(skip_step.transition),
++                std::min<std::uint64_t>(skip_step.window_late, 0xFFFFU) |
++                    (std::min<std::uint64_t>(skip_step.window_ready, 0xFFFFU)
++                     << 16),
++                static_cast<std::uint64_t>(skip_step.dwell / 1'000'000));
++        }
++        log_submission_timing(*state, downstream_end_started, skip_controlled);
+         if (XR_FAILED(end_result)) {
+             break;
+         }
+@@ -8810,6 +9285,7 @@ void continuous_presenter_main(
+         }
+         state->presenter_submissions.clear();
+         state->presenter_last_frame.reset();
++        state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+         state->presenter_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
+         if (!preserve_virtual_timeline) {
+             state->last_virtual_display_time = 0;
+@@ -8840,6 +9316,11 @@ void continuous_presenter_main(
+         state->presenter_last_predicted_valid = false;
+         state->presenter_schedule_valid = false;
+         state->presenter_display_period = 0;
++        // DCS VR Control (0006): the late-frame skip starts over off.
++        state->presenter_previous_real = false;
++        state->presenter_skip_slot_consumed = false;
++        state->late_skip.reset();
++        state->late_skip_active = false;
+         state->presenter_stop_requested = false;
+         state->presenter_active = true;
+         state->presenter_thread = std::thread(continuous_presenter_main, state);
+@@ -8882,6 +9363,9 @@ void stop_continuous_presenter(
+             state->presenter_active = false;
+             state->presenter_frame_state_valid = false;
+             state->presenter_last_frame.reset();
++            state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
++            state->late_skip.reset();
++            state->late_skip_active = false;
+         }
+         state->presenter_condition.notify_all();
+     } catch (...) {
+@@ -9162,6 +9646,7 @@ PresenterResourceLifetimeGuard::PresenterResourceLifetimeGuard(
+         content_lock = std::unique_lock<std::mutex>(state->presenter_content_mutex);
+         std::scoped_lock lock(state->presenter_mutex);
+         state->presenter_last_frame.reset();
++        state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+     }
+ }
+ 
+@@ -10143,7 +10628,9 @@ struct PreparedProjectionFrame {
+         {
+             std::scoped_lock gpu_lock(state->session->gpu_mutex);
+             log_completed_nvidia_gpu_timings(
+-                &state->session->layer_gpu_ns, generation->synthesizer);
++                &state->session->layer_gpu_ns,
++                &state->session->layer_optical_flow_ns,
++                generation->synthesizer);
+             if (generation->interop) {
+                 submit_result =
+                     generation->interop->prepare_synthesis();
+@@ -10562,6 +11049,7 @@ void schedule_generation_quarantine(
+         {
+             std::scoped_lock lock(state->presenter_mutex);
+             state->presenter_last_frame.reset();
++            state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+         }
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::continuity_reset,
+@@ -10919,6 +11407,7 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+     {
+         std::scoped_lock lock(state->presenter_mutex);
+         state->presenter_last_frame.reset();
++        state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+     }
+     auto swapchains = find_swapchains(state);
+     std::vector<std::unique_lock<std::mutex>> capture_locks;
+@@ -11307,6 +11796,126 @@ void note_bridged_submissions(
+     }
+ }
+ 
++// DCS VR Control (0006): while generation rewrites a bridged swapchain's
++// frames onto the layer's private swapchains, its releases do not copy into
++// the runtime's images (D3D11BridgeSwapchain::set_defer_copies). Before any
++// submission that may name such a swapchain directly goes downstream - a
++// frame passed through for whatever reason, or a generated frame whose other
++// layers name it - the image it released last is copied here, on the
++// session's queue, and the release mark is moved past that copy, as 0002's
++// catch-up does for a skipped swapchain. `frame` null: every bridged
++// swapchain, named or not. `stop_deferring`: and their releases copy again
++// from now on. The decision to defer is only ever made after a frame has
++// gone to the runtime rewritten (update_bridged_copy_deferral), so a release
++// that turns out to belong to a pass-through frame is always caught up here
++// before that frame goes down.
++void catch_up_bridged_copies(
++    const std::shared_ptr<SessionState>& state,
++    const XrFrameEndInfo* frame,
++    bool stop_deferring) noexcept {
++    try {
++        if (!state->d3d11_bridge) {
++            return;
++        }
++        std::vector<XrSwapchain> named;
++        const bool every = frame == nullptr ||
++            !collect_named_swapchains(frame, &named);
++        bool copied = false;
++        for (const auto& swapchain_state : find_swapchains(state)) {
++            std::shared_ptr<xrfg::D3D11BridgeSwapchain> bridge;
++            {
++                std::scoped_lock lock(swapchain_state->mutex);
++                bridge = swapchain_state->bridge;
++            }
++            if (!bridge) {
++                continue;
++            }
++            if (stop_deferring && bridge->defers_copies()) {
++                bridge->set_defer_copies(false);
++                // See update_bridged_copy_deferral.
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::d3d11_bridge,
++                    7,
++                    handle_value(swapchain_state->handle),
++                    0,
++                    0);
++            }
++            if (!every &&
++                std::find(named.begin(), named.end(), swapchain_state->handle) ==
++                    named.end()) {
++                continue;
++            }
++            const HRESULT result = bridge->catch_up();
++            if (result == S_FALSE) {
++                copied = true;
++            } else if (FAILED(result)) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::d3d11_bridge,
++                    4,
++                    handle_value(swapchain_state->handle),
++                    1,
++                    static_cast<std::uint64_t>(static_cast<std::uint32_t>(result)));
++            }
++        }
++        if (copied) {
++            mark_application_release(state.get());
++            std::scoped_lock join_lock(state->binding_join_mutex);
++            state->app_end_frame_release_value = state->app_release_counter;
++        }
++    } catch (...) {
++    }
++}
++
++// DCS VR Control (0006): after a frame has gone to the runtime, the bridged
++// swapchains its releases need not copy for. When the frame went down
++// rewritten onto the private swapchains (`output`, what the runtime was
++// given), that is every bridged swapchain nothing in it names directly: the
++// projection views it was generated from, and the depth the generated frames
++// do not carry. When it went down as the application's own (`output` null),
++// none. Logged (d3d11_bridge result=7) when a swapchain changes.
++void update_bridged_copy_deferral(
++    const std::shared_ptr<SessionState>& state,
++    const XrFrameEndInfo* output) noexcept {
++    try {
++        if (!state->d3d11_bridge) {
++            return;
++        }
++        std::vector<XrSwapchain> named;
++        const bool output_known = output != nullptr &&
++            collect_named_swapchains(output, &named);
++        for (const auto& swapchain_state : find_swapchains(state)) {
++            std::shared_ptr<xrfg::D3D11BridgeSwapchain> bridge;
++            {
++                std::scoped_lock lock(swapchain_state->mutex);
++                bridge = swapchain_state->bridge;
++            }
++            if (!bridge) {
++                continue;
++            }
++            // Nothing reaches the runtime's images of a private depth
++            // swapchain in any case.
++            if (bridge->path() == xrfg::D3D11BridgePath::depth_private) {
++                continue;
++            }
++            const XrSwapchain handle = swapchain_state->handle;
++            const bool defer = output_known &&
++                std::find(named.begin(), named.end(), handle) == named.end();
++            if (defer != bridge->defers_copies()) {
++                bridge->set_defer_copies(defer);
++                // 7: the swapchain's release copies are deferred (c = 1)
++                // or made at release again (c = 0).
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::d3d11_bridge,
++                    7,
++                    handle_value(handle),
++                    0,
++                    defer ? 1U : 0U);
++            }
++        }
++    } catch (...) {
++    }
++}
++
+ // Follows the tray's "3X Frame Gen" switch while the session runs. Called at
+ // the top of the application's xrEndFrame, under frame_call_mutex, before
+ // this frame is prepared.
+@@ -11367,6 +11976,7 @@ void apply_live_frame_multiplier(
+                         state->adaptive_controller.start(current, now_ns);
+                     }
+                     state->adaptive_missed_slots = 0;
++                    state->adaptive_late_leaders = 0;
+                     if (!state->readiness_probe) {
+                         state->readiness_probe = std::make_unique<ReadinessProbe>(
+                             state->adaptive_mutex, state->adaptive_controller,
+@@ -11402,6 +12012,9 @@ void apply_live_frame_multiplier(
+             if (missed != 0) {
+                 state->adaptive_controller.add_late(now_ns, missed);
+             }
++            // DCS VR Control (0006): shown, not judged.
++            state->adaptive_controller.add_late_leaders(
++                now_ns, state->adaptive_late_leaders.exchange(0));
+             const auto decision = state->adaptive_controller.evaluate(
+                 now_ns, static_cast<xrfg::latency::Nanoseconds>(period));
+             if (decision.target != 0 && decision.target != current) {
+@@ -11432,14 +12045,16 @@ void apply_live_frame_multiplier(
+                 static_cast<std::int64_t>(current) + (adaptive ? 10 : 0),
+                 stats.p90 > 0 ? static_cast<std::uint64_t>(stats.p90 / 1000) : 0U,
+                 std::min<std::uint64_t>(stats.samples, 0xFFFFU) |
+-                    (std::min<std::uint64_t>(stats.late, 0xFFFFU) << 16),
++                    (std::min<std::uint64_t>(stats.late, 0xFFFFU) << 16) |
++                    // DCS VR Control (0006): late first synthetics (3X).
++                    (std::min<std::uint64_t>(stats.late_leaders, 0xFFFFU) << 32),
+                 static_cast<std::uint64_t>(correction / 1000));
+             // DCS VR Control (0004): what the judged value is made of.
+             if (adaptive) {
+                 const auto us = [](std::int64_t ns) {
+                     return ns > 0 ? static_cast<std::uint64_t>(ns / 1000) : 0U;
+                 };
+-                const auto [app_p90, layer_p90] = throughput_part_p90s(
++                const auto parts = throughput_part_p90s(
+                     state->throughput, now_ns, xrfg::latency::kSecond);
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::adaptive_throughput,
+@@ -11451,9 +12066,18 @@ void apply_live_frame_multiplier(
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::adaptive_throughput,
+                     2,
+-                    us(app_p90),
+-                    us(layer_p90),
++                    us(parts.app),
++                    us(parts.layer),
+                     us(stats.latency_p90));
++                // DCS VR Control (0006): the optical-flow engine waits per
++                // application frame, which result=2's layer figure leaves out,
++                // and the late first synthetics of the second.
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_throughput,
++                    3,
++                    us(parts.optical_flow),
++                    stats.late_leaders,
++                    0);
+             }
+         }
+         if (target == 0 || target == current) {
+@@ -11494,6 +12118,12 @@ void apply_live_frame_multiplier(
+             ++state->triple_release_epoch;
+             state->triple_release_probe_due = false;
+             state->triple_leader_due = false;
++            // DCS VR Control (0006): the late-frame skip belongs to 3X and
++            // to the evidence it was found on; the queue is empty here.
++            state->late_skip.reset();
++            state->late_skip_active = false;
++            state->presenter_previous_real = false;
++            state->presenter_skip_slot_consumed = false;
+             // The display time correction too, scaled to the new period or
+             // taken from what was learned in this shape before.
+             const auto display_period = static_cast<xrfg::latency::Nanoseconds>(
+@@ -11520,6 +12150,7 @@ void apply_live_frame_multiplier(
+                 state->adaptive_controller.switched(target, now_ns);
+             }
+             state->adaptive_missed_slots = 0;
++            state->adaptive_late_leaders = 0;
+         }
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::presenter_transition,
+@@ -11620,15 +12251,21 @@ void sample_application_throughput(
+         }
+     }
+     throughput.layer_ring[throughput.layer_next] = state.layer_gpu_ns.exchange(0);
++    throughput.optical_flow_ring[throughput.layer_next] =
++        state.layer_optical_flow_ns.exchange(0);
+     throughput.layer_next = (throughput.layer_next + 1) % throughput.layer_ring.size();
+     throughput.layer_filled =
+         std::min(throughput.layer_filled + 1, throughput.layer_ring.size());
+     std::int64_t layer_sum = 0;
++    std::int64_t optical_flow_sum = 0;
+     for (std::size_t index = 0; index < throughput.layer_filled; ++index) {
+         layer_sum += throughput.layer_ring[index];
++        optical_flow_sum += throughput.optical_flow_ring[index];
+     }
+     const std::int64_t layer_per_frame =
+         layer_sum / static_cast<std::int64_t>(throughput.layer_filled);
++    const std::int64_t optical_flow_per_frame =
++        optical_flow_sum / static_cast<std::int64_t>(throughput.layer_filled);
+     if (throughput.last_entry != std::chrono::steady_clock::time_point{}) {
+         const std::int64_t interval = std::chrono::duration_cast<
+             std::chrono::nanoseconds>(entered - throughput.last_entry).count();
+@@ -11648,6 +12285,7 @@ void sample_application_throughput(
+         part.at = at;
+         part.app = gpu_app;
+         part.layer = layer_per_frame;
++        part.optical_flow = optical_flow_per_frame;
+         throughput.parts_next = (throughput.parts_next + 1) % throughput.parts.size();
+     }
+     throughput.last_entry = entered;
+@@ -11776,6 +12414,7 @@ XrResult layer_end_frame_impl(
+         {
+             std::scoped_lock presenter_lock(state->presenter_mutex);
+             state->presenter_last_frame.reset();
++            state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+         }
+         state->manual_stop_applied = true;
+         if (state->fps_overlay) state->fps_overlay->suspend();
+@@ -11837,6 +12476,10 @@ XrResult layer_end_frame_impl(
+             if (XR_FAILED(exclusive_result)) {
+                 return exclusive_result;
+             }
++            // DCS VR Control (0006): the application's own composition goes
++            // down: whatever a release left uncopied while generation ran is
++            // copied first, and releases copy again until it runs again.
++            catch_up_bridged_copies(state, nullptr, true);
+             xrfg::bridge_flight_logger().event(
+                 xrfg::BridgeFlightOperation::generation_prepare,
+                 static_cast<std::int64_t>(reason),
+@@ -12088,16 +12731,33 @@ XrResult layer_end_frame_impl(
+     // constant offset nobody would see. Alternating early and late is what
+     // reads as judder.
+     const std::uint32_t frames_per_frame = state->frames_per_application_frame;
++    // DCS VR Control (0006): while the 3X late-frame skip is on, the frame's
++    // first synthetic is not made - its slot re-presents the previous real
++    // frame - and its one synthetic is the second, at the second's instant.
++    // Only for a frame the presenter could re-present in turn: projection
++    // layers alone (see skip_repeat_safe). The presenter tells such a frame
++    // by skip_led and gives its synthetic the second synthetic's slot.
++    const bool skip_led_frame = use_continuous_presenter &&
++        frames_per_frame > 2 && metadata_pairable &&
++        state->late_skip_active.load() && end_info != nullptr &&
++        end_info->layerCount != 0 && end_info->layers != nullptr &&
++        std::all_of(
++            end_info->layers,
++            end_info->layers + end_info->layerCount,
++            [](const XrCompositionLayerBaseHeader* layer) {
++                return layer != nullptr &&
++                    layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION;
++            });
+     const float interpolation_fraction = synthetic_interpolation_fraction(
+         state,
+         previous_snapshot,
+         current_snapshot,
+         frames_per_frame,
+-        0);
++        skip_led_frame ? 1 : 0);
+     // 3X: the second synthetic, a period after the first and a period before
+     // the real frame.
+     const std::optional<float> extra_interpolation_fraction =
+-        frames_per_frame > 2
++        frames_per_frame > 2 && !skip_led_frame
+             ? std::optional<float>(synthetic_interpolation_fraction(
+                   state,
+                   previous_snapshot,
+@@ -12280,6 +12940,7 @@ XrResult layer_end_frame_impl(
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
+     first_generated.synthetic = pair_ready;
+     first_generated.leads_frame = pair_ready;
++    first_generated.skip_led = pair_ready && skip_led_frame; // DCS VR Control (0006)
+     extra_ready = extra_ready && pair_ready;
+     extra_generated.synthetic = extra_ready;
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_extra_frame;
+@@ -12376,7 +13037,10 @@ XrResult layer_end_frame_impl(
+                     state->application_released_at !=
+                         std::chrono::steady_clock::time_point{};
+                 readiness.released_at = state->application_released_at;
+-                if (triple_slack && !readiness.fences.empty()) {
++                // DCS VR Control (0006): not for a frame made under the
++                // late-frame skip, whose synthetic is not the first.
++                if (triple_slack && !readiness.fences.empty() &&
++                    !presenter_first_frame->skip_led) {
+                     auto lead = std::make_shared<LeadReadiness>();
+                     lead->epoch = state->triple_release_epoch.load();
+                     presenter_first_frame->lead_readiness = lead;
+@@ -12386,6 +13050,9 @@ XrResult layer_end_frame_impl(
+                     readiness.fences.clear();
+                 }
+             }
++            // DCS VR Control (0006): a layer of the frame's other than its
++            // projections may name a swapchain whose copy was deferred.
++            catch_up_bridged_copies(state, &presenter_current_frame->info, false);
+             result = enqueue_presenter_pair(
+                 state,
+                 presenter_first_frame,
+@@ -12436,6 +13103,7 @@ XrResult layer_end_frame_impl(
+                         : state->frames_per_application_frame.load());
+             }
+         } else if (presenter_first_frame) {
++            catch_up_bridged_copies(state, &presenter_first_frame->info, false); // 0006
+             auto request = enqueue_presenter_submission(
+                 state,
+                 presenter_first_frame,
+@@ -12465,9 +13133,17 @@ XrResult layer_end_frame_impl(
+                 result = wait_for_presenter_submission(state, request);
+             }
+         } else {
++            // DCS VR Control (0006): the application's own composition.
++            catch_up_bridged_copies(state, nullptr, true);
+             result = submit_borrowed_to_presenter();
+         }
+     } else {
++        // DCS VR Control (0006): the application's own composition, or a
++        // generated frame whose other layers may name a deferred swapchain.
++        catch_up_bridged_copies(
++            state,
++            submitted_end_info == end_info ? nullptr : submitted_end_info,
++            submitted_end_info == end_info);
+         join_runtime_queue_to_application(
+             state.get(), state->app_end_frame_release_value);
+         result = with_runtime_entry(state, [&] {
+@@ -12508,6 +13184,28 @@ XrResult layer_end_frame_impl(
+     if (pair_ready) {
+         state->generation_steady_state_established = true;
+     }
++    // DCS VR Control (0006): this frame went to the runtime rewritten onto
++    // the private swapchains, or it did not; the next releases copy into the
++    // runtime's images accordingly. A frame that ends up passed through
++    // instead catches them up before it goes down (catch_up_bridged_copies).
++    {
++        const bool rewritten = prepared.kind == PreparedGenerationKind::prime ||
++            pair_ready;
++        const XrFrameEndInfo* output = nullptr;
++        if (rewritten) {
++            if (use_continuous_presenter) {
++                output = presenter_current_frame
++                    ? &presenter_current_frame->info
++                    : presenter_first_frame ? &presenter_first_frame->info
++                                            : nullptr;
++            } else {
++                output = pair_ready ? &current_generated.info
++                                    : submitted_end_info;
++            }
++        }
++        update_bridged_copy_deferral(
++            state, output != end_info ? output : nullptr);
++    }
+     if (use_continuous_presenter && !pipelined_presenter_mode) {
+         // A frame the layer could not generate from is already handled: it was
+         // passed through unchanged above. Demoting the presenter for it buys
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index 7e8b8d2..6d20c70 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -183,6 +183,19 @@ int main(int argc, char** argv) {
+             55555,
+             44444,
+             2);
++        // DCS VR Control (0006): the per-second submission timing.
++        enabled.event(
++            xrfg::BridgeFlightOperation::submission_timing,
++            1,
++            (30ULL << 0) | (30ULL << 16) | (30ULL << 32),
++            20ULL << 16,
++            8500);
++        enabled.event(
++            xrfg::BridgeFlightOperation::adaptive_throughput,
++            3,
++            5850,
++            20,
++            0);
+         enabled.shutdown();
+ 
+         const std::string log = read(log_path);
+@@ -224,6 +237,12 @@ int main(int argc, char** argv) {
+                 log.find("op=adaptive_throughput result=1 dur_us=0 a=15000 b=18000 c=12") !=
+                     std::string::npos,
+             "bridge log is missing the 0004 GPU timing records");
++        require(
++            log.find("op=submission_timing result=1 dur_us=0 a=128850984990 b=1310720 c=8500") !=
++                    std::string::npos &&
++                log.find("op=adaptive_throughput result=3 dur_us=0 a=5850 b=20 c=0") !=
++                    std::string::npos,
++            "bridge log is missing the 0006 submission timing records");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/d3d11_bridge_tests.cpp b/tests/d3d11_bridge_tests.cpp
+index d1c7bab..ea226db 100644
+--- a/tests/d3d11_bridge_tests.cpp
++++ b/tests/d3d11_bridge_tests.cpp
+@@ -583,6 +583,95 @@ void test_submitted_never_skips(const Devices& devices) {
+         "submitted: a swapchain frames keep naming copies every release");
+ }
+ 
++// DCS VR Control (0006): while generation rewrites the frames that name a
++// swapchain onto the layer's private swapchains, releases hand the shared
++// texture over (the history capture reads it) but do not copy into the
++// runtime's image; a submission that names the swapchain directly catches the
++// last release up first.
++void test_deferred_copies(const Devices& devices) {
++    UnsubmittedFixture fixture;
++    if (!create_unsubmitted_fixture(devices, &fixture, "deferred: bridge initialised")) {
++        return;
++    }
++    xrfg::D3D11BridgeSwapchain& bridge = fixture.bridge;
++    expect(!bridge.defers_copies(), "deferred: off by default");
++    HRESULT released = E_FAIL;
++    expect(render_and_release(devices, bridge, 0, 50, &released) && released == S_OK,
++        "deferred: an ordinary release copies");
++    expect(SUCCEEDED(bridge.wait_for_idle()), "deferred: idle");
++    expect(runtime_red(devices, fixture.runtime[0].Get()) == 50, "deferred: copied at release");
++    expect(bridge.catch_up() == S_OK, "deferred: nothing to catch up after a copy");
++
++    bridge.set_defer_copies(true);
++    expect(bridge.defers_copies(), "deferred: on");
++    std::uint32_t index = 0;
++    std::uint8_t red = 0;
++    bool untouched = true;
++    for (std::uint32_t frame = 1; frame <= 4; ++frame) {
++        index = frame % 3;
++        red = static_cast<std::uint8_t>(50 + frame);
++        expect(render_and_release(devices, bridge, index, red, &released),
++            "deferred: release");
++        // S_OK, not S_FALSE: the shared texture was handed over, so the layer
++        // may read it (the history capture) after the release.
++        expect(released == S_OK, "deferred: a deferred release returns S_OK");
++        expect(SUCCEEDED(bridge.wait_for_idle()), "deferred: idle");
++        untouched = untouched && runtime_red(devices, fixture.runtime[index].Get()) != red;
++    }
++    expect(untouched, "deferred: the runtime's image is left alone");
++    expect(bridge.copies_on_release(), "deferred: not the unsubmitted skip");
++
++    // Named directly: the last release, and only it, is copied now.
++    const std::uint32_t older = 3 % 3;
++    expect(bridge.catch_up() == S_FALSE, "deferred: catch-up copy queued");
++    expect(SUCCEEDED(bridge.wait_for_idle()), "deferred: idle after catch-up");
++    expect(runtime_red(devices, fixture.runtime[index].Get()) == red,
++        "deferred: the catch-up holds the last released image");
++    expect(runtime_red(devices, fixture.runtime[older].Get()) != 53,
++        "deferred: older releases are not copied");
++    expect(bridge.catch_up() == S_OK, "deferred: caught up once");
++
++    // The next frame is the application's own again: a release with deferral
++    // off copies, and whatever a deferred release left behind is dropped.
++    index = 2;
++    expect(render_and_release(devices, bridge, index, 77, &released) && released == S_OK,
++        "deferred: deferred release before the switch");
++    bridge.set_defer_copies(false);
++    index = 0;
++    expect(render_and_release(devices, bridge, index, 78, &released) && released == S_OK,
++        "deferred: copying release after the switch");
++    expect(SUCCEEDED(bridge.wait_for_idle()), "deferred: idle after the switch");
++    expect(runtime_red(devices, fixture.runtime[0].Get()) == 78, "deferred: copies again");
++    expect(bridge.catch_up() == S_OK, "deferred: a newer copy supersedes what was left");
++
++    // Deferral and the unsubmitted skip: the skip takes precedence, and its
++    // catch-up (frame_ended) still delivers the last release.
++    bridge.set_defer_copies(true);
++    std::uint32_t frame = 10;
++    for (std::uint32_t step = 0;
++         step < xrfg::D3D11BridgeSwapchain::kUnsubmittedFramesBeforeSkip + 2;
++         ++step, ++frame) {
++        index = frame % 3;
++        red = static_cast<std::uint8_t>(100 + step);
++        expect(render_and_release(devices, bridge, index, red, &released),
++            "deferred: unsubmitted release");
++        expect(SUCCEEDED(bridge.frame_ended(false)), "deferred: unsubmitted frame_ended");
++    }
++    expect(!bridge.copies_on_release() && released == S_FALSE,
++        "deferred: the unsubmitted skip takes over");
++    // What the skip left behind is frame_ended's to copy, when a frame names
++    // the swapchain again - not a deferral catch-up's on every pass-through.
++    expect(bridge.catch_up() == S_OK, "deferred: catch_up leaves the skip's image alone");
++    expect(SUCCEEDED(bridge.wait_for_idle()), "deferred: idle while skipping");
++    expect(runtime_red(devices, fixture.runtime[index].Get()) != red,
++        "deferred: still skipped");
++    expect(bridge.frame_ended(true) == S_FALSE, "deferred: named again, caught up");
++    expect(SUCCEEDED(bridge.wait_for_idle()), "deferred: idle after the skip");
++    expect(runtime_red(devices, fixture.runtime[index].Get()) == red,
++        "deferred: the skip's catch-up holds the last release");
++    expect(bridge.catch_up() == S_OK, "deferred: nothing left after the skip's catch-up");
++}
++
+ } // namespace
+ 
+ // DCS VR Control (0004): adaptive 2X/3X's GPU evidence. The bridge's copies
+@@ -689,6 +778,7 @@ int main() {
+     test_resolve(devices);
+     test_unsubmitted_skip(devices);
+     test_submitted_never_skips(devices);
++    test_deferred_copies(devices);
+     test_gpu_timing(devices);
+     if (g_failures != 0) {
+         std::cerr << g_failures << " D3D11 bridge check(s) failed\n";
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index c88ca11..f77079f 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -714,6 +714,215 @@ void adaptive_tests() {
+     }
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS VR Control (0006): late submissions, the late-frame skip, and the
++// synthesis GPU split.
++
++void late_submission_tests() {
++    {
++        // The threshold is exclusive and configurable.
++        require(!submission_late(0), "an immediate submission is on time");
++        require(!submission_late(kLateSubmissionThreshold), "exactly the threshold is on time");
++        require(submission_late(kLateSubmissionThreshold + 1), "past the threshold is late");
++        require(!submission_late(3 * kMillisecond, 5 * kMillisecond), "a wider threshold holds");
++        require(submission_late(6 * kMillisecond, 5 * kMillisecond), "and is still a threshold");
++    }
++    {
++        // The live flight's shape: real and second synthetics on time, the
++        // first synthetic late most of the time; counted per kind.
++        SubmissionTally tally;
++        for (int frame = 0; frame < 30; ++frame) {
++            tally.add(SubmissionKind::real, 600'000);
++            tally.add(SubmissionKind::gen1, frame % 3 == 0 ? 900'000 : 8'500'000);
++            tally.add(SubmissionKind::gen2, 700'000);
++        }
++        tally.add(SubmissionKind::repeat, 300'000);
++        require(tally.frames[0] == 30 && tally.frames[1] == 30 && tally.frames[2] == 30 &&
++                tally.frames[3] == 1, "frames are counted by kind");
++        require(tally.late[0] == 0 && tally.late[1] == 20 && tally.late[2] == 0 &&
++                tally.late[3] == 0, "late are counted by kind: " + std::to_string(tally.late[1]));
++        require(tally.worst_gen1 == 8'500'000 && tally.worst == 8'500'000, "worst is kept");
++        tally.reset();
++        require(tally.frames[1] == 0 && tally.worst == 0, "a reset starts over");
++    }
++    {
++        // Slack: written early but handed over late is late by the excess.
++        require(lead_slack_with_lateness(4 * kMillisecond, 1 * kMillisecond) == 4 * kMillisecond,
++            "on time, the written slack stands");
++        require(lead_slack_with_lateness(4 * kMillisecond, 7 * kMillisecond) == -5 * kMillisecond,
++            "handed over 5 ms past the threshold is 5 ms short");
++        require(lead_slack_with_lateness(-9 * kMillisecond, 7 * kMillisecond) == -9 * kMillisecond,
++            "written later still keeps the larger shortfall");
++    }
++    {
++        // Fed to the slack tuner, late hand-overs back a delay off even when
++        // the first synthetic was written in time.
++        TripleReleaseTuner tuner;
++        tuner.delay = 8 * kMillisecond;
++        tuner.ceiling = 2 * kPeriod;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            const Nanoseconds lateness = i % 2 == 0 ? 6 * kMillisecond : 500'000;
++            window = observe_triple_slack(
++                tuner, kPeriod, lead_slack_with_lateness(5 * kMillisecond, lateness));
++        }
++        require(window.closed && window.late == 15, "half the window late");
++        require(tuner.delay < 8 * kMillisecond, "the delay backed off: " + std::to_string(tuner.delay));
++    }
++    {
++        // Adaptive: late first synthetics are counted and shown, never acted on.
++        AdaptiveFrameGenController controller;
++        const Nanoseconds start = 100 * kSecond;
++        controller.start(3, start);
++        Nanoseconds now = start + 2 * kSecond;
++        for (int i = 0; i < 60; ++i) {
++            now += 3 * kPeriod;
++            controller.add_frame(now, 10 * kMillisecond, 12 * kMillisecond);
++            controller.add_late_leaders(now, 1);
++        }
++        const auto stats = controller.stats(now, kSecond);
++        require(stats.late_leaders >= 29 && stats.late_leaders <= 31,
++            "late first synthetics over a second: " + std::to_string(stats.late_leaders));
++        require(stats.late == 0, "they are not missed-slot episodes");
++        controller.add_late_leaders(now, 0);
++        require(controller.stats(now, kSecond).late_leaders == stats.late_leaders,
++            "a zero count adds nothing");
++    }
++}
++
++void late_skip_tests() {
++    const Nanoseconds start = 1000 * kSecond;
++    // One application frame every three periods.
++    const Nanoseconds frame = 3 * kPeriod;
++    {
++        // Steady, a few late first synthetics a second: never engages.
++        LateFrameSkipController skip;
++        Nanoseconds now = start;
++        for (int i = 0; i < 30 * 60; ++i) {
++            now += frame;
++            const auto step = skip.observe_leader(now, i % 10 == 0); // 3 a window
++            require(step.transition == LateSkipTransition::none, "3 of 30 late does not engage");
++        }
++        require(!skip.active(), "stays off");
++    }
++    {
++        // The live flight: two in three late. Engages on the first window.
++        LateFrameSkipController skip;
++        Nanoseconds now = start;
++        LateSkipStep step{};
++        int frames = 0;
++        while (!skip.active() && frames < 200) {
++            now += frame;
++            step = skip.observe_leader(now, frames % 3 != 0);
++            ++frames;
++        }
++        require(skip.active() && frames == 30, "engages on the first window: " + std::to_string(frames));
++        require(step.transition == LateSkipTransition::entered && step.window_late == 20,
++            "and says why");
++        // While on, a frame that was prepared before it engaged is not judged.
++        require(skip.observe_leader(now, true).transition == LateSkipTransition::none,
++            "first synthetics while on are ignored");
++        // Ready every time: leaves after two good windows, not before the dwell.
++        const Nanoseconds entered = now;
++        int ready_frames = 0;
++        while (skip.active() && ready_frames < 2000) {
++            now += frame;
++            step = skip.observe_skipped(now, true);
++            ++ready_frames;
++        }
++        require(!skip.active() && step.transition == LateSkipTransition::left, "leaves once there is room");
++        require(now - entered >= LateSkipConfig{}.min_dwell, "not before the dwell");
++        require(ready_frames >= 60, "two good windows at least: " + std::to_string(ready_frames));
++        require(ready_frames <= 120, "and soon after the dwell: " + std::to_string(ready_frames));
++    }
++    {
++        // Hysteresis: a window with too few ready resets the run of good ones.
++        LateSkipConfig config;
++        config.min_dwell = 0;
++        LateFrameSkipController skip(config);
++        Nanoseconds now = start;
++        for (int i = 0; i < 30; ++i) {
++            now += frame;
++            skip.observe_leader(now, true);
++        }
++        require(skip.active(), "engaged");
++        auto window = [&](std::uint32_t ready) {
++            LateSkipStep last{};
++            for (std::uint32_t i = 0; i < 30; ++i) {
++                now += frame;
++                last = skip.observe_skipped(now, i < ready);
++            }
++            return last;
++        };
++        require(window(30).transition == LateSkipTransition::none, "one good window is not enough");
++        require(window(20).transition == LateSkipTransition::none && skip.active(), "a bad one resets");
++        require(window(28).transition == LateSkipTransition::none, "good again: one");
++        require(window(29).transition == LateSkipTransition::left && !skip.active(), "two in a row: leaves");
++    }
++    {
++        // Flapping: back within the flap window doubles the dwell, up to the
++        // maximum; a long stretch off resets it.
++        LateFrameSkipController skip;
++        Nanoseconds now = start;
++        auto engage = [&] {
++            for (int i = 0; i < 30; ++i) {
++                now += frame;
++                skip.observe_leader(now, true);
++            }
++        };
++        auto leave = [&] {
++            int guard = 0;
++            while (skip.active() && guard++ < 100000) {
++                now += frame;
++                skip.observe_skipped(now, true);
++            }
++        };
++        engage();
++        require(skip.active() && skip.dwell() == 3 * kSecond, "first dwell is the minimum");
++        leave();
++        engage();
++        require(skip.active() && skip.dwell() == 6 * kSecond, "a flap doubles it");
++        leave();
++        engage();
++        leave();
++        engage();
++        require(skip.dwell() == 24 * kSecond, "up to the maximum: " + std::to_string(skip.dwell()));
++        leave();
++        engage();
++        require(skip.dwell() == 24 * kSecond, "and no further");
++        leave();
++        // Off for longer than the flap window: back to the minimum.
++        for (int i = 0; i < 30 * 20; ++i) {
++            now += frame;
++            skip.observe_leader(now, false);
++        }
++        engage();
++        require(skip.dwell() == 3 * kSecond, "a long stretch off resets the dwell");
++        skip.reset();
++        require(!skip.active() && skip.dwell() == 3 * kSecond, "reset is off");
++    }
++}
++
++void gpu_split_tests() {
++    {
++        // The live flight's NVIDIA record: pack 0.6 ms, 2.9 ms waiting on the
++        // engine per eye, composition 0.9 ms - 7.4 ms of span, 1.5 of shader.
++        const auto split = split_synthesis_gpu_time(600, 2900, 2950, 900, 7400);
++        require(split.shader == 1'500'000, "shader is pack plus composition: " + std::to_string(split.shader));
++        require(split.optical_flow_wait == 5'850'000, "the engine waits apart");
++    }
++    {
++        // FidelityFX: no stage marks, the span is shader work.
++        const auto split = split_synthesis_gpu_time(0, 0, 0, 0, 4200);
++        require(split.shader == 4'200'000 && split.optical_flow_wait == 0, "span is shader");
++    }
++    {
++        // A single eye.
++        const auto split = split_synthesis_gpu_time(400, 2500, 0, 500, 3500);
++        require(split.shader == 900'000 && split.optical_flow_wait == 2'500'000, "one eye");
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -722,6 +931,9 @@ int main() {
+         triple_slack_tests();
+         display_time_tests();
+         adaptive_tests();
++        late_submission_tests();
++        late_skip_tests();
++        gpu_split_tests();
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index be0062d..3d15cfc 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -58,6 +58,10 @@ XrSwapchain g_application_swapchain_right = fake_handle<XrSwapchain>(0x306);
+ // private and must strip the depth information naming it from every
+ // submission; the fake counts the ones that reach it.
+ XrSwapchain g_application_depth_swapchain = fake_handle<XrSwapchain>(0x30d);
++// d3d11-bridge-fallback (DCS VR Control, 0006): a colour swapchain the
++// application creates and enumerates but no frame ever names, as DCS's
++// quad-view swapchains behind Quad Views. It must never hold a history.
++XrSwapchain g_application_unused_swapchain = fake_handle<XrSwapchain>(0x30e);
+ std::atomic<std::uint32_t> g_private_depth_submissions{0};
+ XrSwapchain g_current_swapchain_right = fake_handle<XrSwapchain>(0x307);
+ XrSwapchain g_synthetic_swapchain_right = fake_handle<XrSwapchain>(0x308);
+@@ -113,6 +117,19 @@ bool g_submit_no_layers = false;
+ std::atomic<bool> g_acquire_ahead_active{false};
+ std::atomic<std::uint32_t> g_acquire_ahead_calls{0};
+ std::atomic<bool> g_bridge_session_bound{false};
++// DCS VR Control (0006): the bridge leaves the runtime's image alone while
++// generation rewrites the application's frames onto private swapchains, and
++// must bring it up to date before any submission that names the application's
++// swapchain. The fake runtime checks that at every such submission: the image
++// the application released last holds what it painted.
++std::atomic<int> g_bridge_last_index{-1};
++std::atomic<int> g_bridge_last_red{-1};
++std::atomic<std::uint32_t> g_bridge_named_checks{0};
++std::atomic<std::uint32_t> g_bridge_named_stale{0};
++// d3d11-bridge-fallback: a frame whose sub-image changes mid-run, so
++// generation is quarantined and frames pass through while it lasts.
++bool g_bridge_fallback_mode = false;
++[[nodiscard]] bool d3d12_image_first_red(ID3D12Resource* image, std::uint8_t* red);
+ [[nodiscard]] bool create_fake_d3d12_images();
+ // vulkan: the application binds a real Vulkan device, so the layer's Vulkan
+ // interop runs against the driver rather than a stand-in. Importing the D3D12
+@@ -173,6 +190,16 @@ bool g_display_latency_mode = false;
+ // time it is told must again be its real frame's.
+ bool g_adaptive_latency_mode = false;
+ int g_simulated_render_ms = 0;
++// dcs-late-skip (DCS VR Control, 0006): dcs-latency's shape in 3X with the
++// application light, then heavy enough that every first synthetic misses its
++// slot while the second still makes its own (15 ms of a 30 ms cycle at the
++// fake's 10 ms period), then light again. The late-frame skip has to engage
++// while it is heavy - the first synthetic's slot re-presents the previous
++// real frame - and let go once it is light, and nothing may ever be shown
++// out of order. With `late_frame_skip=0` in the ini beside the layer, it must
++// never engage.
++bool g_late_skip_mode = false;
++bool g_late_skip_expected = true;
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+ // dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
+ // time per frame set apart - CPU by a sleep from the frame's start, GPU by a
+@@ -966,6 +993,28 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
+     if (!saw_projection && end_info->layerCount != 0) {
+         record.target = SubmittedTarget::mixed;
+     }
++    // DCS VR Control (0006): see g_bridge_named_stale.
++    if (g_d3d11_bridge_mode && record.target == SubmittedTarget::original) {
++        const int index = g_bridge_last_index.load(std::memory_order_acquire);
++        const int expected = g_bridge_last_red.load(std::memory_order_acquire);
++        if (index >= 0 && expected >= 0 &&
++            static_cast<std::size_t>(index) < g_application_swapchain_images.size()) {
++            std::uint8_t found = 0;
++            g_bridge_named_checks.fetch_add(1, std::memory_order_relaxed);
++            if (!d3d12_image_first_red(
++                    g_application_swapchain_images[static_cast<std::size_t>(index)].Get(),
++                    &found) ||
++                found != static_cast<std::uint8_t>(expected)) {
++                g_bridge_named_stale.fetch_add(1, std::memory_order_relaxed);
++                if (!g_log_path.empty()) {
++                    std::ofstream stream(g_log_path, std::ios::out | std::ios::app);
++                    stream << "[XRFG-FAKE] application image stale at submission: index="
++                           << index << " expected=" << expected
++                           << " found=" << static_cast<int>(found) << '\n';
++                }
++            }
++        }
++    }
+     if (g_flight_simulator_mode &&
+         g_delay_composition_validation.exchange(
+             false,
+@@ -1072,6 +1121,12 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
+         *swapchain = g_application_depth_swapchain;
+         return XR_SUCCESS;
+     }
++    // And so does the never-named one (d3d11-bridge-fallback), told apart by
++    // its width.
++    if (g_bridge_fallback_mode && create_info != nullptr && create_info->width == 6) {
++        *swapchain = g_application_unused_swapchain;
++        return XR_SUCCESS;
++    }
+     const std::uint32_t call =
+         g_create_swapchain_calls.fetch_add(1, std::memory_order_relaxed);
+     if (g_split_eye_mode) {
+@@ -1294,6 +1349,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
+     XrSwapchainImageBaseHeader* images) {
+     if (!is_application_swapchain(swapchain) &&
+         swapchain != g_application_depth_swapchain &&
++        swapchain != g_application_unused_swapchain &&
+         !is_current_swapchain(swapchain) &&
+         !is_synthetic_swapchain(swapchain)) {
+         return XR_ERROR_HANDLE_INVALID;
+@@ -2344,7 +2400,8 @@ int main(int argc, char** argv) {
+             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
+             "dcs|dcs-d3d11|dcs-latency|dcs-adaptive|dcs-throughput-down|"
+             "dcs-throughput-gpu|d3d11-bridge|"
+-            "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted]\n";
++            "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted|"
++            "d3d11-bridge-fallback|dcs-late-skip]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2352,10 +2409,14 @@ int main(int argc, char** argv) {
+         argc == 4 && std::strcmp(argv[3], "d3d11-bridge-acquire-ahead") == 0;
+     g_unsubmitted_mode =
+         argc == 4 && std::strcmp(argv[3], "d3d11-bridge-unsubmitted") == 0;
++    g_bridge_fallback_mode =
++        argc == 4 && std::strcmp(argv[3], "d3d11-bridge-fallback") == 0;
+     g_d3d11_bridge_mode = g_acquire_ahead_mode || g_unsubmitted_mode ||
++        g_bridge_fallback_mode ||
+         (argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0);
+     g_adaptive_latency_mode =
+         argc == 4 && std::strcmp(argv[3], "dcs-adaptive") == 0;
++    g_late_skip_mode = argc == 4 && std::strcmp(argv[3], "dcs-late-skip") == 0;
+     {
+         const bool throughput_down =
+             argc == 4 && std::strcmp(argv[3], "dcs-throughput-down") == 0;
+@@ -2367,7 +2428,7 @@ int main(int argc, char** argv) {
+         g_throughput_gpu_ms = throughput_down ? 6 : 23;
+         g_adaptive_latency_mode = g_adaptive_latency_mode || g_throughput_mode;
+     }
+-    g_display_latency_mode = g_adaptive_latency_mode ||
++    g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -2424,6 +2485,8 @@ int main(int argc, char** argv) {
+             g_frames_per_application_frame = 3;
+             g_deep_pipeline = true;
+         }
++        g_late_skip_expected = GetPrivateProfileIntW(
++            L"ofxr", L"late_frame_skip", 1, ini.wstring().c_str()) != 0;
+         // Adaptive 2X/3X reserves 3X's ring from the start, on a binding 3X
+         // covers - any but a D3D11 session left on the interop.
+         if (GetPrivateProfileIntW(
+@@ -3461,6 +3524,30 @@ int main(int argc, char** argv) {
+         // this thread. In vulkan mode the generation behind those counts ran
+         // through the Vulkan interop on a real device.
+         bool frame_sequence_succeeded = true;
++        // d3d11-bridge-fallback (0006): a colour swapchain enumerated and
++        // never named; see g_application_unused_swapchain.
++        XrSwapchain unused_swapchain = XR_NULL_HANDLE;
++        if (g_bridge_fallback_mode) {
++            XrSwapchainCreateInfo unused_info = swapchain_info;
++            unused_info.width = 6;
++            std::array<XrSwapchainImageD3D11KHR, 3> unused_images{};
++            for (auto& image : unused_images) {
++                image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
++            }
++            std::uint32_t unused_count = 0;
++            frame_sequence_succeeded =
++                XR_SUCCEEDED(create_swapchain(session, &unused_info, &unused_swapchain)) &&
++                unused_swapchain == g_application_unused_swapchain &&
++                XR_SUCCEEDED(enumerate_images(
++                    unused_swapchain,
++                    static_cast<std::uint32_t>(unused_images.size()),
++                    &unused_count,
++                    reinterpret_cast<XrSwapchainImageBaseHeader*>(unused_images.data()))) &&
++                unused_count == 3;
++            if (!frame_sequence_succeeded) {
++                std::cerr << "d3d11-bridge-fallback: the unused swapchain was refused\n";
++            }
++        }
+         // In vulkan mode every frame is painted a colour of its own before
+         // it is released, and once a pair has gone out its current copy has
+         // to be found in a private image: the pixels crossed into D3D12 and
+@@ -3502,6 +3589,16 @@ int main(int argc, char** argv) {
+                     paint_d3d11_image(
+                         d3d11_swapchain_images[acquired_index].texture, red));
+         };
++        // DCS VR Control (0006): what the application releases next, for the
++        // fake runtime's check at a submission naming its swapchain.
++        auto note_bridge_release = [&](std::uint8_t red) {
++            if (g_d3d11_bridge_mode) {
++                g_bridge_last_index.store(
++                    static_cast<int>(acquired_index), std::memory_order_release);
++                g_bridge_last_red.store(red, std::memory_order_release);
++            }
++            return true;
++        };
+         // d3d11-bridge-unsubmitted: 10 frames as usual, kUnsubmittedGap
+         // frames that end with no layers while the swapchain is still
+         // rendered and released, then kUnsubmittedAfter frames naming it again.
+@@ -3509,11 +3606,22 @@ int main(int argc, char** argv) {
+         constexpr int kUnsubmittedGap = 35;
+         constexpr int kUnsubmittedAfter = 12;
+         constexpr int kUnsubmittedSkipFrom = 30; // kUnsubmittedFramesBeforeSkip
++        // d3d11-bridge-fallback: frames 0-5 as usual, frame 6 changes its
++        // sub-image (generation is quarantined for a second and frames pass
++        // through), then after the quarantine generation primes and pairs
++        // again.
++        constexpr int kFallbackFrame = 6;
++        constexpr int kFallbackResume = 9;
+         const int frame_count = g_unsubmitted_mode
+             ? kUnsubmittedBefore + kUnsubmittedGap + kUnsubmittedAfter
+-            : 10;
++            : g_bridge_fallback_mode ? 16 : 10;
+         std::uint32_t synthetic_at_resume = 0;
+         int stale_checks = 0;
++        // DCS VR Control (0006): frames generated with the runtime's image
++        // left behind (the release copy deferred), and frames that went down
++        // as the application's own whose release reached the runtime.
++        int deferred_frames = 0;
++        int passthrough_frames = 0;
+         for (int index = 0; index < frame_count; ++index) {
+             const auto red = static_cast<std::uint8_t>(40 + index * 20);
+             const int gap_index = index - kUnsubmittedBefore;
+@@ -3524,6 +3632,22 @@ int main(int argc, char** argv) {
+                 synthetic_at_resume =
+                     g_synthetic_acquire_calls.load(std::memory_order_relaxed);
+             }
++            if (g_bridge_fallback_mode) {
++                for (auto& view : projection_views) {
++                    view.subImage.imageRect.extent =
++                        index == kFallbackFrame ? XrExtent2Di{4, 3}
++                                                : XrExtent2Di{4, 4};
++                }
++                if (index == kFallbackResume) {
++                    // Past the structural quarantine.
++                    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
++                }
++            }
++            std::size_t records_before = 0;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records_before = g_end_records.size();
++            }
+             frame_sequence_succeeded = frame_sequence_succeeded &&
+                 XR_SUCCEEDED(wait_frame(
+                     session, &frame_wait_info, &application_frame)) &&
+@@ -3535,6 +3659,7 @@ int main(int argc, char** argv) {
+                  (XR_SUCCEEDED(acquire_image(depth_swapchain, &acquire_info, &depth_index)) &&
+                   XR_SUCCEEDED(wait_image(depth_swapchain, &image_wait_info)) &&
+                   XR_SUCCEEDED(release_image(depth_swapchain, &release_info)))) &&
++                note_bridge_release(red) &&
+                 XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
+                 submit_frame(application_frame.predictedDisplayTime) &&
+                 wait_for_queue_idle();
+@@ -3544,18 +3669,42 @@ int main(int argc, char** argv) {
+                 ++pixel_failures;
+             }
+             // d3d11-bridge: what the application painted into the D3D11
+-            // texture is in the runtime's D3D12 image after the release -
+-            // except, in the unsubmitted mode, once the gap has run long
+-            // enough for the bridge to stop copying: then the runtime's image
+-            // must keep older content. The first frame after the gap names
+-            // the swapchain again and has to find its last release there.
++            // texture is in the runtime's D3D12 image once its frame has gone
++            // down - except, in the unsubmitted mode, once the gap has run
++            // long enough for the bridge to stop copying: then the runtime's
++            // image must keep older content. The first frame after the gap
++            // names the swapchain again and has to find its last release
++            // there.
++            //
++            // DCS VR Control (0006): and except a frame the layer generated:
++            // that frame went down on the private swapchains, nothing reads
++            // the runtime's image, and the bridge does not copy into it. Any
++            // frame that went down as the application's own (or with no
++            // layers) has it up to date, whatever the frame before was; the
++            // fake runtime checks the same at the submission itself.
+             if (g_d3d11_bridge_mode && frame_sequence_succeeded) {
++                bool generated = false;
++                {
++                    std::scoped_lock lock(g_end_records_mutex);
++                    for (std::size_t record = records_before;
++                         record < g_end_records.size(); ++record) {
++                        generated = generated ||
++                            g_end_records[record].target == SubmittedTarget::current ||
++                            g_end_records[record].target == SubmittedTarget::synthetic;
++                    }
++                }
+                 std::uint8_t found = 0;
+                 const bool skipped = in_gap && gap_index >= kUnsubmittedSkipFrom;
+                 if (!d3d12_image_first_red(
+-                        g_application_swapchain_images[acquired_index].Get(), &found) ||
+-                    (skipped ? found == red : found != red)) {
++                        g_application_swapchain_images[acquired_index].Get(), &found)) {
+                     ++pixel_failures;
++                } else if (skipped) {
++                    pixel_failures += found == red ? 1 : 0;
++                } else if (generated) {
++                    deferred_frames += found != red ? 1 : 0;
++                } else {
++                    pixel_failures += found != red ? 1 : 0;
++                    ++passthrough_frames;
+                 }
+                 stale_checks += skipped ? 1 : 0;
+             }
+@@ -3565,6 +3714,8 @@ int main(int argc, char** argv) {
+             XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+             (depth_swapchain == XR_NULL_HANDLE ||
+              XR_SUCCEEDED(destroy_swapchain(depth_swapchain))) &&
++            (unused_swapchain == XR_NULL_HANDLE ||
++             XR_SUCCEEDED(destroy_swapchain(unused_swapchain))) &&
+             XR_SUCCEEDED(destroy_session(session)) &&
+             XR_SUCCEEDED(destroy_instance(instance));
+         FreeLibrary(module);
+@@ -3594,9 +3745,25 @@ int main(int argc, char** argv) {
+                  g_create_swapchain_calls.load(std::memory_order_relaxed) - refusals);
+         // The fake runtime never throttles this mode, so vulkan stays
+         // inline here; only the single-threaded device forbids a presenter.
++        // DCS VR Control (0006): no submission naming the application's
++        // swapchain ever found its runtime image behind what was released;
++        // generated frames did leave it behind (the copies were skipped);
++        // and the fallback run passed frames through after deferring.
++        const std::uint32_t named_checks =
++            g_bridge_named_checks.load(std::memory_order_relaxed);
++        const std::uint32_t named_stale =
++            g_bridge_named_stale.load(std::memory_order_relaxed);
++        const int expected_deferred = g_unsubmitted_mode ? 10
++            : g_bridge_fallback_mode ? 6
++            : 5;
++        const bool deferral_valid = !g_d3d11_bridge_mode ||
++            (named_stale == 0 && named_checks >= 1 &&
++             deferred_frames >= expected_deferred &&
++             (!g_bridge_fallback_mode ||
++              (passthrough_frames >= 4 && named_checks >= 4)));
+         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
+             (off_thread == 0 || g_vulkan_mode) && pixel_failures == 0 &&
+-            budget_valid && unsubmitted_valid &&
++            budget_valid && unsubmitted_valid && deferral_valid &&
+             (!g_d3d11_bridge_mode ||
+              g_bridge_session_bound.load(std::memory_order_acquire)) &&
+             // The private depth swapchain's information never reaches the
+@@ -3610,6 +3777,7 @@ int main(int argc, char** argv) {
+             std::cerr << (g_vulkan_mode ? "Vulkan"
+                           : g_acquire_ahead_mode ? "D3D11 bridge, acquire ahead"
+                           : g_unsubmitted_mode ? "D3D11 bridge, unsubmitted"
++                          : g_bridge_fallback_mode ? "D3D11 bridge, fallback"
+                           : g_d3d11_bridge_mode ? "D3D11 bridge"
+                                                 : "single-threaded D3D11")
+                       << " validation failed: sequence="
+@@ -3619,6 +3787,10 @@ int main(int argc, char** argv) {
+                       << " stale-pixels=" << pixel_failures
+                       << " skipped-checks=" << stale_checks
+                       << " resumed-synthetic=" << resumed_synthetics
++                      << " deferred=" << deferred_frames
++                      << " passthrough=" << passthrough_frames
++                      << " named-checks=" << named_checks
++                      << " named-stale=" << named_stale
+                       << " private-depth=" << private_depth
+                       << " budget-refusals=" << refusals
+                       << " creates=" << g_create_swapchain_calls.load()
+@@ -3781,10 +3953,18 @@ int main(int argc, char** argv) {
+             std::vector<std::pair<XrTime, XrTime>> pairs;
+             std::scoped_lock lock(g_end_records_mutex);
+             std::scoped_lock told_lock(g_told_mutex);
++            // DCS VR Control (0006): a real frame the 3X late-frame skip
++            // re-presents goes down again a slot later with the same pose;
++            // only its first hand-over is where it was shown.
++            float previous_current_pose = std::numeric_limits<float>::quiet_NaN();
+             for (const EndFrameRecord& record : g_end_records) {
+                 if (record.target != SubmittedTarget::current) {
+                     continue;
+                 }
++                if (record.poses[0].position.x == previous_current_pose) {
++                    continue;
++                }
++                previous_current_pose = record.poses[0].position.x;
+                 for (const auto& [pose_x, told] : g_told_by_pose) {
+                     if (pose_x == record.poses[0].position.x) {
+                         pairs.emplace_back(told, record.display_time);
+@@ -3830,7 +4010,8 @@ int main(int argc, char** argv) {
+         // dcs-latency: long enough for the correction to settle (two
+         // agreeing windows of thirty real frames), and in 3X for the queue
+         // to reach its depth first, then until it has.
+-        const int kOverlappingFrames = g_adaptive_latency_mode ? 0
++        const int kOverlappingFrames =
++            (g_adaptive_latency_mode || g_late_skip_mode) ? 0
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -3840,9 +4021,35 @@ int main(int argc, char** argv) {
+         }
+         constexpr int kSettleBound = 400;
+         int settle_frames = 0;
+-        if (g_display_latency_mode && !g_adaptive_latency_mode) {
++        if (g_display_latency_mode && !g_adaptive_latency_mode &&
++            !g_late_skip_mode) {
+             settle_frames = run_until_settled(kSettleBound);
+         }
++        // dcs-late-skip (0006): where each phase starts in the records.
++        std::size_t late_skip_heavy_from = 0;
++        std::size_t late_skip_light_from = 0;
++        if (g_late_skip_mode) {
++            g_simulated_render_ms = 0;
++            for (int index = 0; sequence_succeeded && index < 90; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                late_skip_heavy_from = g_end_records.size();
++            }
++            g_simulated_render_ms = 15;
++            for (int index = 0; sequence_succeeded && index < 150; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                late_skip_light_from = g_end_records.size();
++            }
++            g_simulated_render_ms = 0;
++            for (int index = 0; sequence_succeeded && index < 240; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++        }
+         // dcs-adaptive: 3X light until adaptive control moves it to 2X, then
+         // heavy until it moves it back to 3X, then, still in 3X, a frame
+         // that leaves 2X no headroom (so adaptive control has no reason to
+@@ -3987,6 +4194,107 @@ int main(int argc, char** argv) {
+                       << throughput_frames << " frames\n";
+             return EXIT_SUCCESS;
+         }
++        if (g_late_skip_mode) {
++            std::vector<EndFrameRecord> records;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records = g_end_records;
++            }
++            std::vector<std::pair<float, XrTime>> told;
++            {
++                std::scoped_lock lock(g_told_mutex);
++                told = g_told_by_pose;
++            }
++            const auto told_for = [&](float pose_x) -> XrTime {
++                for (const auto& [pose, time] : told) {
++                    if (pose == pose_x) {
++                        return time;
++                    }
++                }
++                return -1;
++            };
++            // A re-presented slot: the real frame submitted right before,
++            // again. Every frame's submissions carry the pose of the frame
++            // they belong to, which encodes the display time it was told, so
++            // anything shown out of order shows as that time going back.
++            std::size_t repeats_heavy = 0;
++            std::size_t repeats_tail = 0;
++            std::size_t repeats_total = 0;
++            std::size_t empty_mid = 0;
++            std::size_t synthetic_tail = 0;
++            std::size_t real_tail = 0;
++            std::size_t unordered = 0;
++            XrTime last_told = 0;
++            const std::size_t tail_from =
++                records.size() > 90 ? records.size() - 90 : 0;
++            for (std::size_t index = 0; index < records.size(); ++index) {
++                const EndFrameRecord& record = records[index];
++                if (record.layer_count == 0) {
++                    empty_mid += index + 1 < records.size() ? 1U : 0U;
++                    continue;
++                }
++                if (record.target != SubmittedTarget::current &&
++                    record.target != SubmittedTarget::synthetic) {
++                    continue;
++                }
++                const XrTime time = told_for(record.poses[0].position.x);
++                if (time >= 0) {
++                    unordered += time < last_told ? 1U : 0U;
++                    last_told = std::max(last_told, time);
++                }
++                const bool repeat = index > 0 &&
++                    record.target == SubmittedTarget::current &&
++                    records[index - 1].target == SubmittedTarget::current &&
++                    records[index - 1].poses[0].position.x ==
++                        record.poses[0].position.x;
++                repeats_total += repeat ? 1U : 0U;
++                if (repeat && index >= late_skip_heavy_from &&
++                    index < late_skip_light_from) {
++                    ++repeats_heavy;
++                }
++                if (index >= tail_from) {
++                    repeats_tail += repeat ? 1U : 0U;
++                    if (record.target == SubmittedTarget::synthetic) {
++                        ++synthetic_tail;
++                    } else if (!repeat) {
++                        ++real_tail;
++                    }
++                }
++            }
++            valid = sequence_succeeded && teardown_succeeded &&
++                presenter_seen && violations == 0 && unordered == 0 &&
++                empty_mid <= 1 && repeats_tail == 0 &&
++                (g_late_skip_expected
++                     ? repeats_heavy >= 20 && synthetic_tail >= 2 * real_tail - 2 &&
++                         real_tail >= 20
++                     // (A presenter start may hand its seed frame over twice;
++                     // that is before the measured phases.)
++                     : repeats_heavy == 0) &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            if (!valid) {
++                std::cerr << "DCS late-frame skip validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen
++                          << " violations=" << violations
++                          << " expected=" << g_late_skip_expected
++                          << " unordered=" << unordered
++                          << " empty-mid=" << empty_mid
++                          << " repeats-heavy=" << repeats_heavy
++                          << " repeats-tail=" << repeats_tail
++                          << " repeats-total=" << repeats_total
++                          << " tail synthetic/real=" << synthetic_tail << '/'
++                          << real_tail << " records=" << records.size()
++                          << " heavy-from=" << late_skip_heavy_from
++                          << " light-from=" << late_skip_light_from << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << "OpenXR DCS late-frame skip test passed: "
++                      << (g_late_skip_expected ? "engaged" : "off by the ini")
++                      << ", " << repeats_heavy
++                      << " first-synthetic slots re-presented while heavy, "
++                         "none out of order\n";
++            return EXIT_SUCCESS;
++        }
+         if (g_display_latency_mode) {
+             // Every real frame of the settled stretch went to the runtime
+             // for exactly the display time the application was told when it
+diff --git a/tests/layer_late_skip.cmake b/tests/layer_late_skip.cmake
+new file mode 100644
+index 0000000..966dd08
+--- /dev/null
++++ b/tests/layer_late_skip.cmake
+@@ -0,0 +1,91 @@
++# DCS VR Control (0006): runs the dcs-late-skip call-chain scenario in 3X off
++# SteamVR with SKIP_INI beside the layer DLL, and checks from the flight log
++# that submissions were timed and tallied by kind every second, and that the
++# late-frame skip turned on while the application was heavy and off once it
++# was light again - or, with EXPECT_SKIP=OFF (the ini says late_frame_skip=0),
++# that it never turned on.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN SKIP_INI WORK_DIR EXPECT_SKIP)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${SKIP_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(skip_ini_name "${SKIP_INI}" NAME)
++file(RENAME "${WORK_DIR}/${skip_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        dcs-late-skip
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain 'dcs-late-skip' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++# Once a second: submissions and late ones by kind, and in 3X the skip
++# (which with late_frame_skip=0 is not recorded at all).
++string(REGEX MATCH "op=submission_timing result=1 dur_us=0 a=[1-9][0-9]* b=[0-9]+ c=[0-9]+" tally "${contents}")
++if(tally STREQUAL "")
++    message(FATAL_ERROR "No per-second submission_timing record")
++endif()
++string(REGEX MATCH "op=submission_timing result=2 dur_us=0 a=[01] b=[0-9]+ c=[0-9]+" status "${contents}")
++if(EXPECT_SKIP AND status STREQUAL "")
++    message(FATAL_ERROR "No per-second late-frame skip record")
++endif()
++if(NOT EXPECT_SKIP AND NOT status STREQUAL "")
++    message(FATAL_ERROR "A late-frame skip record with late_frame_skip=0")
++endif()
++# Late first synthetics while heavy: the gen1 field (bits 16-31) of b.
++string(REGEX MATCHALL "op=submission_timing result=1 dur_us=0 a=[0-9]+ b=[0-9]+" tallies "${contents}")
++set(late_gen1_seconds 0)
++foreach(record IN LISTS tallies)
++    string(REGEX REPLACE ".* b=([0-9]+)$" "\\1" late "${record}")
++    math(EXPR late_gen1 "(${late} >> 16) & 65535")
++    if(late_gen1 GREATER 0)
++        math(EXPR late_gen1_seconds "${late_gen1_seconds} + 1")
++    endif()
++endforeach()
++if(late_gen1_seconds LESS 1)
++    message(FATAL_ERROR "No second with a late first synthetic was tallied")
++endif()
++
++string(FIND "${contents}" "op=submission_timing result=3 dur_us=0 a=1 " entered)
++string(FIND "${contents}" "op=submission_timing result=3 dur_us=0 a=2 " left)
++if(EXPECT_SKIP)
++    if(entered EQUAL -1)
++        message(FATAL_ERROR "The late-frame skip never turned on")
++    endif()
++    if(left EQUAL -1)
++        message(FATAL_ERROR "The late-frame skip never turned off")
++    endif()
++    if(left LESS entered)
++        message(FATAL_ERROR "The late-frame skip turned off before it turned on")
++    endif()
++    string(REGEX MATCH "op=submission_timing result=2 dur_us=0 a=1 b=[1-9][0-9]*" skipping "${contents}")
++    if(skipping STREQUAL "")
++        message(FATAL_ERROR "No second in which the skip re-presented a slot")
++    endif()
++else()
++    if(NOT entered EQUAL -1)
++        message(FATAL_ERROR "The late-frame skip turned on with late_frame_skip=0")
++    endif()
++endif()
++message(STATUS "Late-frame skip verified (expected: ${EXPECT_SKIP})")
+diff --git a/tests/layer_lazy_history.cmake b/tests/layer_lazy_history.cmake
+new file mode 100644
+index 0000000..8086c91
+--- /dev/null
++++ b/tests/layer_lazy_history.cmake
+@@ -0,0 +1,79 @@
++# DCS VR Control (0006): runs the d3d11-bridge-fallback call-chain scenario
++# (the bridged D3D11 session whose generation falls back to pass-through mid-run,
++# with a colour swapchain it enumerates and never names) with logging on, and
++# checks from the flight log that
++#   - the never-named swapchain waited for a projection use and never took a
++#     history ring (they used to be made at enumeration: ~132 MB for DCS's four
++#     quad-view swapchains behind Quad Views),
++#   - the named one took its history when it armed, once,
++#   - its release copies were deferred while generation ran and made at release
++#     again around the fall-back.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN PIPELINE_INI WORK_DIR)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${PIPELINE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(pipeline_ini_name "${PIPELINE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${pipeline_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        d3d11-bridge-fallback
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain 'd3d11-bridge-fallback' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++# The fake runtime's handles: 0x303 the named colour swapchain, 0x30e the
++# never-named one.
++set(named_handle 771)
++set(unused_handle 782)
++string(FIND "${contents}" "op=swapchain_eligibility result=17 dur_us=0 a=${unused_handle} " unused_awaiting)
++if(unused_awaiting EQUAL -1)
++    message(FATAL_ERROR "The never-named swapchain was not left awaiting a projection use")
++endif()
++string(FIND "${contents}" "op=swapchain_eligibility result=24 dur_us=0 a=${unused_handle} " unused_history)
++if(NOT unused_history EQUAL -1)
++    message(FATAL_ERROR "The never-named swapchain took a history ring")
++endif()
++string(REGEX MATCHALL "op=swapchain_eligibility result=24 dur_us=0 a=${named_handle} " named_histories "${contents}")
++list(LENGTH named_histories named_history_count)
++if(NOT named_history_count EQUAL 1)
++    message(FATAL_ERROR "The named swapchain took ${named_history_count} history rings, not one")
++endif()
++foreach(expected IN ITEMS
++        # Deferred once generation ran, copying again for the fall-back, and
++        # deferred again once generation came back.
++        "op=d3d11_bridge result=7 dur_us=0 a=${named_handle} b=0 c=1"
++        "op=d3d11_bridge result=7 dur_us=0 a=${named_handle} b=0 c=0")
++    string(FIND "${contents}" "${expected}" found)
++    if(found EQUAL -1)
++        message(FATAL_ERROR "The flight log is missing: ${expected}")
++    endif()
++endforeach()
++string(REGEX MATCHALL "op=d3d11_bridge result=7 dur_us=0 a=${named_handle} b=0 c=1" deferrals "${contents}")
++list(LENGTH deferrals deferral_count)
++if(deferral_count LESS 2)
++    message(FATAL_ERROR "Release copies were deferred ${deferral_count} times, expected again after the fall-back")
++endif()
++message(STATUS "Lazy history and deferred bridge copies verified")
+diff --git a/tests/ofxr_bridge_d3d11_bridge_logging.ini b/tests/ofxr_bridge_d3d11_bridge_logging.ini
+new file mode 100644
+index 0000000..9c58cca
+--- /dev/null
++++ b/tests/ofxr_bridge_d3d11_bridge_logging.ini
+@@ -0,0 +1,17 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++vulkan_bridge=0
++d3d11_bridge=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_late_skip.ini b/tests/ofxr_bridge_late_skip.ini
+new file mode 100644
+index 0000000..ba9011e
+--- /dev/null
++++ b/tests/ofxr_bridge_late_skip.ini
+@@ -0,0 +1,17 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=1
++late_frame_skip=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_late_skip_off.ini b/tests/ofxr_bridge_late_skip_off.ini
+new file mode 100644
+index 0000000..a270f6c
+--- /dev/null
++++ b/tests/ofxr_bridge_late_skip_off.ini
+@@ -0,0 +1,17 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=1
++late_frame_skip=0
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right

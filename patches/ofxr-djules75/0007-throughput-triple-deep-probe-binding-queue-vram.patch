@@ -1,0 +1,3382 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 63cbfec..a9f7140 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -310,6 +310,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         target_link_libraries(xrfg_openxr_fps_overlay_tests PRIVATE xrfg_fps_overlay)
+         add_test(NAME xrfg_openxr_fps_overlay_d3d12 COMMAND xrfg_openxr_fps_overlay_tests)
+         add_test(NAME xrfg_openxr_fps_overlay_d3d11 COMMAND xrfg_openxr_fps_overlay_tests d3d11)
++        # DCS VR Control (0007): the GPU statistics sampler on this machine's
++        # own GPU (skipped without a hardware D3D12 adapter).
++        add_executable(xrfg_gpu_stats_sampler_tests
++            tests/gpu_stats_sampler_tests.cpp
++            src/layer/gpu_stats_sampler.cpp)
++        target_include_directories(xrfg_gpu_stats_sampler_tests PRIVATE include)
++        target_link_libraries(xrfg_gpu_stats_sampler_tests PRIVATE xrfg_core d3d12 dxgi)
++        target_compile_definitions(xrfg_gpu_stats_sampler_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
++        if(MSVC)
++            target_compile_options(xrfg_gpu_stats_sampler_tests PRIVATE /W4 /permissive- /EHsc)
++        endif()
++        add_test(NAME xrfg_gpu_stats_sampler_tests COMMAND xrfg_gpu_stats_sampler_tests)
++        set_tests_properties(xrfg_gpu_stats_sampler_tests PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+         # DCS VR Control diagnostic panel through the real overlay.
+         add_executable(xrfg_openxr_diagnostic_panel_tests tests/openxr_diagnostic_panel_tests.cpp)
+         target_link_libraries(xrfg_openxr_diagnostic_panel_tests PRIVATE xrfg_fps_overlay)
+@@ -322,6 +335,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+ 
+     add_library(XR_APILAYER_XRFrameBridge_diagnostic SHARED
+         src/common/embedded_control.cpp
++        src/layer/gpu_stats_sampler.cpp
+         src/layer/openxr_layer.cpp
+         src/layer/provider_api.cpp)
+     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
+@@ -930,6 +944,23 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             set_tests_properties(xrfg_layer_late_skip_${skip_case} PROPERTIES TIMEOUT 120)
+         endforeach()
+ 
++        # DCS VR Control (0007): 3X with the deeper pipeline, an application
++        # steady at a third of the display rate, and the same with its frame
++        # varying by 3 ms either way: every slot fresh, no first synthetic
++        # late.
++        foreach(deep_case steady jitter)
++            add_test(
++                NAME xrfg_layer_triple_deep_${deep_case}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DTRIPLE_DEEP_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_triple_deep.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-deep-${deep_case}"
++                    "-DCASE=${deep_case}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_deep.cmake")
++            set_tests_properties(xrfg_layer_triple_deep_${deep_case} PROPERTIES TIMEOUT 120)
++        endforeach()
++
+         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
+         # device, so an ini asking for it exercises the layer's fallback to
+         # FidelityFX: the default scenario's exact expectations only hold if
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 7e9d29c..b34b030 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -212,6 +212,20 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     handed over late in the second (3X), c= 0.
+     // latency_status's b carries the same late first synthetics in bits
+     // 32-47 (0006).
++    //   DCS VR Control (0007): result=1's figures are the corrected ones
++    //     (see xrfg::latency::BlockedIntervalLog and GpuBusyMeter): CPU less
++    //     the layer's holds on every application thread that delayed the
++    //     frame, GPU the busy time the OS scheduler measured for the process
++    //     per application frame (GPU source 3), the 0004 bracket where that
++    //     is not available.
++    //   result=4 (0007): the 0004 figures beside them, for comparison: a=
++    //     CPU less the xrEndFrame thread's own holds only, b= the GPU bracket
++    //     span plus the layer's synthesis, c= the holds on other threads
++    //     before the frame's xrBeginFrame that result=1 subtracts as well.
++    //   result=5 (0007): the GPU's load, in permille of wall time over the
++    //     latest scheduler sample: a= this process's busiest engine, b= the
++    //     adapter's busiest engine (every process), c= the adapter's load
++    //     projected to 2X (see projected_gpu_load_at_double_rate).
+     adaptive_throughput,
+     // DCS VR Control (0006). The presenter's submissions timed from the
+     // return of the runtime's xrWaitFrame for their slot to the call into the
+@@ -234,6 +248,16 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //   result=4: a first synthetic arrived for a slot the skip had already
+     //     re-presented and was dropped; a= its sequence, b= 0, c= 0.
+     submission_timing,
++    // DCS VR Control (0007). Adaptive 2X/3X's probe of 2X from a stable 3X
++    // (see xrfg::latency::AdaptiveConfig::probe). result=1 started (a= the
++    // median judged work in 3X, us; b= the projected GPU load at 2X in
++    // permille, 0 unknown; c= the interval it waited, ms); 2 kept, 2X stays
++    // (a= missed-slot episodes in its window, b= its p90 work in 2X, us; c=
++    // the interval now in force, ms); 3 failed, back to 3X (a= episodes, b=
++    // p90 work, us; c= the next interval, ms); 4 skipped as impossible (a=
++    // the median judged work, us; b= the projected GPU load, permille; c=
++    // the interval to the next look, ms).
++    adaptive_probe,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+index 46be3e2..b54add2 100644
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -104,6 +104,16 @@ struct GenerationStatus {
+     bool adaptive{};           // [ofxr] adaptive_frame_gen: the multiplier is chosen live
+ };
+ 
++// DCS VR Control (0007): the GPU's memory, for `[ofxr] diag_vram`; sampled
++// off the render path (xrfg::GpuStatsSampler). Bytes.
++struct VramStatus {
++    bool known{};                 // the process figures below were read
++    std::uint64_t process_usage{}; // this process, local segment group (DXGI CurrentUsage)
++    std::uint64_t budget{};        // the budget DXGI gives this process
++    std::uint64_t adapter_used{};  // every process, resident in dedicated memory; 0 unknown
++    std::uint64_t adapter_total{}; // the adapter's dedicated memory; 0 unknown
++};
++
+ enum class DiagnosticColor : std::uint8_t { white, green, amber, grey, red };
+ struct DiagnosticLine {
+     std::string text;
+@@ -119,10 +129,21 @@ struct DiagnosticInputs {
+     bool cheeky_fresh{};       // and was published within kDcsVrStatusStaleMs
+     DcsVrStatusV1 cheeky{};
+     DiagnosticHotkey hotkey;   // shown as the hide hint when valid
++    // DCS VR Control (0007): `[ofxr] diag_vram`.
++    bool show_vram{};
++    VramStatus vram;
+ };
+ 
+ [[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ [[nodiscard]] std::string format_generation_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
++// DCS VR Control (0007): "VRAM 28.4 / 32.0 GB" - what every process has
++// resident in the adapter's dedicated memory against that memory, where the
++// adapter-wide figure can be read, followed by this process's own usage and
++// budget; this process's usage against its budget otherwise. Gigabytes are
++// 2^30 bytes, as the GPU's own figures are. Amber from 90% of the total (or
++// of the budget, for this process), red past the budget: the driver starts
++// moving this process's memory out to system RAM there.
++[[nodiscard]] std::string format_vram_line(const VramStatus& vram, DiagnosticColor& color);
+ [[nodiscard]] std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& inputs);
+ 
+ inline constexpr std::uint32_t kDiagnosticPanelWidth = 768;
+diff --git a/include/xrfg/gpu_stats_sampler.hpp b/include/xrfg/gpu_stats_sampler.hpp
+new file mode 100644
+index 0000000..7ed8a9b
+--- /dev/null
++++ b/include/xrfg/gpu_stats_sampler.hpp
+@@ -0,0 +1,60 @@
++#pragma once
++// DCS VR Control (0007): what the GPU is doing, sampled off the render path.
++//
++// A thread of its own reads, a few times a second:
++//  - busy time: the operating system's GPU scheduler counters
++//    (D3DKMTQueryStatistics) - per engine (node), how long this process's
++//    work ran on it, and how long anything ran on it at all - reduced to the
++//    busiest engine and handed with the application frames counted since the
++//    last sample to an xrfg::latency::GpuBusyMeter (see there for what the
++//    figure is and is not);
++//  - memory, when asked for: IDXGIAdapter3::QueryVideoMemoryInfo for the
++//    local segment group (this process's CurrentUsage and its Budget), the
++//    adapter's dedicated memory from its description, and what every process
++//    together has resident in the adapter's dedicated segments (the
++//    scheduler's segment statistics; 0 where they cannot be read).
++// Nothing here is on any frame call: the frame paths only read the last
++// snapshot. gdi32's D3DKMTQueryStatistics is looked up at run time and
++// nothing else is needed (no NVML, no vendor library); where it is missing
++// the busy reading simply never becomes valid.
++#include <atomic>
++#include <cstdint>
++#include <memory>
++
++#include <windows.h>
++
++#include "xrfg/diagnostic_overlay_model.hpp"
++#include "xrfg/latency_control.hpp"
++
++namespace xrfg {
++
++struct GpuStatsSnapshot {
++    latency::GpuBusyReading busy;
++    VramStatus vram;
++};
++
++class GpuStatsSampler {
++public:
++    // `frames`: the application frames ended so far, read at each busy
++    // sample; must outlive the sampler.
++    GpuStatsSampler(
++        LUID adapter,
++        bool sample_busy,
++        bool sample_vram,
++        const std::atomic<std::uint64_t>* frames) noexcept;
++    ~GpuStatsSampler();
++    GpuStatsSampler(const GpuStatsSampler&) = delete;
++    GpuStatsSampler& operator=(const GpuStatsSampler&) = delete;
++
++    [[nodiscard]] GpuStatsSnapshot snapshot() const noexcept;
++
++    static constexpr std::int64_t kBusyIntervalMs = 250;
++    // At most twice a second.
++    static constexpr std::int64_t kVramIntervalMs = 500;
++
++private:
++    struct Impl;
++    std::unique_ptr<Impl> impl_;
++};
++
++} // namespace xrfg
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index 30cb97c..dfd621e 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -81,16 +81,18 @@ struct ConfiguredNvidiaOptions {
+ 
+ // `[ofxr] deep_pipeline`: one display period of extra depth, bought with one
+ // display period of latency. On unless set to 0. Read once per session, at
+-// xrCreateSession; the tray calls it "Prefer FPS over latency".
++// xrCreateSession; the tray calls it "Prefer FPS over latency". DCS VR
++// Control (0007): it applies to 3X as well (see read_triple_frame_gen).
+ [[nodiscard]] bool read_deep_pipeline(
+     const std::filesystem::path& module_directory) noexcept;
+ 
+ // `[ofxr] triple_frame_gen`: two synthetic frames per application frame
+ // instead of one, for an application running at a third of the display rate.
+ // Off unless set to 1. Read at xrCreateSession and then followed while the
+-// session runs, where the session can take either shape; it takes the
+-// shallow pipeline whatever deep_pipeline says. The tray calls it
+-// "3X Frame Gen".
++// session runs, where the session can take either shape. DCS VR Control
++// (0007): with deep_pipeline=1 it takes 3X's own deeper pipeline on a D3D12
++// binding (the D3D11 bridge's included), the shallow one otherwise. The tray
++// calls it "3X Frame Gen".
+ [[nodiscard]] bool read_triple_frame_gen(
+     const std::filesystem::path& module_directory) noexcept;
+ 
+@@ -117,6 +119,26 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_late_frame_skip(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS VR Control (0007). `[ofxr] adaptive_probe`: under adaptive 2X/3X, a
++// stable 3X tries 2X now and then and keeps it when it holds (see
++// xrfg::latency::AdaptiveConfig::probe). On unless set to 0. Read once per
++// session.
++[[nodiscard]] bool read_adaptive_probe(
++    const std::filesystem::path& module_directory) noexcept;
++
++// DCS VR Control (0007). `[ofxr] own_binding_queue`: a D3D11 session the
++// bridge took over hands every runtime a queue of the layer's own, as it
++// always did on SteamVR, so a submission waits on the GPU only for what it
++// names. On unless set to 0. Read once per session.
++[[nodiscard]] bool read_own_binding_queue(
++    const std::filesystem::path& module_directory) noexcept;
++
++// DCS VR Control (0007). `[ofxr] diag_vram`: the diagnostic panel shows the
++// GPU's memory ("VRAM 28.4 / 32.0 GB"). Off unless set to 1. Read once per
++// session.
++[[nodiscard]] bool read_diag_vram(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // Held by every running session that cannot follow the "3X Frame Gen"
+ // switch live - one started with "Prefer FPS over latency" off, or one the
+ // runtime's swapchain limit pushed back to a single synthetic. The tray asks
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index 58de77b..19711fe 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -15,6 +15,11 @@
+ //                              that keeps missing its slot
+ //   split_synthesis_gpu_time   (0006) synthesis shader time apart from the
+ //                              optical-flow engine waits
++//   BlockedIntervalLog         (0007) the layer's holds on every application
++//                              thread, attributed to the frame they delayed
++//   GpuBusyMeter               (0007) GPU busy time per application frame
++//                              from the scheduler's running-time counters
++//   TripleDepth                (0007) the 3X deeper pipeline's one-slot shift
+ //
+ // All times are nanoseconds on one monotonic timeline the caller chooses.
+ 
+@@ -299,21 +304,23 @@ struct DisplayTimeCorrector {
+     // were told under the old value and are still in the queue.
+     static constexpr std::uint32_t kSettleSamples = 6;
+     // Mode keys: what was learned in each shape is kept for when the session
+-    // comes back to it.
+-    static constexpr std::size_t kModes = 3;
++    // comes back to it. DCS VR Control (0007): four, with 3X's deeper
++    // pipeline.
++    static constexpr std::size_t kModes = 4;
+ 
+     Nanoseconds correction{0};
+     std::array<Nanoseconds, kWindowSamples> window{};
+     std::size_t count{};
+     std::uint32_t skip{};
+     Nanoseconds pending_step{};
+-    std::array<Nanoseconds, kModes> learned{-1, -1, -1};
++    std::array<Nanoseconds, kModes> learned{-1, -1, -1, -1};
+     std::size_t mode{};
+ 
+     void reset() noexcept { *this = DisplayTimeCorrector{}; }
+ };
+ 
+-// 0: 2X shallow, 1: 2X with the deeper pipeline, 2: 3X.
++// 0: 2X shallow, 1: 2X with the deeper pipeline, 2: 3X, 3 (0007): 3X with
++// the deeper pipeline.
+ [[nodiscard]] std::size_t display_time_mode(
+     std::uint32_t frames_per_application_frame, bool deep_pipeline) noexcept;
+ 
+@@ -416,6 +423,37 @@ struct AdaptiveConfig {
+     Nanoseconds stall{250 * kMillisecond};
+     std::uint32_t min_samples_down{20};
+     std::uint32_t min_samples_up{6};
++
++    // DCS VR Control (0007): probing 2X from a stable 3X.
++    //
++    // Whatever 3X measures is measured under 3X's own cap: an application
++    // released once every three periods cannot show that it would hold two.
++    // A live DCS flight at 90 Hz judged 18-33 ms of work a frame for minutes
++    // on end, never under the 18.9 ms the headroom rule needs, and stayed in
++    // 3X - and with it a third of every second's frames synthesized - while
++    // the headset's own GPU readout said 50-67%. So, off by default (the
++    // layer turns it on with adaptive control): once 3X has been held for
++    // probe_interval, 2X is tried for probe_window. Missed slots in it -
++    // probe_fail_episodes episodes after probe_settle, the switch's own
++    // re-phasing excluded - or a p90 over two periods send it straight back
++    // to 3X, past min_dwell, and the interval doubles up to
++    // probe_max_interval; a window that holds keeps 2X, where the ordinary
++    // rules take over, and the interval starts again from probe_interval.
++    // A probe is not made at all, and the interval is not grown, when the
++    // evidence says it cannot work: the median judged value over
++    // probe_lookback more than probe_impossible_fraction of two periods (3X
++    // can inflate the figures it measures, but not past what one frame in
++    // three periods allows), or the GPU's projected load at 2X (see
++    // projected_gpu_load_at_double_rate) over probe_impossible_gpu_load.
++    bool probe{false};
++    Nanoseconds probe_interval{20 * kSecond};
++    Nanoseconds probe_max_interval{120 * kSecond};
++    Nanoseconds probe_window{2500 * kMillisecond};
++    Nanoseconds probe_settle{500 * kMillisecond};
++    std::uint32_t probe_fail_episodes{2};
++    Nanoseconds probe_lookback{3 * kSecond};
++    double probe_impossible_fraction{1.4};
++    double probe_impossible_gpu_load{1.0};
+ };
+ 
+ enum class AdaptiveReason : std::uint32_t {
+@@ -425,6 +463,17 @@ enum class AdaptiveReason : std::uint32_t {
+     late = 3,         // 2X -> 3X, missed slots
+     manual = 4,       // the ini's triple_frame_gen changed (caller's record)
+     enabled = 5,      // adaptive turned on or off (caller's record)
++    probe = 6,        // (0007) 3X -> 2X, trying 2X from a stable 3X
++    probe_failed = 7, // (0007) 2X -> 3X, the probe missed slots or ran slow
++};
++
++// DCS VR Control (0007): what a probe did; see AdaptiveConfig::probe.
++enum class AdaptiveProbeEvent : std::uint32_t {
++    none = 0,
++    started = 1,  // the decision's target is 2
++    kept = 2,     // the window held: 2X stays (caller: probe_kept)
++    failed = 3,   // the decision's target is 3
++    skipped = 4,  // not tried: the evidence rules it out (caller: probe_skipped)
+ };
+ 
+ // Which cost bounds the application, by the p90s: 1 CPU, 2 GPU, 0 neither
+@@ -451,6 +500,9 @@ struct AdaptiveStats {
+     // (add_late_leaders). 3X has nowhere lower to go, so nothing decides on
+     // these; they are what the status record shows.
+     std::uint32_t late_leaders{};
++    // DCS VR Control (0007): the median of the judged value, -1 without
++    // judged frames.
++    Nanoseconds p50{-1};
+ };
+ 
+ struct AdaptiveDecision {
+@@ -458,6 +510,13 @@ struct AdaptiveDecision {
+     AdaptiveReason reason{AdaptiveReason::none};
+     AdaptiveStats stats;
+     Nanoseconds threshold{};
++    // DCS VR Control (0007): a probe's part in this decision, the interval
++    // to the next one as it will stand, the probe window's missed-slot
++    // episodes so far, and the projected GPU load it saw (-1: none).
++    AdaptiveProbeEvent probe{AdaptiveProbeEvent::none};
++    Nanoseconds probe_interval{};
++    std::uint32_t probe_late{};
++    double projected_gpu_load{-1.0};
+ };
+ 
+ class AdaptiveFrameGenController {
+@@ -481,8 +540,27 @@ public:
+     void add_late_leaders(Nanoseconds at, std::uint32_t count = 1) noexcept;
+     [[nodiscard]] AdaptiveDecision evaluate(
+         Nanoseconds now, Nanoseconds period) const noexcept;
+-    // The caller applied a switch.
+-    void switched(std::uint32_t to, Nanoseconds now) noexcept;
++    // The caller applied a switch. DCS VR Control (0007): with the decision's
++    // reason, so a probe is known for one.
++    void switched(
++        std::uint32_t to,
++        Nanoseconds now,
++        AdaptiveReason reason = AdaptiveReason::none) noexcept;
++    // DCS VR Control (0007): the caller acted on a probe event that moves
++    // nothing (AdaptiveProbeEvent::kept and ::skipped).
++    void probe_kept(Nanoseconds now) noexcept;
++    void probe_skipped(Nanoseconds now) noexcept;
++    // DCS VR Control (0007): the GPU's load projected to 2X (a fraction of
++    // the adapter's time), as last measured; see
++    // projected_gpu_load_at_double_rate. Negative: not measured.
++    void set_projected_gpu_load(Nanoseconds at, double load) noexcept;
++    [[nodiscard]] bool probing() const noexcept { return probing_; }
++    [[nodiscard]] Nanoseconds probe_interval() const noexcept {
++        return probe_interval_;
++    }
++    [[nodiscard]] Nanoseconds next_probe_at() const noexcept {
++        return next_probe_at_;
++    }
+ 
+     [[nodiscard]] std::uint32_t mode() const noexcept { return mode_; }
+     [[nodiscard]] Nanoseconds downshift_window() const noexcept {
+@@ -518,6 +596,262 @@ private:
+     std::array<std::uint32_t, kLateEvents> late_leader_count_{};
+     std::size_t late_leader_filled_{};
+     std::size_t late_leader_next_{};
++    // 0007: the probe.
++    bool probing_{};
++    Nanoseconds probe_started_{};
++    Nanoseconds probe_interval_{};
++    Nanoseconds next_probe_at_{};
++    double projected_gpu_load_{-1.0};
++    Nanoseconds projected_gpu_load_at_{};
++    // Missed-slot episodes after `from`, up to `now`.
++    [[nodiscard]] std::uint32_t late_episodes_since(
++        Nanoseconds from, Nanoseconds now) const noexcept;
++    // stats() over (from, now], with no settle of its own.
++    [[nodiscard]] AdaptiveStats stats_between(
++        Nanoseconds from, Nanoseconds now) const noexcept;
++};
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): the layer's holds on the application, attributed to
++// the frame they delayed.
++//
++// Adaptive control's CPU figure is a frame's interval less the time the
++// layer held the application. 0004 took only the thread that calls
++// xrEndFrame into account, which misses an application whose frame starts on
++// another thread: DCS World calls xrWaitFrame on its main thread once the
++// render thread's xrEndFrame has returned, and the render thread begins its
++// next frame only after that - a hold there delays the frame exactly as much
++// as one on the render thread does, and was counted as the application's own
++// work.
++//
++// Every hold is logged as an interval, with the thread it was on. A frame's
++// blocked time is the union, within its interval, of
++//   - every hold on the thread that ends the frame, wherever it falls, and
++//   - holds on any other thread that fall between the frame's start and the
++//     moment its own thread entered xrBeginFrame: the stretch in which the
++//     frame was waiting to start at all.
++// Holds on other threads after that overlap the frame's own work - a wait
++// thread that sits in xrWaitFrame while the render thread draws costs the
++// frame nothing - and are not counted. The union, not the sum: two threads
++// held at once delay a frame once.
++//
++// Limits: what the application does between a hold on another thread and
++// its own xrBeginFrame (its simulation step, say) is still counted as its
++// work, which it is; and a hold the layer cannot see - the application
++// waiting on its own threads, or on its GPU - is work too, as far as this
++// can tell.
++struct BlockedSplit {
++    // The union described above.
++    Nanoseconds total{};
++    // Of it, the frame thread's own holds alone (0004's figure).
++    Nanoseconds own{};
+ };
+ 
++class BlockedIntervalLog {
++public:
++    static constexpr std::size_t kCapacity = 512;
++
++    void add(std::uint32_t thread, Nanoseconds start, Nanoseconds end) noexcept;
++    // Over (from, to]: the frame thread's holds, and other threads' up to
++    // other_until (clamped into the interval).
++    [[nodiscard]] BlockedSplit blocked(
++        Nanoseconds from,
++        Nanoseconds to,
++        std::uint32_t frame_thread,
++        Nanoseconds other_until) const noexcept;
++    void reset() noexcept;
++
++private:
++    struct Entry {
++        Nanoseconds start{};
++        Nanoseconds end{};
++        std::uint32_t thread{};
++    };
++    std::array<Entry, kCapacity> entries_{};
++    std::size_t next_{};
++    std::size_t filled_{};
++};
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): GPU busy time per application frame.
++//
++// 0004 timed the application's frame with two GPU timestamps on its own
++// context, opened at its release and closed at its next xrEndFrame. That is
++// a span, not busy time: on a title that submits as it records, the GPU
++// waits for the CPU inside it, so a CPU-bound frame reads as long on the GPU
++// as on the CPU, plus the tail of its last commands - on the live DCS flight
++// 24-33 ms of "GPU" a frame against a 16-28 ms CPU, with the headset's own
++// GPU readout at 50-67%. Timestamps alone cannot tell idle from busy inside
++// one stretch of commands.
++//
++// The operating system's GPU scheduler can: it keeps, per process and per
++// engine (node), the time that process's work actually ran (what Task
++// Manager shows). The layer samples it a few times a second off the render
++// path and feeds the deltas here with the count of application frames: busy
++// per frame is the busiest engine's running time over the frames in
++// between. It covers everything the process put on that engine - the
++// application's frame, the layer's synthesis and copies - and nothing it did
++// not run, so idle gaps never count. The adapter's own counters give the
++// whole GPU's load, the compositor's and every other process's included,
++// which projected_gpu_load_at_double_rate uses.
++//
++// Limits: a sample spans several frames, so a frame's figure is the average
++// over its sample (a single long frame is diluted); engines run concurrently
++// and only the busiest is taken, which is right for a GPU-bound title and an
++// underestimate for one that alternates engines heavily; and another
++// process's work on the same engine slows this one's without showing in its
++// figure (it shows in the adapter's load).
++struct GpuBusySample {
++    Nanoseconds at{};
++    // Deltas since the previous sample: the busiest of the process's engines
++    // and the busiest of the adapter's (each the max of per-engine deltas),
++    // the application frames ended, and the wall time between the samples.
++    Nanoseconds process_busy_delta{};
++    Nanoseconds adapter_busy_delta{};
++    std::uint64_t frames_delta{};
++    Nanoseconds span{};
++};
++
++struct GpuBusyReading {
++    bool valid{};
++    Nanoseconds at{};
++    // Busy per application frame, -1 without frames in the sample.
++    Nanoseconds per_frame{-1};
++    // Fractions of the sample's wall time.
++    double process_load{};
++    double adapter_load{};
++};
++
++class GpuBusyMeter {
++public:
++    // Samples shorter than this are folded into the next one.
++    static constexpr Nanoseconds kMinimumSpan = 150 * kMillisecond;
++    void observe(const GpuBusySample& sample) noexcept;
++    [[nodiscard]] GpuBusyReading latest() const noexcept { return latest_; }
++    // The latest reading if it is no older than `max_age` at `now`; an
++    // invalid one otherwise.
++    [[nodiscard]] GpuBusyReading fresh(
++        Nanoseconds now, Nanoseconds max_age) const noexcept;
++    void reset() noexcept { *this = GpuBusyMeter{}; }
++
++private:
++    GpuBusySample pending_{};
++    GpuBusyReading latest_{};
++};
++
++// The adapter's load if the application ran at one and a half times its 3X
++// rate (3X -> 2X): its own share grows by half, everyone else's stays.
++// Inputs as fractions of wall time; the result can exceed 1, which is the
++// point of it.
++[[nodiscard]] double projected_gpu_load_at_double_rate(
++    double process_load, double adapter_load) noexcept;
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): 3X with the deeper pipeline.
++//
++// In 3X the application is released on the presenter's count, once every
++// three slots, at the slot its previous frame's real one goes out in; its
++// next frame's first synthetic takes the slot after that, a single period
++// later. Under a pipelined application (DCS World's shape: the presenter
++// keeps no frame to repeat and waits for the next one instead) that phase
++// never moves, so a frame that needs more than a period to render and
++// synthesize sends every first synthetic out late - on the live flight, 16
++// to 28 ms of work against an 11.1 ms period, all of them, until the
++// late-frame skip stopped making them (the headset saw 60 distinct frames a
++// second).
++//
++// The deeper pipeline re-presents the previous real frame in one slot, once:
++// from then on every frame goes out a slot later than it would have - the
++// application keeps its rate (that slot advances the presenter's count like
++// any other) and its first synthetic has two periods instead of one, paid
++// for in a period of latency. If first synthetics still go out late -
++// kGrowLate or more of a window of kWindow of them, in kGrowWindows windows
++// in a row, so that one hitch (a frame of 90 ms late three first synthetics
++// at once) does not add a period of latency for good - one more slot is
++// taken the same way, up to kMaxSlots: with two, the first synthetic has the whole
++// three-period cycle, which is all an application that holds 3X at all can
++// need. Slack beyond what the frames use is not given back by removing a
++// slot but by the release delay, which keeps one period of it in hand
++// (triple_slack_for_tuner).
++//
++// It is not done by holding every first synthetic until it is a period old
++// (2X's deeper pipeline): under a pipelined application there is no frame to
++// hold with, and a hold for age would add a slot every time the application
++// ran a little late - a pipeline that only ever deepens.
++//
++// Armed whenever the session takes 3X with the deeper pipeline (its start,
++// a switch, a new presenter), which also forgets the slots taken before;
++// taken at the first slot after a real frame whose first synthetic (or the
++// late-frame skip's one synthetic) is waiting or not yet there, when there
++// is a frame to re-present.
++struct TripleDepth {
++    static constexpr std::uint32_t kMaxSlots = 2;
++    static constexpr std::uint32_t kWindow = 30;
++    static constexpr std::uint32_t kGrowLate = 3;
++    static constexpr std::uint32_t kGrowWindows = 2;
++
++    bool active{};               // 3X with the deeper pipeline in force
++    bool pending{};              // a slot is wanted
++    std::uint32_t slots{};       // taken in this shape
++    std::uint32_t inserted{};    // taken over the session, for the log
++    std::uint32_t window{};
++    std::uint32_t window_late{};
++    std::uint32_t late_windows{}; // in a row
++
++    void arm(bool deep_pipeline, std::uint32_t frames_per_application_frame) noexcept {
++        active = deep_pipeline && frames_per_application_frame > 2;
++        pending = active;
++        slots = 0;
++        window = 0;
++        window_late = 0;
++        late_windows = 0;
++    }
++    // One first synthetic's slot (not a re-presented one of this): whether
++    // it was late. Returns true when this asks for one more slot.
++    bool observe_leader(bool late) noexcept {
++        if (!active || pending || slots >= kMaxSlots) {
++            return false;
++        }
++        ++window;
++        window_late += late ? 1U : 0U;
++        if (window < kWindow) {
++            return false;
++        }
++        late_windows = window_late >= kGrowLate ? late_windows + 1 : 0;
++        window = 0;
++        window_late = 0;
++        const bool grow = late_windows >= kGrowWindows;
++        if (grow) {
++            late_windows = 0;
++        }
++        pending = grow;
++        return grow;
++    }
++    // At a slot after a real frame (gen1_slot): whether this slot is the one
++    // re-presented. `leader_or_empty`: the front of the queue is a first
++    // synthetic, or nothing is queued. `can_repeat`: a frame to re-present.
++    [[nodiscard]] bool take(
++        bool gen1_slot, bool leader_or_empty, bool can_repeat) noexcept {
++        if (!pending || !gen1_slot || !leader_or_empty || !can_repeat) {
++            return false;
++        }
++        pending = false;
++        ++slots;
++        ++inserted;
++        window = 0;
++        window_late = 0;
++        late_windows = 0;
++        return true;
++    }
++};
++
++// The release delay's slack sample in 3X with the deeper pipeline: a period
++// of the measured slack is the depth itself and is not given back as delay,
++// so the tuner keeps that period in hand (it raises only past a period plus
++// kSlackMargin, and backs off as soon as less than a period is left).
++[[nodiscard]] constexpr Nanoseconds triple_slack_for_tuner(
++    Nanoseconds slack, Nanoseconds period, bool deep_pipeline) noexcept {
++    return deep_pipeline && period > 0 ? slack - period : slack;
++}
++
+ } // namespace xrfg::latency
+diff --git a/include/xrfg/openxr_fps_overlay.hpp b/include/xrfg/openxr_fps_overlay.hpp
+index 2fb6a1f..eb7acea 100644
+--- a/include/xrfg/openxr_fps_overlay.hpp
++++ b/include/xrfg/openxr_fps_overlay.hpp
+@@ -27,6 +27,9 @@ public:
+     // DCS VR Control diagnostic panel: the generation state shown on it. Called
+     // on the application's end-frame thread before application_frame.
+     void set_generation_status(const GenerationStatus& status) noexcept;
++    // DCS VR Control (0007): `[ofxr] diag_vram` - the panel's VRAM line, as
++    // last sampled off the render path. `show` false leaves the line out.
++    void set_vram_status(const VramStatus& status, bool show) noexcept;
+     // Whether the diagnostic panel is currently toggled on (session only).
+     [[nodiscard]] bool diagnostic_visible() const noexcept;
+     // Called on the application's end-frame thread, not the presenter thread.
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+index 584bed6..a5bd138 100644
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -12,11 +12,20 @@ nvidia_bidirectional=0
+ ; "Prefer FPS over latency" in the tray: one frame of extra depth for games that
+ ; only just reach half the headset's refresh rate, at about one frame of
+ ; latency. 1 on (default), 0 off. Read when the game starts its session.
++; Applies to 3X as well, on D3D12 and bridged D3D11 games.
+ deep_pipeline=1
+ ; "3X Frame Gen" in the tray: two generated frames for every game frame, for
+ ; games at a third of the headset's refresh rate. 0 off (default), 1 on.
+ ; Followed live in a running game that started with deep_pipeline=1.
+ triple_frame_gen=0
++; Under adaptive_frame_gen=1: a steady 3X tries 2X every 20 s (backing off to
++; 2 min after a failed try) and keeps it when it holds. 1 on (default), 0 off.
++adaptive_probe=1
++; A bridged D3D11 game hands every runtime a GPU queue of the layer's own, so
++; a submission waits only for what it shows. 1 on (default), 0 off.
++own_binding_queue=1
++; The in-headset diagnostic panel shows the GPU's memory. 0 off (default), 1 on.
++diag_vram=0
+ ; Frame generation for Vulkan games. 1 on (default), 0 off; not in the tray's
+ ; menu, set vulkan_bridge=0 in tray.ini instead. Needs the OFXR Vulkan layer
+ ; registered beside this one, which the tray does while armed with it on.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index 61e4779..a0a82c9 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -271,6 +271,39 @@ bool read_late_frame_skip(
+     }
+ }
+ 
++namespace {
++
++// DCS VR Control (0007): an [ofxr] switch with a default.
++[[nodiscard]] bool read_ofxr_switch(
++    const std::filesystem::path& module_directory,
++    const wchar_t* key,
++    bool fallback) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return fallback;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        return GetPrivateProfileIntW(
++                   L"ofxr", key, fallback ? 1 : 0, ini_path.c_str()) != 0;
++    } catch (...) {
++        return fallback;
++    }
++}
++
++} // namespace
++
++bool read_adaptive_probe(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"adaptive_probe", true);
++}
++
++bool read_own_binding_queue(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"own_binding_queue", true);
++}
++
++bool read_diag_vram(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"diag_vram", false);
++}
++
+ bool read_display_time_correction(
+     const std::filesystem::path& module_directory) noexcept {
+     try {
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+index 525ec2a..33ed195 100644
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -116,6 +116,29 @@ std::string format_generation_line(const DiagnosticInputs& in, DiagnosticColor&
+     return text;
+ }
+ 
++std::string format_vram_line(const VramStatus& vram, DiagnosticColor& color) {
++    if (!vram.known) { color = DiagnosticColor::grey; return "VRAM: not available"; }
++    constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
++    const auto gb = [](std::uint64_t bytes) { return fixed(static_cast<float>(static_cast<double>(bytes) / kGiB), 1); };
++    const bool adapter_wide = vram.adapter_used != 0 && vram.adapter_total != 0;
++    const std::uint64_t used = adapter_wide ? vram.adapter_used : vram.process_usage;
++    const std::uint64_t total = adapter_wide ? vram.adapter_total
++        : vram.budget != 0 ? vram.budget : vram.adapter_total;
++    std::string text = "VRAM " + gb(used) + " / " + gb(total) + " GB";
++    if (adapter_wide) {
++        text += " (app " + gb(vram.process_usage);
++        if (vram.budget != 0) text += ", budget " + gb(vram.budget);
++        text += ")";
++    } else if (vram.budget != 0) {
++        text += " (app / budget)";
++    }
++    color = DiagnosticColor::white;
++    if (vram.budget != 0 && vram.process_usage > vram.budget) color = DiagnosticColor::red;
++    else if ((total != 0 && used * 10 >= total * 9) ||
++             (vram.budget != 0 && vram.process_usage * 10 >= vram.budget * 9)) color = DiagnosticColor::amber;
++    return text;
++}
++
+ std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& in) {
+     std::vector<DiagnosticLine> lines;
+     lines.push_back({"FPS " + whole(in.output_fps), DiagnosticColor::white});
+@@ -126,6 +149,11 @@ std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& in)
+     lines.push_back(std::move(generation));
+     lines.push_back({"App " + whole(in.app_fps) + " fps -> out " + whole(in.output_fps) + " fps",
+         DiagnosticColor::white});
++    if (in.show_vram) { // 0007
++        DiagnosticLine vram;
++        vram.text = format_vram_line(in.vram, vram.color);
++        lines.push_back(std::move(vram));
++    }
+     if (in.hotkey.virtual_key)
+         lines.push_back({diagnostic_hotkey_label(in.hotkey) + ": hide", DiagnosticColor::grey});
+     return lines;
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+index 76221e8..1cae500 100644
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <utility>
+ 
+ namespace xrfg::latency {
+ namespace {
+@@ -276,7 +277,8 @@ SynthesisGpuSplit split_synthesis_gpu_time(
+ std::size_t display_time_mode(
+     std::uint32_t frames_per_application_frame, bool deep_pipeline) noexcept {
+     if (frames_per_application_frame > 2) {
+-        return 2;
++        // DCS VR Control (0007): 3X has a deeper pipeline of its own.
++        return deep_pipeline ? 3 : 2;
+     }
+     return deep_pipeline ? 1 : 0;
+ }
+@@ -367,7 +369,9 @@ Nanoseconds rebase_display_time_correction(
+ }
+ 
+ AdaptiveFrameGenController::AdaptiveFrameGenController(AdaptiveConfig config) noexcept
+-    : config_(config), downshift_window_(config.downshift_window) {}
++    : config_(config),
++      downshift_window_(config.downshift_window),
++      probe_interval_(config.probe_interval) {}
+ 
+ void AdaptiveFrameGenController::start(std::uint32_t mode, Nanoseconds now) noexcept {
+     mode_ = mode > 2 ? 3U : 2U;
+@@ -382,6 +386,11 @@ void AdaptiveFrameGenController::start(std::uint32_t mode, Nanoseconds now) noex
+     late_next_ = 0;
+     late_leader_filled_ = 0;
+     late_leader_next_ = 0;
++    // 0007: a probe is due one interval after a start in 3X.
++    probing_ = false;
++    probe_started_ = 0;
++    probe_interval_ = config_.probe_interval;
++    next_probe_at_ = now + probe_interval_;
+ }
+ 
+ void AdaptiveFrameGenController::add_late_leaders(
+@@ -454,13 +463,25 @@ namespace {
+     return values[std::max<std::size_t>(rank, 1) - 1];
+ }
+ 
++// DCS VR Control (0007): the median of values already sorted by
++// nearest_rank_p90; -1 for none.
++[[nodiscard]] Nanoseconds sorted_median(
++    const std::array<Nanoseconds, 512>& values, std::size_t n) noexcept {
++    return n == 0 ? -1 : values[(n - 1) / 2];
++}
++
+ } // namespace
+ 
+ AdaptiveStats AdaptiveFrameGenController::stats(
+     Nanoseconds now, Nanoseconds span) const noexcept {
++    return stats_between(
++        std::max(now - span, last_switch_ + config_.settle), now);
++}
++
++AdaptiveStats AdaptiveFrameGenController::stats_between(
++    Nanoseconds from, Nanoseconds now) const noexcept {
+     static_assert(kWorkSamples == 512);
+     AdaptiveStats result{};
+-    const Nanoseconds from = std::max(now - span, last_switch_ + config_.settle);
+     const auto inside = [&](Nanoseconds at) { return at > from && at <= now; };
+     std::array<Nanoseconds, kWorkSamples> values{};
+     std::size_t n = 0;
+@@ -494,6 +515,7 @@ AdaptiveStats AdaptiveFrameGenController::stats(
+     result.gpu_p90 = nearest_rank_p90(gpu, gpu_n);
+     result.samples = static_cast<std::uint32_t>(n);
+     result.p90 = nearest_rank_p90(values, n);
++    result.p50 = sorted_median(values, n); // 0007
+     if (result.gpu_p90 >= 0 || result.cpu_p90 >= 0) {
+         result.limiter = result.gpu_p90 > result.cpu_p90
+             ? AdaptiveLimiter::gpu
+@@ -535,6 +557,30 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+             decision.stats.p90 <= decision.threshold) {
+             decision.target = 2;
+             decision.reason = AdaptiveReason::headroom;
++            return decision;
++        }
++        // DCS VR Control (0007): or try it; see AdaptiveConfig::probe.
++        if (config_.probe && now >= next_probe_at_) {
++            decision.probe_interval = probe_interval_;
++            const AdaptiveStats recent = stats(now, config_.probe_lookback);
++            const bool load_fresh = projected_gpu_load_ >= 0.0 &&
++                now - projected_gpu_load_at_ <= 2 * kSecond;
++            decision.projected_gpu_load = load_fresh ? projected_gpu_load_ : -1.0;
++            const bool work_rules_out =
++                recent.samples >= config_.min_samples_up && recent.p50 >= 0 &&
++                static_cast<double>(recent.p50) >
++                    config_.probe_impossible_fraction *
++                        static_cast<double>(two_periods);
++            const bool gpu_rules_out = load_fresh &&
++                projected_gpu_load_ > config_.probe_impossible_gpu_load;
++            decision.stats.p50 = recent.p50;
++            if (work_rules_out || gpu_rules_out) {
++                decision.probe = AdaptiveProbeEvent::skipped;
++            } else {
++                decision.target = 2;
++                decision.reason = AdaptiveReason::probe;
++                decision.probe = AdaptiveProbeEvent::started;
++            }
+         }
+         return decision;
+     }
+@@ -542,6 +588,31 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+     decision.stats = stats(now, config_.upshift_window);
+     // Missed slots over their own, longer window (0005).
+     decision.stats.late = stats(now, config_.upshift_late_window).late;
++    // DCS VR Control (0007): a probe is judged on its own window, and fails
++    // past min_dwell: what it tried did not work, and every slot it stays
++    // costs the user.
++    if (probing_) {
++        decision.probe_interval = probe_interval_;
++        const Nanoseconds judged_from = probe_started_ + config_.probe_settle;
++        decision.probe_late = late_episodes_since(judged_from, now);
++        // Its own settle, shorter than stats()'s.
++        const AdaptiveStats window = stats_between(judged_from, now);
++        const bool slow = window.samples >= config_.min_samples_up &&
++            window.p90 > two_periods;
++        if (decision.probe_late >= config_.probe_fail_episodes || slow) {
++            decision.target = 3;
++            decision.reason = AdaptiveReason::probe_failed;
++            decision.probe = AdaptiveProbeEvent::failed;
++            decision.probe_interval = std::min(
++                probe_interval_ * 2, config_.probe_max_interval);
++            decision.stats.p90 = window.p90;
++        } else if (now - probe_started_ >= config_.probe_window) {
++            decision.probe = AdaptiveProbeEvent::kept;
++            decision.probe_interval = config_.probe_interval;
++            decision.stats.p90 = window.p90;
++        }
++        return decision;
++    }
+     if (now - last_switch_ < config_.min_dwell) {
+         return decision;
+     }
+@@ -556,10 +627,20 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+     return decision;
+ }
+ 
+-void AdaptiveFrameGenController::switched(std::uint32_t to, Nanoseconds now) noexcept {
++void AdaptiveFrameGenController::switched(
++    std::uint32_t to, Nanoseconds now, AdaptiveReason reason) noexcept {
+     to = to > 2 ? 3U : 2U;
+     if (to == 2 && mode_ > 2) {
+         last_downshift_ = now;
++        // DCS VR Control (0007): a probe is a trial, not a downshift the
++        // headroom rule made; a failed one does not lengthen its window.
++        if (reason == AdaptiveReason::probe) {
++            last_downshift_ = -1;
++            probing_ = true;
++            probe_started_ = now;
++        } else {
++            probing_ = false;
++        }
+     } else if (to == 3 && mode_ == 2) {
+         if (last_downshift_ >= 0 && now - last_downshift_ < config_.flap_window) {
+             downshift_window_ = std::min(
+@@ -567,9 +648,176 @@ void AdaptiveFrameGenController::switched(std::uint32_t to, Nanoseconds now) noe
+         } else {
+             downshift_window_ = config_.downshift_window;
+         }
++        // 0007: back in 3X; a failed probe backs off.
++        if (probing_) {
++            probe_interval_ = std::min(
++                probe_interval_ * 2, config_.probe_max_interval);
++        }
++        probing_ = false;
++        next_probe_at_ = now + probe_interval_;
+     }
+     mode_ = to;
+     last_switch_ = now;
+ }
+ 
++void AdaptiveFrameGenController::probe_kept(Nanoseconds now) noexcept {
++    static_cast<void>(now);
++    probing_ = false;
++    probe_interval_ = config_.probe_interval;
++}
++
++void AdaptiveFrameGenController::probe_skipped(Nanoseconds now) noexcept {
++    next_probe_at_ = now + probe_interval_;
++}
++
++void AdaptiveFrameGenController::set_projected_gpu_load(
++    Nanoseconds at, double load) noexcept {
++    projected_gpu_load_ = load;
++    projected_gpu_load_at_ = at;
++}
++
++std::uint32_t AdaptiveFrameGenController::late_episodes_since(
++    Nanoseconds from, Nanoseconds now) const noexcept {
++    std::uint32_t episodes = 0;
++    for (std::size_t index = 0; index < late_count_; ++index) {
++        if (late_at_[index] > from && late_at_[index] <= now) {
++            ++episodes;
++        }
++    }
++    return episodes;
++}
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): blocked intervals.
++
++void BlockedIntervalLog::add(
++    std::uint32_t thread, Nanoseconds start, Nanoseconds end) noexcept {
++    if (end <= start) {
++        return;
++    }
++    entries_[next_] = Entry{start, end, thread};
++    next_ = (next_ + 1) % kCapacity;
++    filled_ = std::min(filled_ + 1, kCapacity);
++}
++
++void BlockedIntervalLog::reset() noexcept {
++    next_ = 0;
++    filled_ = 0;
++}
++
++namespace {
++
++// Union length of [start, end) pairs, sorted in place.
++[[nodiscard]] Nanoseconds union_length(
++    std::array<std::pair<Nanoseconds, Nanoseconds>, BlockedIntervalLog::kCapacity>& spans,
++    std::size_t n) noexcept {
++    std::sort(spans.begin(), spans.begin() + static_cast<std::ptrdiff_t>(n));
++    Nanoseconds total = 0;
++    Nanoseconds open_start = 0;
++    Nanoseconds open_end = -1;
++    bool open = false;
++    for (std::size_t index = 0; index < n; ++index) {
++        const auto [start, end] = spans[index];
++        if (!open) {
++            open_start = start;
++            open_end = end;
++            open = true;
++        } else if (start <= open_end) {
++            open_end = std::max(open_end, end);
++        } else {
++            total += open_end - open_start;
++            open_start = start;
++            open_end = end;
++        }
++    }
++    if (open) {
++        total += open_end - open_start;
++    }
++    return total;
++}
++
++} // namespace
++
++BlockedSplit BlockedIntervalLog::blocked(
++    Nanoseconds from,
++    Nanoseconds to,
++    std::uint32_t frame_thread,
++    Nanoseconds other_until) const noexcept {
++    BlockedSplit split{};
++    if (to <= from) {
++        return split;
++    }
++    other_until = std::clamp(other_until, from, to);
++    std::array<std::pair<Nanoseconds, Nanoseconds>, kCapacity> own{};
++    std::array<std::pair<Nanoseconds, Nanoseconds>, kCapacity> all{};
++    std::size_t own_n = 0;
++    std::size_t all_n = 0;
++    for (std::size_t index = 0; index < filled_; ++index) {
++        const Entry& entry = entries_[index];
++        const bool mine = entry.thread == frame_thread;
++        const Nanoseconds limit = mine ? to : other_until;
++        const Nanoseconds start = std::max(entry.start, from);
++        const Nanoseconds end = std::min(entry.end, limit);
++        if (end <= start) {
++            continue;
++        }
++        all[all_n++] = {start, end};
++        if (mine) {
++            own[own_n++] = {start, end};
++        }
++    }
++    split.own = union_length(own, own_n);
++    split.total = union_length(all, all_n);
++    return split;
++}
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): GPU busy time.
++
++void GpuBusyMeter::observe(const GpuBusySample& sample) noexcept {
++    if (sample.span <= 0 || sample.process_busy_delta < 0 ||
++        sample.adapter_busy_delta < 0) {
++        // Counters that went backwards (an adapter reset): start over.
++        pending_ = {};
++        return;
++    }
++    pending_.at = sample.at;
++    pending_.process_busy_delta += sample.process_busy_delta;
++    pending_.adapter_busy_delta += sample.adapter_busy_delta;
++    pending_.frames_delta += sample.frames_delta;
++    pending_.span += sample.span;
++    if (pending_.span < kMinimumSpan) {
++        return;
++    }
++    GpuBusyReading reading{};
++    reading.valid = true;
++    reading.at = pending_.at;
++    const double span = static_cast<double>(pending_.span);
++    reading.process_load = static_cast<double>(pending_.process_busy_delta) / span;
++    reading.adapter_load = std::max(
++        reading.process_load,
++        static_cast<double>(pending_.adapter_busy_delta) / span);
++    reading.per_frame = pending_.frames_delta == 0
++        ? -1
++        : pending_.process_busy_delta /
++              static_cast<Nanoseconds>(pending_.frames_delta);
++    latest_ = reading;
++    pending_ = {};
++}
++
++GpuBusyReading GpuBusyMeter::fresh(
++    Nanoseconds now, Nanoseconds max_age) const noexcept {
++    if (!latest_.valid || now - latest_.at > max_age) {
++        return {};
++    }
++    return latest_;
++}
++
++double projected_gpu_load_at_double_rate(
++    double process_load, double adapter_load) noexcept {
++    process_load = std::max(0.0, process_load);
++    const double others = std::max(0.0, adapter_load - process_load);
++    return others + process_load * 1.5;
++}
++
+ } // namespace xrfg::latency
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index 7256736..63d5c37 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -104,6 +104,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "adaptive_throughput";
+     case BridgeFlightOperation::submission_timing:
+         return "submission_timing";
++    case BridgeFlightOperation::adaptive_probe:
++        return "adaptive_probe";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/gpu_stats_sampler.cpp b/src/layer/gpu_stats_sampler.cpp
+new file mode 100644
+index 0000000..54f2707
+--- /dev/null
++++ b/src/layer/gpu_stats_sampler.cpp
+@@ -0,0 +1,271 @@
++// DCS VR Control (0007): see gpu_stats_sampler.hpp.
++#include "xrfg/gpu_stats_sampler.hpp"
++
++#include <algorithm>
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++#include <winternl.h> // NTSTATUS, which d3dkmthk.h expects
++#include <d3dkmthk.h>
++#include <dxgi1_6.h>
++#include <wrl/client.h>
++
++namespace xrfg {
++namespace {
++
++using QueryStatistics = NTSTATUS(APIENTRY*)(const D3DKMT_QUERYSTATISTICS*);
++
++[[nodiscard]] latency::Nanoseconds steady_now() noexcept {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++// The scheduler's running times are in 100 ns units (checked against a
++// known GPU load: 50% duty read 0.46 of wall time in them).
++constexpr latency::Nanoseconds kRunningTimeUnit = 100;
++constexpr ULONG kMaximumNodes = 64;
++constexpr ULONG kMaximumSegments = 32;
++
++} // namespace
++
++struct GpuStatsSampler::Impl {
++    LUID adapter{};
++    bool sample_busy{};
++    bool sample_vram{};
++    const std::atomic<std::uint64_t>* frames{};
++    QueryStatistics query{};
++    ULONG nodes{};
++    ULONG segments{};
++    std::vector<std::int64_t> process_previous;
++    std::vector<std::int64_t> adapter_previous;
++    std::uint64_t frames_previous{};
++    latency::Nanoseconds busy_previous_at{};
++    bool busy_primed{};
++    Microsoft::WRL::ComPtr<IDXGIAdapter3> dxgi_adapter;
++    std::uint64_t dedicated_total{};
++    bool dxgi_tried{};
++
++    mutable std::mutex mutex;
++    std::condition_variable condition;
++    bool stop{};
++    latency::GpuBusyMeter meter;   // mutex
++    VramStatus vram;               // mutex
++    std::thread thread;
++
++    [[nodiscard]] bool query_running_time(
++        D3DKMT_QUERYSTATISTICS_TYPE type, ULONG node, std::int64_t* value) const noexcept {
++        D3DKMT_QUERYSTATISTICS statistics{};
++        statistics.Type = type;
++        statistics.AdapterLuid = adapter;
++        if (type == D3DKMT_QUERYSTATISTICS_PROCESS_NODE) {
++            statistics.hProcess = GetCurrentProcess();
++            statistics.QueryProcessNode.NodeId = node;
++        } else {
++            statistics.QueryNode.NodeId = node;
++        }
++        if (query(&statistics) != 0) {
++            return false;
++        }
++        *value = type == D3DKMT_QUERYSTATISTICS_PROCESS_NODE
++            ? statistics.QueryResult.ProcessNodeInformation.RunningTime.QuadPart
++            : statistics.QueryResult.NodeInformation.GlobalInformation.RunningTime.QuadPart;
++        return true;
++    }
++
++    void initialize() noexcept {
++        HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
++        if (gdi == nullptr) {
++            gdi = LoadLibraryW(L"gdi32.dll");
++        }
++        if (gdi != nullptr) {
++            query = reinterpret_cast<QueryStatistics>(
++                GetProcAddress(gdi, "D3DKMTQueryStatistics"));
++        }
++        if (query == nullptr) {
++            return;
++        }
++        D3DKMT_QUERYSTATISTICS statistics{};
++        statistics.Type = D3DKMT_QUERYSTATISTICS_ADAPTER;
++        statistics.AdapterLuid = adapter;
++        if (query(&statistics) == 0) {
++            nodes = std::min<ULONG>(
++                statistics.QueryResult.AdapterInformation.NodeCount, kMaximumNodes);
++            segments = std::min<ULONG>(
++                statistics.QueryResult.AdapterInformation.NbSegments, kMaximumSegments);
++        }
++        process_previous.assign(nodes, 0);
++        adapter_previous.assign(nodes, 0);
++    }
++
++    void sample_busy_once() noexcept {
++        if (query == nullptr || nodes == 0 || frames == nullptr) {
++            return;
++        }
++        const latency::Nanoseconds now = steady_now();
++        const std::uint64_t frame_count = frames->load(std::memory_order_relaxed);
++        std::int64_t process_max = 0;
++        std::int64_t adapter_max = 0;
++        bool ok = true;
++        for (ULONG node = 0; node < nodes; ++node) {
++            std::int64_t process = 0;
++            std::int64_t whole = 0;
++            if (!query_running_time(D3DKMT_QUERYSTATISTICS_PROCESS_NODE, node, &process) ||
++                !query_running_time(D3DKMT_QUERYSTATISTICS_NODE, node, &whole)) {
++                ok = false;
++                break;
++            }
++            if (busy_primed) {
++                process_max = std::max(process_max, process - process_previous[node]);
++                adapter_max = std::max(adapter_max, whole - adapter_previous[node]);
++            }
++            process_previous[node] = process;
++            adapter_previous[node] = whole;
++        }
++        if (!ok) {
++            busy_primed = false;
++            return;
++        }
++        if (busy_primed) {
++            latency::GpuBusySample sample{};
++            sample.at = now;
++            sample.process_busy_delta = process_max * kRunningTimeUnit;
++            sample.adapter_busy_delta = adapter_max * kRunningTimeUnit;
++            sample.frames_delta = frame_count >= frames_previous
++                ? frame_count - frames_previous
++                : 0;
++            sample.span = now - busy_previous_at;
++            std::scoped_lock lock(mutex);
++            meter.observe(sample);
++        }
++        busy_primed = true;
++        busy_previous_at = now;
++        frames_previous = frame_count;
++    }
++
++    void sample_vram_once() noexcept {
++        if (!dxgi_tried) {
++            dxgi_tried = true;
++            Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
++            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())))) {
++                static_cast<void>(factory->EnumAdapterByLuid(
++                    adapter, IID_PPV_ARGS(dxgi_adapter.GetAddressOf())));
++            }
++            if (dxgi_adapter) {
++                DXGI_ADAPTER_DESC description{};
++                if (SUCCEEDED(dxgi_adapter->GetDesc(&description))) {
++                    dedicated_total = description.DedicatedVideoMemory;
++                }
++            }
++        }
++        VramStatus status{};
++        if (dxgi_adapter) {
++            DXGI_QUERY_VIDEO_MEMORY_INFO info{};
++            if (SUCCEEDED(dxgi_adapter->QueryVideoMemoryInfo(
++                    0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
++                status.known = true;
++                status.process_usage = info.CurrentUsage;
++                status.budget = info.Budget;
++            }
++        }
++        status.adapter_total = dedicated_total;
++        if (query != nullptr && segments != 0) {
++            std::uint64_t resident = 0;
++            bool any = false;
++            for (ULONG segment = 0; segment < segments; ++segment) {
++                D3DKMT_QUERYSTATISTICS statistics{};
++                statistics.Type = D3DKMT_QUERYSTATISTICS_SEGMENT;
++                statistics.AdapterLuid = adapter;
++                statistics.QuerySegment.SegmentId = segment;
++                if (query(&statistics) != 0) {
++                    continue;
++                }
++                const auto& information = statistics.QueryResult.SegmentInformation;
++                if (information.Aperture) {
++                    continue; // system memory seen through the aperture
++                }
++                resident += information.BytesResident;
++                any = true;
++            }
++            status.adapter_used = any ? resident : 0;
++        }
++        std::scoped_lock lock(mutex);
++        vram = status;
++    }
++
++    void run() noexcept {
++        try {
++            initialize();
++            auto next_busy = std::chrono::steady_clock::now();
++            auto next_vram = next_busy;
++            for (;;) {
++                const auto now = std::chrono::steady_clock::now();
++                if (sample_busy && now >= next_busy) {
++                    sample_busy_once();
++                    next_busy = now + std::chrono::milliseconds(kBusyIntervalMs);
++                }
++                if (sample_vram && now >= next_vram) {
++                    sample_vram_once();
++                    next_vram = now + std::chrono::milliseconds(kVramIntervalMs);
++                }
++                auto wake = sample_busy ? next_busy : next_vram;
++                if (sample_busy && sample_vram) {
++                    wake = std::min(next_busy, next_vram);
++                }
++                std::unique_lock lock(mutex);
++                if (condition.wait_until(lock, wake, [&] { return stop; })) {
++                    return;
++                }
++            }
++        } catch (...) {
++        }
++    }
++};
++
++GpuStatsSampler::GpuStatsSampler(
++    LUID adapter,
++    bool sample_busy,
++    bool sample_vram,
++    const std::atomic<std::uint64_t>* frames) noexcept {
++    try {
++        impl_ = std::make_unique<Impl>();
++        impl_->adapter = adapter;
++        impl_->sample_busy = sample_busy;
++        impl_->sample_vram = sample_vram;
++        impl_->frames = frames;
++        if (sample_busy || sample_vram) {
++            impl_->thread = std::thread([raw = impl_.get()] { raw->run(); });
++        }
++    } catch (...) {
++        impl_.reset();
++    }
++}
++
++GpuStatsSampler::~GpuStatsSampler() {
++    if (!impl_) {
++        return;
++    }
++    {
++        std::scoped_lock lock(impl_->mutex);
++        impl_->stop = true;
++    }
++    impl_->condition.notify_all();
++    if (impl_->thread.joinable()) {
++        impl_->thread.join();
++    }
++}
++
++GpuStatsSnapshot GpuStatsSampler::snapshot() const noexcept {
++    GpuStatsSnapshot snapshot{};
++    if (!impl_) {
++        return snapshot;
++    }
++    std::scoped_lock lock(impl_->mutex);
++    snapshot.busy = impl_->meter.latest();
++    snapshot.vram = impl_->vram;
++    return snapshot;
++}
++
++} // namespace xrfg
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+index 5c4f8b0..66aa460 100644
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -106,6 +106,9 @@ struct OpenXrFpsOverlay::Impl {
+     DiagnosticToggle toggle;
+     DiagnosticHotkey hotkey;
+     GenerationStatus generation;
++    // DCS VR Control (0007).
++    VramStatus vram;
++    bool show_vram{};
+     OverlayPlacement panel_placement{};
+     HANDLE status_mapping{};
+     const DcsVrStatusV1* status_view{};
+@@ -427,6 +430,8 @@ struct OpenXrFpsOverlay::Impl {
+             inputs.generating = snapshot.active;
+             inputs.generation = generation;
+             inputs.hotkey = hotkey;
++            inputs.show_vram = show_vram;
++            inputs.vram = vram;
+             read_status(inputs);
+             upload(panel, rasterize_diagnostic_panel(panel.width, panel.height,
+                 format_diagnostic_lines(inputs), bgra()));
+@@ -457,6 +462,11 @@ void OpenXrFpsOverlay::set_generation_status(const GenerationStatus& status) noe
+     std::scoped_lock lock(impl_->mutex);
+     impl_->generation = status;
+ }
++void OpenXrFpsOverlay::set_vram_status(const VramStatus& status, bool show) noexcept {
++    std::scoped_lock lock(impl_->mutex);
++    impl_->vram = status;
++    impl_->show_vram = show;
++}
+ bool OpenXrFpsOverlay::diagnostic_visible() const noexcept {
+     std::scoped_lock lock(impl_->mutex);
+     return impl_->toggle.visible();
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 6255f1d..0ff3b47 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -4,6 +4,7 @@
+ #include "xrfg/d3d11_bridge.hpp"
+ #include "xrfg/d3d11_d3d12_interop.hpp"
+ #include "xrfg/frame_gpu_timer.hpp"
++#include "xrfg/gpu_stats_sampler.hpp"
+ #include "xrfg/vulkan_d3d12_interop.hpp"
+ #include "xrfg/bridge_flight_logger.hpp"
+ #include "xrfg/generation_backpressure.hpp"
+@@ -937,14 +938,31 @@ private:
+ // shows as CPU time - an overestimate, which keeps 3X).
+ thread_local std::int64_t t_application_blocked_ns = 0;
+ 
++// DCS VR Control (0007): and every such hold, on whichever application
++// thread, as an interval: a hold on the wait thread before the render thread
++// begins its frame delays the frame as much as one on the render thread does.
++// See xrfg::latency::BlockedIntervalLog for how a frame's share is taken.
++// Process-wide, as the thread-local above is: holds name no session.
++std::mutex g_blocked_mutex;
++xrfg::latency::BlockedIntervalLog g_blocked_log;
++
+ struct ApplicationBlockedScope {
+     std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+     ApplicationBlockedScope() = default;
+     ApplicationBlockedScope(const ApplicationBlockedScope&) = delete;
+     ApplicationBlockedScope& operator=(const ApplicationBlockedScope&) = delete;
+     ~ApplicationBlockedScope() {
++        const auto ended = std::chrono::steady_clock::now();
+         t_application_blocked_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+-            std::chrono::steady_clock::now() - started).count();
++            ended - started).count();
++        try {
++            std::scoped_lock lock(g_blocked_mutex);
++            g_blocked_log.add(
++                GetCurrentThreadId(),
++                steady_nanoseconds(started),
++                steady_nanoseconds(ended));
++        } catch (...) {
++        }
+     }
+ };
+ 
+@@ -974,9 +992,21 @@ struct ApplicationThroughput {
+         std::int64_t app{-1};
+         std::int64_t layer{-1};
+         std::int64_t optical_flow{-1};
++        // DCS VR Control (0007): the 0004 figures, logged beside the
++        // corrected ones (adaptive_throughput result=4), and the holds on
++        // other threads the corrected CPU figure subtracts as well.
++        std::int64_t cpu_old{-1};
++        std::int64_t gpu_old{-1};
++        std::int64_t other_blocked{-1};
+     };
+     std::array<Part, 128> parts{};
+     std::size_t parts_next{};
++    // DCS VR Control (0007): where the judged GPU figure came from: 3 the
++    // OS scheduler's busy time, otherwise gpu_source's bracket.
++    std::uint32_t judged_gpu_source{};
++    // The GPU's load as last read (fractions of wall time), for result=5.
++    double process_load{-1.0};
++    double adapter_load{-1.0};
+ };
+ 
+ // p90s of the GPU parts over (now - span, now], for adaptive_throughput: the
+@@ -985,6 +1015,10 @@ struct ThroughputPartP90s {
+     std::int64_t app{-1};
+     std::int64_t layer{-1};
+     std::int64_t optical_flow{-1};
++    // DCS VR Control (0007).
++    std::int64_t cpu_old{-1};
++    std::int64_t gpu_old{-1};
++    std::int64_t other_blocked{-1};
+ };
+ 
+ [[nodiscard]] ThroughputPartP90s throughput_part_p90s(
+@@ -994,13 +1028,28 @@ struct ThroughputPartP90s {
+     std::array<std::int64_t, 128> app{};
+     std::array<std::int64_t, 128> layer{};
+     std::array<std::int64_t, 128> optical_flow{};
++    std::array<std::int64_t, 128> cpu_old{};
++    std::array<std::int64_t, 128> gpu_old{};
++    std::array<std::int64_t, 128> other_blocked{};
+     std::size_t app_n = 0;
+     std::size_t layer_n = 0;
+     std::size_t optical_flow_n = 0;
++    std::size_t cpu_old_n = 0;
++    std::size_t gpu_old_n = 0;
++    std::size_t other_blocked_n = 0;
+     for (const auto& part : throughput.parts) {
+         if (part.at <= now - span || part.at > now) {
+             continue;
+         }
++        if (part.cpu_old >= 0) {
++            cpu_old[cpu_old_n++] = part.cpu_old;
++        }
++        if (part.gpu_old >= 0) {
++            gpu_old[gpu_old_n++] = part.gpu_old;
++        }
++        if (part.other_blocked >= 0) {
++            other_blocked[other_blocked_n++] = part.other_blocked;
++        }
+         if (part.app >= 0) {
+             app[app_n++] = part.app;
+         }
+@@ -1020,7 +1069,9 @@ struct ThroughputPartP90s {
+         return values[std::max<std::size_t>(rank, 1) - 1];
+     };
+     return {p90(app, app_n), p90(layer, layer_n),
+-            p90(optical_flow, optical_flow_n)};
++            p90(optical_flow, optical_flow_n),
++            p90(cpu_old, cpu_old_n), p90(gpu_old, gpu_old_n),
++            p90(other_blocked, other_blocked_n)};
+ }
+ 
+ struct SessionState {
+@@ -1030,6 +1081,7 @@ struct SessionState {
+     ~SessionState() {
+         // Its thread reports into adaptive_controller; stop it first.
+         readiness_probe.reset();
++        gpu_stats.reset(); // DCS VR Control (0007)
+         xrfg::embedded::detach(control_id);
+         if (presenter_pace_timer != nullptr) {
+             CloseHandle(presenter_pace_timer);
+@@ -1204,9 +1256,11 @@ struct SessionState {
+     // second synthetic fills the extra display period of an application
+     // running at a third of the display rate. The application's virtual
+     // period, the once-per-frame hold, the synthetic ring and the
+-    // interpolation instants all follow it. Three always runs the shallow
+-    // pipeline. Not through the D3D11 interop, whose publish carries one
+-    // synthetic; the Vulkan interop's carries both.
++    // interpolation instants all follow it. Three ran the shallow pipeline
++    // only until DCS VR Control 0007, which gives it a deeper one of its own
++    // on a D3D12 binding (triple_deep_supported, xrfg::latency::TripleDepth).
++    // Not through the D3D11 interop, whose publish carries one synthetic; the
++    // Vulkan interop's carries both.
+     //
+     // It follows the tray's switch while the session runs
+     // (apply_live_frame_multiplier), which is the one thing allowed to move
+@@ -1575,6 +1629,21 @@ struct SessionState {
+     std::uint32_t skip_ready_second{};
+     // `[ofxr] late_frame_skip`. Fixed for the session.
+     bool late_frame_skip_enabled{true};
++    // DCS VR Control (0007): 3X can take the deeper pipeline on this binding
++    // (D3D12, the D3D11 bridge's included): deep_pipeline=1 then applies to
++    // 3X as well. Fixed for the session.
++    bool triple_deep_supported{};
++    // The 3X deeper pipeline's one re-presented slot (see
++    // xrfg::latency::TripleDepth). Guarded by presenter_mutex.
++    xrfg::latency::TripleDepth triple_depth;
++    // `[ofxr] diag_vram`. Fixed for the session.
++    bool diag_vram{};
++    // When the application's thread last entered xrBeginFrame, for the
++    // blocked-interval attribution (sample_application_throughput).
++    std::atomic<std::int64_t> application_begin_entered_ns{0};
++    // Application frames ended, read by the GPU statistics sampler.
++    std::atomic<std::uint64_t> application_frames_ended{0};
++    bool gpu_stats_tried{}; // the xrEndFrame thread
+     // The skip itself (see xrfg::latency::LateFrameSkipController): while it
+     // is on, the application's xrEndFrame makes one synthetic per frame, at
+     // the second synthetic's instant, and the presenter re-presents the
+@@ -1602,6 +1671,9 @@ struct SessionState {
+     // Declared after everything its thread reports into, so it is destroyed
+     // (and its thread joined) before them.
+     std::unique_ptr<ReadinessProbe> readiness_probe;
++    // DCS VR Control (0007): the same for the GPU statistics sampler, whose
++    // thread reads application_frames_ended.
++    std::unique_ptr<xrfg::GpuStatsSampler> gpu_stats;
+     // The application's thread only.
+     HANDLE application_release_timer{};
+     // A condition variable waits on the system tick, which is 15.6 ms by
+@@ -4761,6 +4833,16 @@ XrResult layer_create_session_impl(
+     // DCS VR Control (0006).
+     state->late_frame_skip_enabled =
+         xrfg::implicit_layer::read_late_frame_skip(current_layer_directory());
++    // DCS VR Control (0007).
++    state->diag_vram =
++        xrfg::implicit_layer::read_diag_vram(current_layer_directory());
++    {
++        xrfg::latency::AdaptiveConfig adaptive_config{};
++        adaptive_config.probe =
++            xrfg::implicit_layer::read_adaptive_probe(current_layer_directory());
++        state->adaptive_controller =
++            xrfg::latency::AdaptiveFrameGenController(adaptive_config);
++    }
+     state->adaptive_ini_triple = triple_requested;
+     state->vulkan_support =
+         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
+@@ -4924,10 +5006,19 @@ XrResult layer_create_session_impl(
+         state->graphics_binding == SessionGraphicsBinding::d3d12 ||
+         state->graphics_binding == SessionGraphicsBinding::vulkan;
+     state->deep_pipeline_configured = state->deep_pipeline;
++    // DCS VR Control (0007): 3X takes the deeper pipeline too, on a D3D12
++    // binding (the D3D11 bridge's included), where the presenter can put the
++    // one re-presented slot it needs; see xrfg::latency::TripleDepth. A
++    // Vulkan session never takes a presenter and stays at 3X's shallow depth.
++    state->triple_deep_supported =
++        state->graphics_binding == SessionGraphicsBinding::d3d12;
+     if (triple_requested && triple_binding) {
+         state->frames_per_application_frame = 3;
+-        state->deep_pipeline = false;
++        state->deep_pipeline =
++            state->deep_pipeline_configured && state->triple_deep_supported;
+     }
++    state->triple_depth.arm(
++        state->deep_pipeline, state->frames_per_application_frame);
+     // Adaptive mode always reserves what 3X needs, the synthetic ring's two
+     // slots, whatever the shape it starts in, so that it can switch: the
+     // deeper pipeline's ring is the same one.
+@@ -4965,7 +5056,26 @@ XrResult layer_create_session_impl(
+         state->frames_per_application_frame,
+         state->deep_pipeline ? 1u : 0u,
+         triple_requested ? 1u : 0u);
+-    if (dispatch->steamvr_runtime &&
++    // DCS VR Control (0007): and a D3D11 session the bridge took over, on
++    // every runtime (`[ofxr] own_binding_queue`, on by default). The queue
++    // the runtime was otherwise given is the bridge's own, and on it sit,
++    // in submission order, the bridge's wait for the application's D3D11
++    // rendering at each of its releases and - with no binding queue of its
++    // own to defer them to - each frame's join to its synthesis, made at the
++    // application's xrEndFrame. A runtime that judges a submission complete
++    // by that queue (Pimax OpenXR) then sees every submission handed over
++    // after the application's next frame wait for that frame's rendering
++    // and synthesis, whatever it names: on a live DCS flight in 3X the
++    // re-presented slots of the late-frame skip - a frame finished long
++    // before - reached the queue 7-10 ms after their hand-over (p50, every
++    // one of ~30 a second), and Pimax's own log counted 20-30 missed and
++    // as many discarded frames a second with its GPU readout at 50-67%. With
++    // a queue of the layer's own a submission waits only for what it names
++    // (its own synthesis, joined at its hand-over), as on SteamVR.
++    const bool own_binding_queue = dispatch->steamvr_runtime ||
++        (state->d3d11_bridge &&
++         xrfg::implicit_layer::read_own_binding_queue(current_layer_directory()));
++    if (own_binding_queue &&
+         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
+         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
+         const auto* first = state->d3d11_bridge
+@@ -5584,6 +5694,10 @@ XrResult layer_begin_frame_impl(
+     if (!state || state->dispatch->begin_frame == nullptr) {
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS VR Control (0007): where this frame's own work starts; holds on
++    // other threads before it delayed it (sample_application_throughput).
++    state->application_begin_entered_ns.store(
++        steady_nanoseconds(std::chrono::steady_clock::now()));
+     std::unique_lock frame_call_lock(state->frame_call_mutex);
+     XrResult result = XR_ERROR_RUNTIME_FAILURE;
+     try {
+@@ -7053,12 +7167,16 @@ void drain_triple_slack(
+         if (sample_epoch != epoch) {
+             continue;
+         }
++        // DCS VR Control (0007): with the deeper pipeline a period of it is
++        // the depth, kept in hand.
++        const auto period = static_cast<xrfg::latency::Nanoseconds>(
++            state.presenter_display_period);
+         fill_triple_release_report(
+             xrfg::latency::observe_triple_slack(
+                 state.triple_release,
+-                static_cast<xrfg::latency::Nanoseconds>(
+-                    state.presenter_display_period),
+-                slack),
++                period,
++                xrfg::latency::triple_slack_for_tuner(
++                    slack, period, state.deep_pipeline)),
+             report);
+     }
+ }
+@@ -7121,6 +7239,33 @@ void report_triple_slot_missed(SessionState& state) noexcept {
+         front->owned_frame->skip_led;
+ }
+ 
++// DCS VR Control (0007): this slot - the one after a real frame, in 3X with
++// the deeper pipeline - is re-presented to put every later frame a slot
++// deeper (xrfg::latency::TripleDepth): a slot is wanted, the frame waiting is
++// a first synthetic - or the late-frame skip's one synthetic, whose slot the
++// skip would re-present all the same - or nothing is, and there is a frame to
++// re-present. presenter_mutex held.
++[[nodiscard]] const std::shared_ptr<GeneratedFrameEndInfo>&
++triple_depth_repeat_locked(const SessionState& state) noexcept {
++    return state.presenter_last_frame ? state.presenter_last_frame
++                                      : state.presenter_skip_repeat;
++}
++
++[[nodiscard]] bool triple_depth_slot_due_locked(const SessionState& state) noexcept {
++    if (!state.triple_depth.pending || !state.deep_pipeline ||
++        state.frames_per_application_frame <= 2 ||
++        !state.presenter_previous_real ||
++        triple_depth_repeat_locked(state) == nullptr) {
++        return false;
++    }
++    if (state.presenter_submissions.empty()) {
++        return true;
++    }
++    const auto& front = state.presenter_submissions.front();
++    return front->owned_frame && front->owned_frame->synthetic &&
++        front->owned_frame->leads_frame;
++}
++
+ // DCS VR Control (0006): once a second on the presenter thread, the
+ // submission_timing records (see bridge_flight_logger.hpp): result=1 the
+ // submissions and the late ones by kind, result=2 in 3X off SteamVR the
+@@ -7782,7 +7927,8 @@ void continuous_presenter_main(
+                        XR_FAILED(state->presenter_failure) ||
+                        state->presenter_last_frame != nullptr ||
+                        !state->presenter_submissions.empty() ||
+-                       late_skip_slot_due_locked(*state);
++                       late_skip_slot_due_locked(*state) ||
++                       triple_depth_slot_due_locked(*state); // 0007
+             });
+         }
+ 
+@@ -7837,6 +7983,11 @@ void continuous_presenter_main(
+         bool gen1_slot = false;
+         bool skip_slot = false;
+         bool skip_would_be_ready = false;
++        // DCS VR Control (0007): this slot is the 3X deeper pipeline's one
++        // re-presented slot.
++        bool depth_slot = false;
++        std::uint32_t depth_inserted = 0;
++        std::uint32_t depth_slots = 0;
+         // Same, for the vsync lock. Recorded after presenter_mutex is released:
+         // the presenter thread takes it every frame and logging under it has
+         // deadlocked the layer twice.
+@@ -7918,10 +8069,24 @@ void continuous_presenter_main(
+                 state->presenter_pop_at = pop_now;
+                 // Off SteamVR, 3X: whether this slot is a first synthetic's
+                 // and is judged for the release delay; see triple_release.
+-                const bool judge_leader = state->triple_leader_due &&
++                // DCS VR Control (0007): the deeper pipeline's slot first: it
++                // is no first synthetic's, so it judges nothing and leaves the
++                // leader due for the next one.
++                depth_slot = !state->presenter_stop_requested &&
++                    triple_depth_slot_due_locked(*state);
++                if (depth_slot) {
++                    const bool taken = state->triple_depth.take(true, true, true);
++                    static_cast<void>(taken);
++                    depth_inserted = state->triple_depth.inserted;
++                    depth_slots = state->triple_depth.slots;
++                }
++                const bool judge_leader = !depth_slot &&
++                    state->triple_leader_due &&
+                     state->frames_per_application_frame > 2 &&
+                     !state->dispatch->steamvr_runtime;
+-                state->triple_leader_due = false;
++                if (!depth_slot) {
++                    state->triple_leader_due = false;
++                }
+                 // DCS VR Control (0006): the slot after a real frame, in 3X,
+                 // is the one a first synthetic takes.
+                 gen1_slot = state->presenter_previous_real &&
+@@ -7943,7 +8108,11 @@ void continuous_presenter_main(
+                     }
+                 }
+                 state->presenter_skip_slot_consumed = false;
+-                if (!state->presenter_stop_requested &&
++                if (depth_slot) {
++                    // DCS VR Control (0007): re-presented on time, nothing
++                    // popped; the first synthetic waiting takes the next slot.
++                    repeated_frame = triple_depth_repeat_locked(*state);
++                } else if (!state->presenter_stop_requested &&
+                     late_skip_slot_due_locked(*state)) {
+                     // DCS VR Control (0006): re-presented on time. Nothing
+                     // is popped: the frame's synthetic, if it is here
+@@ -7966,7 +8135,10 @@ void continuous_presenter_main(
+                     const auto period = std::chrono::nanoseconds(
+                         static_cast<std::int64_t>(
+                             state->presenter_display_period));
++                    // DCS VR Control (0007): 2X's deeper pipeline only; 3X's
++                    // takes its depth from one re-presented slot instead.
+                     const bool holdable_synthetic = state->deep_pipeline &&
++                        state->frames_per_application_frame <= 2 &&
+                         period > std::chrono::nanoseconds::zero() &&
+                         front->owned_frame && front->owned_frame->synthetic;
+                     const bool too_young = holdable_synthetic && age < period;
+@@ -8054,7 +8226,18 @@ void continuous_presenter_main(
+                                 // hand-over is a first synthetic. SteamVR's
+                                 // pace looks at it the margin before that;
+                                 // elsewhere it is judged at its own slot.
+-                                if (state->dispatch->steamvr_runtime) {
++                                if (state->dispatch->steamvr_runtime &&
++                                    state->deep_pipeline) {
++                                    // DCS VR Control (0007): with the deeper
++                                    // pipeline the look is taken here, a
++                                    // period before the first synthetic's
++                                    // hand-over rather than the margin, so
++                                    // the release delay keeps that period
++                                    // in hand.
++                                    observe_triple_release(
++                                        *state, triple_leader_ready(*state),
++                                        &release_report);
++                                } else if (state->dispatch->steamvr_runtime) {
+                                     state->triple_release_probe_due = true;
+                                 } else {
+                                     state->triple_leader_due = true;
+@@ -8102,7 +8285,7 @@ void continuous_presenter_main(
+                 }
+                 // DCS VR Control (0006): the skip is on and this was its
+                 // slot, but there was no frame it could safely re-present.
+-                if (gen1_slot && !skip_slot &&
++                if (gen1_slot && !skip_slot && !depth_slot &&
+                     state->late_skip_active.load() &&
+                     state->presenter_skip_repeat == nullptr) {
+                     ++state->skip_unavailable_second;
+@@ -8137,6 +8320,19 @@ void continuous_presenter_main(
+             // repeat. a is its age in microseconds, b the display period in
+             // microseconds, c its sequence.
+             log_triple_release(release_report);
++            // DCS VR Control (0007): result=403, a slot the 3X deeper
++            // pipeline re-presented to deepen itself. a= the slots now in
++            // force in this shape (1, then 2 at most), b= the display period
++            // in microseconds, c= how many this session has made.
++            if (depth_slot) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::presenter_transition,
++                    403,
++                    depth_slots,
++                    static_cast<std::uint64_t>(
++                        state->presenter_display_period / 1000),
++                    depth_inserted);
++            }
+             if (held_age_ns >= 0) {
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::presenter_transition,
+@@ -9190,13 +9386,17 @@ void continuous_presenter_main(
+                         skip_repeat_safe(*request->owned_frame)
+                     ? request->owned_frame
+                     : nullptr;
++            } else if (depth_slot) {
++                // DCS VR Control (0007): the next slot is still the first
++                // synthetic's.
++                state->presenter_skip_slot_consumed = false;
+             } else {
+                 state->presenter_previous_real = false;
+                 state->presenter_skip_slot_consumed = skip_slot;
+             }
+             // The skip's evidence: one observation per first synthetic's
+             // slot, 3X off SteamVR only.
+-            if (skip_controlled && slot_timed && gen1_slot &&
++            if (skip_controlled && slot_timed && gen1_slot && !depth_slot &&
+                 state->frames_per_application_frame > 2) {
+                 const auto now_ns = steady_nanoseconds(downstream_end_started);
+                 if (skip_slot) {
+@@ -9215,6 +9415,19 @@ void continuous_presenter_main(
+                     state->late_skip_active = state->late_skip.active();
+                 }
+             }
++            // DCS VR Control (0007): and the deeper pipeline's, which takes
++            // one more slot while first synthetics keep going out late.
++            if (slot_timed && gen1_slot && !depth_slot &&
++                state->triple_depth.active &&
++                state->frames_per_application_frame > 2) {
++                if (skip_slot) {
++                    state->triple_depth.observe_leader(!skip_would_be_ready);
++                } else if (submission_kind == SubmissionKind::gen1) {
++                    state->triple_depth.observe_leader(submitted_late);
++                } else if (submission_kind == SubmissionKind::repeat) {
++                    state->triple_depth.observe_leader(true);
++                }
++            }
+             if (XR_FAILED(end_result)) {
+                 fail_pending_presenter_submissions_locked(*state, end_result);
+             }
+@@ -9321,6 +9534,9 @@ void continuous_presenter_main(
+         state->presenter_skip_slot_consumed = false;
+         state->late_skip.reset();
+         state->late_skip_active = false;
++        // DCS VR Control (0007): a new presenter's queue has no depth yet.
++        state->triple_depth.arm(
++            state->deep_pipeline, state->frames_per_application_frame);
+         state->presenter_stop_requested = false;
+         state->presenter_active = true;
+         state->presenter_thread = std::thread(continuous_presenter_main, state);
+@@ -11954,6 +12170,7 @@ void apply_live_frame_multiplier(
+         std::uint32_t target = 0;
+         AdaptiveReason reason = AdaptiveReason::none;
+         std::int64_t decided_p90_ns = -1;
++        xrfg::latency::AdaptiveDecision probe_decision{}; // DCS VR Control (0007)
+         bool adaptive = state->adaptive_active.load();
+         bool adaptive_toggled = false;
+         bool ini_triple = state->adaptive_ini_triple;
+@@ -12017,12 +12234,56 @@ void apply_live_frame_multiplier(
+                 now_ns, state->adaptive_late_leaders.exchange(0));
+             const auto decision = state->adaptive_controller.evaluate(
+                 now_ns, static_cast<xrfg::latency::Nanoseconds>(period));
++            // DCS VR Control (0007): a probe's events that move nothing are
++            // acted on here; the ones that switch, below with the switch.
++            if (decision.probe == xrfg::latency::AdaptiveProbeEvent::kept) {
++                state->adaptive_controller.probe_kept(now_ns);
++            } else if (decision.probe == xrfg::latency::AdaptiveProbeEvent::skipped) {
++                state->adaptive_controller.probe_skipped(now_ns);
++            }
++            probe_decision = decision;
+             if (decision.target != 0 && decision.target != current) {
+                 target = decision.target;
+                 reason = decision.reason;
+                 decided_p90_ns = decision.stats.p90;
+             }
+         }
++        // DCS VR Control (0007): adaptive_probe; see bridge_flight_logger.hpp.
++        // Recorded outside adaptive_mutex.
++        if (probe_decision.probe != xrfg::latency::AdaptiveProbeEvent::none) {
++            const auto us = [](std::int64_t ns) {
++                return ns > 0 ? static_cast<std::uint64_t>(ns / 1000) : 0U;
++            };
++            const auto permille = [](double load) {
++                return load > 0.0 ? static_cast<std::uint64_t>(load * 1000.0 + 0.5) : 0U;
++            };
++            const auto ms = static_cast<std::uint64_t>(
++                std::max<std::int64_t>(0, probe_decision.probe_interval / 1'000'000));
++            switch (probe_decision.probe) {
++            case xrfg::latency::AdaptiveProbeEvent::started:
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_probe, 1,
++                    us(probe_decision.stats.p50),
++                    permille(probe_decision.projected_gpu_load), ms);
++                break;
++            case xrfg::latency::AdaptiveProbeEvent::kept:
++            case xrfg::latency::AdaptiveProbeEvent::failed:
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_probe,
++                    probe_decision.probe == xrfg::latency::AdaptiveProbeEvent::kept ? 2 : 3,
++                    probe_decision.probe_late,
++                    us(probe_decision.stats.p90), ms);
++                break;
++            case xrfg::latency::AdaptiveProbeEvent::skipped:
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_probe, 4,
++                    us(probe_decision.stats.p50),
++                    permille(probe_decision.projected_gpu_load), ms);
++                break;
++            default:
++                break;
++            }
++        }
+         // Once a second while the presenter runs: what the controls see.
+         if (period > 0 && now >= state->latency_status_at &&
+             (adaptive || state->display_time_correction_enabled)) {
+@@ -12062,7 +12323,7 @@ void apply_live_frame_multiplier(
+                     us(stats.cpu_p90),
+                     us(stats.gpu_p90),
+                     static_cast<std::uint64_t>(stats.limiter) +
+-                        10U * state->throughput.gpu_source);
++                        10U * state->throughput.judged_gpu_source);
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::adaptive_throughput,
+                     2,
+@@ -12078,6 +12339,29 @@ void apply_live_frame_multiplier(
+                     us(parts.optical_flow),
+                     stats.late_leaders,
+                     0);
++                // DCS VR Control (0007): the 0004 figures beside the
++                // corrected ones, and the GPU's load.
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_throughput,
++                    4,
++                    us(parts.cpu_old),
++                    us(parts.gpu_old),
++                    us(parts.other_blocked));
++                const auto permille = [](double load) {
++                    return load > 0.0
++                        ? static_cast<std::uint64_t>(load * 1000.0 + 0.5)
++                        : 0U;
++                };
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_throughput,
++                    5,
++                    permille(state->throughput.process_load),
++                    permille(state->throughput.adapter_load),
++                    state->throughput.adapter_load >= 0.0
++                        ? permille(xrfg::latency::projected_gpu_load_at_double_rate(
++                              state->throughput.process_load,
++                              state->throughput.adapter_load))
++                        : 0U);
+             }
+         }
+         if (target == 0 || target == current) {
+@@ -12108,9 +12392,12 @@ void apply_live_frame_multiplier(
+             std::scoped_lock content_lock(state->presenter_content_mutex);
+             std::scoped_lock lock(state->presenter_mutex);
+             state->frames_per_application_frame = target;
+-            state->deep_pipeline =
+-                target == 2U && state->deep_pipeline_configured;
++            // DCS VR Control (0007): deep_pipeline=1 applies to 3X as well,
++            // where the binding allows it.
++            state->deep_pipeline = state->deep_pipeline_configured &&
++                (target == 2U || state->triple_deep_supported);
+             deep = state->deep_pipeline;
++            state->triple_depth.arm(deep, target);
+             // The release delay belongs to the shape it was found in.
+             state->triple_release.reset();
+             // DCS VR Control (0004): slack measured in the old shape is not
+@@ -12147,7 +12434,8 @@ void apply_live_frame_multiplier(
+             if (reason == AdaptiveReason::manual) {
+                 state->adaptive_controller.start(target, now_ns);
+             } else {
+-                state->adaptive_controller.switched(target, now_ns);
++                // DCS VR Control (0007): with the reason, so a probe is known.
++                state->adaptive_controller.switched(target, now_ns, reason);
+             }
+             state->adaptive_missed_slots = 0;
+             state->adaptive_late_leaders = 0;
+@@ -12219,6 +12507,43 @@ void create_application_gpu_timer(SessionState& state) noexcept {
+     }
+ }
+ 
++// DCS VR Control (0007): the GPU statistics sampler (busy time for adaptive
++// 2X/3X, memory for `[ofxr] diag_vram`), made on the xrEndFrame thread the
++// first time either is wanted, on the adapter the session renders on.
++void ensure_gpu_stats(SessionState& state) noexcept {
++    const bool busy = state.adaptive_active.load();
++    if (state.gpu_stats_tried || (!busy && !state.diag_vram)) {
++        return;
++    }
++    state.gpu_stats_tried = true;
++    try {
++        LUID adapter{};
++        bool found = false;
++        if (state.d3d12_device) {
++            adapter = state.d3d12_device->GetAdapterLuid();
++            found = true;
++        } else if (state.d3d11_device) {
++            Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
++            Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
++            DXGI_ADAPTER_DESC description{};
++            if (SUCCEEDED(state.d3d11_device.As(&dxgi_device)) &&
++                SUCCEEDED(dxgi_device->GetAdapter(dxgi_adapter.GetAddressOf())) &&
++                SUCCEEDED(dxgi_adapter->GetDesc(&description))) {
++                adapter = description.AdapterLuid;
++                found = true;
++            }
++        }
++        if (found) {
++            // Busy time is sampled for as long as the session lives once it
++            // is wanted: adaptive control can be turned on again.
++            state.gpu_stats = std::make_unique<xrfg::GpuStatsSampler>(
++                adapter, true, state.diag_vram,
++                &state.application_frames_ended);
++        }
++    } catch (...) {
++    }
++}
++
+ // DCS VR Control (0004): one application frame's throughput evidence, taken
+ // as its xrEndFrame is entered: the CPU time since the previous one less what
+ // this thread spent blocked in the layer (ApplicationBlockedScope), and the
+@@ -12228,6 +12553,17 @@ void create_application_gpu_timer(SessionState& state) noexcept {
+ // frame; one older than a quarter second is not used, and the frame then has
+ // no GPU figure. Under adaptive control only; otherwise the bookkeeping is
+ // just reset.
++//
++// DCS VR Control (0007): what is judged is corrected on both sides, the old
++// figures logged beside it (adaptive_throughput result=4):
++//   CPU  the interval less the layer's holds on every application thread
++//        that delayed this frame - the xrEndFrame thread's own, and other
++//        threads' before this frame's xrBeginFrame (DCS World's wait
++//        thread) - as a union; see xrfg::latency::BlockedIntervalLog.
++//   GPU  the busy time the OS scheduler measured for this process per
++//        application frame (xrfg::GpuStatsSampler), which leaves out the
++//        idle the bracket above cannot see; the bracket where no fresh
++//        reading exists.
+ void sample_application_throughput(
+     SessionState& state, std::chrono::steady_clock::time_point entered) noexcept {
+     auto& throughput = state.throughput;
+@@ -12235,6 +12571,8 @@ void sample_application_throughput(
+         throughput.gpu_timer->close();
+     }
+     const std::int64_t blocked = std::exchange(t_application_blocked_ns, 0);
++    state.application_frames_ended.fetch_add(1, std::memory_order_relaxed);
++    ensure_gpu_stats(state);
+     if (!state.adaptive_active.load()) {
+         throughput.last_entry = {};
+         return;
+@@ -12269,16 +12607,51 @@ void sample_application_throughput(
+     if (throughput.last_entry != std::chrono::steady_clock::time_point{}) {
+         const std::int64_t interval = std::chrono::duration_cast<
+             std::chrono::nanoseconds>(entered - throughput.last_entry).count();
+-        const std::int64_t cpu = std::max<std::int64_t>(0, interval - blocked);
++        const std::int64_t cpu_old = std::max<std::int64_t>(0, interval - blocked);
++        // DCS VR Control (0007): every thread's holds that delayed it.
++        const auto from = steady_nanoseconds(throughput.last_entry);
++        const auto at = steady_nanoseconds(entered);
++        const std::int64_t begin_at = state.application_begin_entered_ns.load();
++        const std::int64_t other_until =
++            begin_at > from && begin_at <= at ? begin_at : from;
++        xrfg::latency::BlockedSplit split{};
++        try {
++            std::scoped_lock lock(g_blocked_mutex);
++            split = g_blocked_log.blocked(
++                from, at, GetCurrentThreadId(), other_until);
++        } catch (...) {
++        }
++        const std::int64_t cpu = std::max<std::int64_t>(
++            0, interval - std::max(split.total, blocked));
+         const bool gpu_fresh =
+             throughput.last_gpu_app_ns >= 0 &&
+             entered - throughput.last_gpu_at < std::chrono::milliseconds(250);
+         const std::int64_t gpu_app = gpu_fresh ? throughput.last_gpu_app_ns : -1;
+-        const std::int64_t gpu = gpu_app >= 0 ? gpu_app + layer_per_frame : -1;
+-        const auto at = steady_nanoseconds(entered);
++        const std::int64_t gpu_old = gpu_app >= 0 ? gpu_app + layer_per_frame : -1;
++        // DCS VR Control (0007): the scheduler's busy time where it is fresh.
++        std::int64_t gpu = gpu_old;
++        throughput.judged_gpu_source = throughput.gpu_source;
++        double projected_load = -1.0;
++        if (state.gpu_stats) {
++            const auto snapshot = state.gpu_stats->snapshot();
++            const auto busy = snapshot.busy;
++            if (busy.valid && at - busy.at <= xrfg::latency::kSecond) {
++                throughput.process_load = busy.process_load;
++                throughput.adapter_load = busy.adapter_load;
++                projected_load = xrfg::latency::projected_gpu_load_at_double_rate(
++                    busy.process_load, busy.adapter_load);
++                if (busy.per_frame >= 0) {
++                    gpu = busy.per_frame;
++                    throughput.judged_gpu_source = 3;
++                }
++            }
++        }
+         try {
+             std::scoped_lock adaptive_lock(state.adaptive_mutex);
+             state.adaptive_controller.add_frame(at, cpu, gpu);
++            if (projected_load >= 0.0) {
++                state.adaptive_controller.set_projected_gpu_load(at, projected_load);
++            }
+         } catch (...) {
+         }
+         auto& part = throughput.parts[throughput.parts_next];
+@@ -12286,6 +12659,9 @@ void sample_application_throughput(
+         part.app = gpu_app;
+         part.layer = layer_per_frame;
+         part.optical_flow = optical_flow_per_frame;
++        part.cpu_old = cpu_old;
++        part.gpu_old = gpu_old;
++        part.other_blocked = std::max<std::int64_t>(0, split.total - split.own);
+         throughput.parts_next = (throughput.parts_next + 1) % throughput.parts.size();
+     }
+     throughput.last_entry = entered;
+@@ -12434,6 +12810,11 @@ XrResult layer_end_frame_impl(
+         generation.multiplier = state->frames_per_application_frame.load();
+         generation.adaptive = state->adaptive_active.load();
+         state->fps_overlay->set_generation_status(generation);
++        // DCS VR Control (0007): `[ofxr] diag_vram`.
++        if (state->diag_vram && state->gpu_stats) {
++            state->fps_overlay->set_vram_status(
++                state->gpu_stats->snapshot().vram, true);
++        }
+         state->fps_overlay->application_frame(end_info);
+     }
+ 
+@@ -12705,9 +13086,17 @@ XrResult layer_end_frame_impl(
+     // holding on purpose. That needs the synthetic ring for the same reason
+     // the current one exists -- the previous pair's synthetic is no longer
+     // retired by the time we release into it.
++    // DCS VR Control (0007): 3X's deeper pipeline admits at the shallow
++    // bound. Its extra slot sits inside the frame's own three: the
++    // application arrives while its previous frame's second synthetic is
++    // going out, and by then only that frame's real one is outstanding - so
++    // the two synthetic slots are free, as they are shallow.
+     if (use_continuous_presenter) {
+         const XrResult capacity_result = wait_for_presenter_capacity(
+-            state, state->deep_pipeline ? 2 : 1);
++            state,
++            state->deep_pipeline && state->frames_per_application_frame <= 2
++                ? 2
++                : 1);
+         if (XR_FAILED(capacity_result)) {
+             return capacity_result;
+         }
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index 6d20c70..2f401ee 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -196,6 +196,26 @@ int main(int argc, char** argv) {
+             5850,
+             20,
+             0);
++        // DCS VR Control (0007): the probe and the old figures beside the
++        // corrected ones.
++        enabled.event(
++            xrfg::BridgeFlightOperation::adaptive_probe,
++            3,
++            2,
++            24100,
++            40000);
++        enabled.event(
++            xrfg::BridgeFlightOperation::adaptive_throughput,
++            4,
++            27000,
++            31000,
++            600);
++        enabled.event(
++            xrfg::BridgeFlightOperation::adaptive_throughput,
++            5,
++            520,
++            640,
++            900);
+         enabled.shutdown();
+ 
+         const std::string log = read(log_path);
+@@ -243,6 +263,14 @@ int main(int argc, char** argv) {
+                 log.find("op=adaptive_throughput result=3 dur_us=0 a=5850 b=20 c=0") !=
+                     std::string::npos,
+             "bridge log is missing the 0006 submission timing records");
++        require(
++            log.find("op=adaptive_probe result=3 dur_us=0 a=2 b=24100 c=40000") !=
++                    std::string::npos &&
++                log.find("op=adaptive_throughput result=4 dur_us=0 a=27000 b=31000 c=600") !=
++                    std::string::npos &&
++                log.find("op=adaptive_throughput result=5 dur_us=0 a=520 b=640 c=900") !=
++                    std::string::npos,
++            "bridge log is missing the 0007 probe and throughput records");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+index 353210e..66f3d79 100644
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -139,6 +139,57 @@ int main() {
+             lines[4].text == "Alt+Shift+F12: hide" && lines[4].color == C::grey, "panel lines");
+         in.hotkey = {};
+         require(format_diagnostic_lines(in).size() == 4, "hint without a key");
++
++        // DCS VR Control (0007): the VRAM line, only with diag_vram.
++        {
++            constexpr std::uint64_t GiB = 1024ULL * 1024ULL * 1024ULL;
++            const auto vram_text = [](const VramStatus& status, DiagnosticColor expected) {
++                DiagnosticColor color{};
++                const auto text = format_vram_line(status, color);
++                require(color == expected, "VRAM line colour for: " + text);
++                return text;
++            };
++            VramStatus status{};
++            require(vram_text(status, C::grey) == "VRAM: not available", "VRAM unknown");
++            // The live case: 28.4 of 32.0 GB in use across the GPU, this process 25.1 of a 30.2 budget.
++            status.known = true;
++            status.adapter_total = 32ULL * GiB;
++            status.adapter_used = static_cast<std::uint64_t>(28.4 * GiB);
++            status.process_usage = static_cast<std::uint64_t>(25.1 * GiB);
++            status.budget = static_cast<std::uint64_t>(30.2 * GiB);
++            require(vram_text(status, C::white) == "VRAM 28.4 / 32.0 GB (app 25.1, budget 30.2)",
++                "adapter-wide VRAM line: " + vram_text(status, C::white));
++            status.adapter_used = static_cast<std::uint64_t>(29.5 * GiB);
++            require(vram_text(status, C::amber) == "VRAM 29.5 / 32.0 GB (app 25.1, budget 30.2)", "90% is amber");
++            status.process_usage = static_cast<std::uint64_t>(30.5 * GiB);
++            require(vram_text(status, C::red) == "VRAM 29.5 / 32.0 GB (app 30.5, budget 30.2)", "over budget is red");
++            // Without the adapter-wide figure: the process against its budget.
++            status.adapter_used = 0;
++            status.process_usage = 12ULL * GiB;
++            require(vram_text(status, C::white) == "VRAM 12.0 / 30.2 GB (app / budget)", "process-only line: " +
++                vram_text(status, C::white));
++            status.budget = 0;
++            require(vram_text(status, C::white) == "VRAM 12.0 / 32.0 GB", "no budget either");
++            // In the panel after the rate line, and it fits.
++            in = inputs(); in.hotkey = {0x7B, 6};
++            in.show_vram = true;
++            in.vram.known = true; in.vram.adapter_total = 32ULL * GiB; in.vram.adapter_used = 28ULL * GiB;
++            in.vram.process_usage = 25ULL * GiB; in.vram.budget = 30ULL * GiB;
++            const auto with_vram = format_diagnostic_lines(in);
++            require(with_vram.size() == 6 && with_vram[4].text.rfind("VRAM 28.0 / 32.0 GB", 0) == 0 &&
++                with_vram[5].text == "Alt+Shift+F12: hide", "VRAM line placed before the hint");
++            require(with_vram[4].text.size() <= diagnostic_panel_columns(kDiagnosticPanelWidth), "VRAM line cut");
++            // Six lines fit the panel's height.
++            const auto pixels = rasterize_diagnostic_panel(kDiagnosticPanelWidth, kDiagnosticPanelHeight,
++                {{"1", C::white}, {"2", C::white}, {"3", C::white}, {"4", C::white}, {"5", C::white}, {"6", C::white}}, false);
++            bool last_line_inked = false;
++            for (unsigned y = 8 + 5 * 20; y < 8 + 5 * 20 + 14 && !last_line_inked; ++y)
++                for (unsigned x = 0; x < 40 && !last_line_inked; ++x)
++                    last_line_inked = pixels[static_cast<std::size_t>(y) * kDiagnosticPanelWidth + x] != 0x99000000u;
++            require(last_line_inked, "sixth line drawn");
++            in.show_vram = false;
++            require(format_diagnostic_lines(in).size() == 5, "no VRAM line without diag_vram");
++        }
+         // Every line the formatter can produce fits the panel.
+         in = inputs(); in.cheeky.nr_evaluations_per_second = 0;
+         std::memset(in.cheeky.reason, 'w', sizeof(in.cheeky.reason) - 1); in.cheeky.reason[sizeof(in.cheeky.reason) - 1] = 0;
+diff --git a/tests/gpu_stats_sampler_tests.cpp b/tests/gpu_stats_sampler_tests.cpp
+new file mode 100644
+index 0000000..effc1a3
+--- /dev/null
++++ b/tests/gpu_stats_sampler_tests.cpp
+@@ -0,0 +1,135 @@
++// DCS VR Control (0007): the GPU statistics sampler against the machine's own
++// GPU - the OS scheduler's running-time counters and DXGI's memory figures,
++// which a fake cannot stand in for. A light load of this process's own (a
++// few clears a frame) must read as busy time per frame, the adapter must read
++// at least as loaded as the process on it, and the memory figures must be
++// there. Skipped, not failed, on a machine without a hardware D3D12 adapter.
++#include "xrfg/gpu_stats_sampler.hpp"
++
++#include <d3d12.h>
++#include <dxgi1_6.h>
++#include <wrl/client.h>
++
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++#include <thread>
++
++using Microsoft::WRL::ComPtr;
++
++namespace {
++
++void require(bool pass, const std::string& message) {
++    if (!pass) {
++        throw std::runtime_error(message);
++    }
++}
++
++} // namespace
++
++int main() {
++    try {
++        ComPtr<IDXGIFactory6> factory;
++        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())))) {
++            std::cout << "SKIP: no DXGI factory\n";
++            return 0;
++        }
++        ComPtr<IDXGIAdapter1> adapter;
++        if (FAILED(factory->EnumAdapterByGpuPreference(
++                0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
++                IID_PPV_ARGS(adapter.GetAddressOf())))) {
++            std::cout << "SKIP: no adapter\n";
++            return 0;
++        }
++        DXGI_ADAPTER_DESC1 description{};
++        adapter->GetDesc1(&description);
++        ComPtr<ID3D12Device> device;
++        if ((description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 ||
++            FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0,
++                IID_PPV_ARGS(device.GetAddressOf())))) {
++            std::cout << "SKIP: no hardware D3D12 adapter\n";
++            return 0;
++        }
++        D3D12_COMMAND_QUEUE_DESC queue_description{};
++        queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
++        ComPtr<ID3D12CommandQueue> queue;
++        require(SUCCEEDED(device->CreateCommandQueue(&queue_description, IID_PPV_ARGS(queue.GetAddressOf()))), "queue");
++        D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
++        heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
++        heap_description.NumDescriptors = 1;
++        ComPtr<ID3D12DescriptorHeap> heap;
++        require(SUCCEEDED(device->CreateDescriptorHeap(&heap_description, IID_PPV_ARGS(heap.GetAddressOf()))), "heap");
++        D3D12_HEAP_PROPERTIES heap_properties{};
++        heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC texture{};
++        texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        texture.Width = 2048;
++        texture.Height = 2048;
++        texture.DepthOrArraySize = 1;
++        texture.MipLevels = 1;
++        texture.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++        texture.SampleDesc.Count = 1;
++        texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++        ComPtr<ID3D12Resource> target;
++        require(SUCCEEDED(device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &texture,
++            D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(target.GetAddressOf()))), "target");
++        device->CreateRenderTargetView(target.Get(), nullptr, heap->GetCPUDescriptorHandleForHeapStart());
++        ComPtr<ID3D12CommandAllocator> allocator;
++        require(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
++            IID_PPV_ARGS(allocator.GetAddressOf()))), "allocator");
++        ComPtr<ID3D12GraphicsCommandList> list;
++        require(SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
++            IID_PPV_ARGS(list.GetAddressOf()))), "list");
++        for (int clear = 0; clear < 24; ++clear) {
++            const float colour[4]{0.1f * static_cast<float>(clear % 7), 0.2f, 0.3f, 1.0f};
++            list->ClearRenderTargetView(heap->GetCPUDescriptorHandleForHeapStart(), colour, 0, nullptr);
++        }
++        require(SUCCEEDED(list->Close()), "close");
++        ComPtr<ID3D12Fence> fence;
++        require(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()))), "fence");
++        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++        require(event != nullptr, "event");
++
++        std::atomic<std::uint64_t> frames{0};
++        xrfg::GpuStatsSampler sampler(device->GetAdapterLuid(), true, true, &frames);
++        // About 1.5 s of 90 "frames" a second, each a small GPU job.
++        std::uint64_t value = 0;
++        const auto started = std::chrono::steady_clock::now();
++        while (std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1500)) {
++            ID3D12CommandList* lists[] = {list.Get()};
++            queue->ExecuteCommandLists(1, lists);
++            require(SUCCEEDED(queue->Signal(fence.Get(), ++value)), "signal");
++            if (SUCCEEDED(fence->SetEventOnCompletion(value, event))) {
++                WaitForSingleObject(event, 1000);
++            }
++            frames.fetch_add(1);
++            std::this_thread::sleep_for(std::chrono::milliseconds(11));
++        }
++        const auto snapshot = sampler.snapshot();
++        CloseHandle(event);
++        require(snapshot.busy.valid, "no busy reading from the scheduler counters");
++        require(snapshot.busy.per_frame > 0, "no busy time per frame: " + std::to_string(snapshot.busy.per_frame));
++        require(snapshot.busy.process_load > 0.0 && snapshot.busy.process_load <= 1.0,
++            "process load out of range: " + std::to_string(snapshot.busy.process_load));
++        require(snapshot.busy.adapter_load >= snapshot.busy.process_load && snapshot.busy.adapter_load <= 1.5,
++            "adapter load: " + std::to_string(snapshot.busy.adapter_load));
++        require(snapshot.vram.known && snapshot.vram.budget > 0 && snapshot.vram.process_usage > 0,
++            "process VRAM figures");
++        require(snapshot.vram.adapter_total >= (1ULL << 30), "adapter dedicated memory");
++        require(snapshot.vram.adapter_used == 0 || snapshot.vram.adapter_used >= snapshot.vram.process_usage / 2,
++            "adapter-wide resident memory");
++        std::cout << "GPU statistics sampler passed: busy " << snapshot.busy.per_frame / 1000
++                  << " us/frame, process " << snapshot.busy.process_load * 100.0 << "%, adapter "
++                  << snapshot.busy.adapter_load * 100.0 << "%, VRAM app "
++                  << (snapshot.vram.process_usage >> 20) << " MB of budget " << (snapshot.vram.budget >> 20)
++                  << " MB, adapter " << (snapshot.vram.adapter_used >> 20) << " / "
++                  << (snapshot.vram.adapter_total >> 20) << " MB\n";
++        return 0;
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index f77079f..dfa77d0 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -7,6 +7,7 @@
+ #include <iostream>
+ #include <stdexcept>
+ #include <string>
++#include <vector>
+ 
+ namespace {
+ 
+@@ -283,9 +284,26 @@ void triple_slack_tests() {
+ }
+ 
+ void display_time_tests() {
+-    require(display_time_mode(3, true) == 2 && display_time_mode(3, false) == 2 &&
++    // DCS VR Control (0007): 3X has a deeper pipeline of its own.
++    require(display_time_mode(3, true) == 3 && display_time_mode(3, false) == 2 &&
+             display_time_mode(2, true) == 1 && display_time_mode(2, false) == 0,
+         "mode keys");
++    {
++        // What was learned in 3X shallow is not what 3X deep starts from: a
++        // shape of its own, first scaled, then learned.
++        DisplayTimeCorrector corrector;
++        corrector.mode = display_time_mode(3, false);
++        corrector.correction = 2 * kPeriod;
++        corrector.learned[2] = 2 * kPeriod;
++        const auto deep = rebase_display_time_correction(
++            corrector, display_time_mode(3, true), 3 * kPeriod, 3 * kPeriod, kPeriod);
++        require(corrector.mode == 3 && deep == 2 * kPeriod, "3X deep starts from the scaled 3X value");
++        corrector.learned[3] = 3 * kPeriod;
++        rebase_display_time_correction(corrector, 2, 3 * kPeriod, 3 * kPeriod, kPeriod);
++        require(corrector.correction == 2 * kPeriod, "3X shallow keeps its own");
++        rebase_display_time_correction(corrector, 3, 3 * kPeriod, 3 * kPeriod, kPeriod);
++        require(corrector.correction == 3 * kPeriod, "3X deep its own");
++    }
+     {
+         // DCS VR Control (0004): the first live 3X flight with release
+         // anchoring held 33.3 ms (one virtual period, not the 55.6 ms the
+@@ -718,6 +736,341 @@ void adaptive_tests() {
+ // DCS VR Control (0006): late submissions, the late-frame skip, and the
+ // synthesis GPU split.
+ 
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): probing 2X from a stable 3X.
++
++struct ProbeRun {
++    std::vector<Nanoseconds> started;
++    std::vector<Nanoseconds> failed;
++    std::vector<Nanoseconds> kept;
++    std::vector<Nanoseconds> skipped;
++    std::vector<Nanoseconds> intervals; // the next interval at each failure
++    Nanoseconds other_switch{-1};
++};
++
++// An application whose work reads `work3` in 3X (inflated by the cap or not)
++// and `work2` in 2X, missing a 2X slot every `late_every_2x` frames (0:
++// never). Probe events are acted on as the layer acts on them.
++ProbeRun drive_probes(AdaptiveFrameGenController& controller, Nanoseconds& now,
++    Nanoseconds seconds, Nanoseconds work3, Nanoseconds work2,
++    std::uint32_t late_every_2x, double projected_load = -1.0) {
++    ProbeRun run{};
++    const Nanoseconds end = now + seconds;
++    std::uint32_t index = 0;
++    while (now < end) {
++        const Nanoseconds frame = kPeriod * controller.mode();
++        now += frame;
++        const Nanoseconds work = controller.mode() == 3 ? work3 : work2;
++        controller.add_frame(now, work, work);
++        if (controller.mode() == 2 && late_every_2x != 0 && ++index % late_every_2x == 0) {
++            controller.add_late(now);
++        }
++        if (projected_load >= 0.0) {
++            controller.set_projected_gpu_load(now, projected_load);
++        }
++        const auto decision = controller.evaluate(now, kPeriod);
++        switch (decision.probe) {
++        case AdaptiveProbeEvent::started: run.started.push_back(now); break;
++        case AdaptiveProbeEvent::failed:
++            run.failed.push_back(now);
++            run.intervals.push_back(decision.probe_interval);
++            break;
++        case AdaptiveProbeEvent::kept:
++            run.kept.push_back(now);
++            controller.probe_kept(now);
++            break;
++        case AdaptiveProbeEvent::skipped:
++            run.skipped.push_back(now);
++            controller.probe_skipped(now);
++            break;
++        default: break;
++        }
++        if (decision.target != 0) {
++            if (decision.reason != AdaptiveReason::probe &&
++                decision.reason != AdaptiveReason::probe_failed &&
++                run.other_switch < 0) {
++                run.other_switch = now;
++            }
++            controller.switched(decision.target, now, decision.reason);
++        }
++    }
++    return run;
++}
++
++void probe_tests() {
++    const Nanoseconds start = 50 * kSecond;
++    AdaptiveConfig config;
++    config.probe = true;
++    {
++        // Off by default: the 0004-0006 behaviour is unchanged without it.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive_probes(controller, now, 60 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 0);
++        require(run.started.empty() && controller.mode() == 3, "no probe unless configured");
++    }
++    {
++        // The live case: 3X reads 27 ms a frame - its own cap, not the
++        // application's work - over the 18.9 ms the headroom rule needs, so
++        // the rules alone never leave 3X. The application really needs 20 ms
++        // and holds 2X (45 at 90 Hz) without a missed slot: the probe finds
++        // that and keeps 2X.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive_probes(controller, now, 90 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 0);
++        require(run.started.size() == 1, "one probe: " + std::to_string(run.started.size()));
++        require(run.started[0] - start >= 20 * kSecond && run.started[0] - start < 20 * kSecond + 4 * kPeriod,
++            "after the probe interval in a stable 3X");
++        require(run.kept.size() == 1 && run.failed.empty(), "the window held");
++        require(run.kept[0] - run.started[0] >= 2500 * kMillisecond &&
++                run.kept[0] - run.started[0] < 2500 * kMillisecond + 3 * kPeriod,
++            "kept at the end of the window");
++        require(run.other_switch < 0 && controller.mode() == 2, "and 2X stays");
++        require(!controller.probing() && controller.probe_interval() == 20 * kSecond, "the interval is the base one");
++    }
++    {
++        // An application that cannot hold 2X: a slot missed every third
++        // frame. Each probe goes back to 3X within a second (past the dwell),
++        // and the interval doubles to its ceiling: 20, 40, 80, 120, 120 s.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive_probes(controller, now, 500 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 3);
++        require(run.started.size() >= 5 && run.failed.size() >= 5, "probes made and failed: " +
++            std::to_string(run.started.size()) + "/" + std::to_string(run.failed.size()));
++        require(run.kept.empty() && run.other_switch < 0, "never kept, never another switch");
++        for (std::size_t i = 0; i < run.failed.size(); ++i) {
++            require(run.failed[i] - run.started[i] < kSecond,
++                "back to 3X quickly: " + std::to_string(run.failed[i] - run.started[i]));
++            require(run.failed[i] - run.started[i] >= 500 * kMillisecond, "not before the probe's settle");
++        }
++        const Nanoseconds expected[] = {40 * kSecond, 80 * kSecond, 120 * kSecond, 120 * kSecond};
++        for (std::size_t i = 0; i < 4; ++i) {
++            require(run.intervals[i] == expected[i], "backoff " + std::to_string(i) + ": " +
++                std::to_string(run.intervals[i]));
++            const Nanoseconds gap = run.started[i + 1] - run.failed[i];
++            require(gap >= expected[i] && gap < expected[i] + 4 * kPeriod,
++                "next probe after the grown interval: " + std::to_string(gap));
++        }
++        require(controller.mode() == 3, "ends in 3X");
++    }
++    {
++        // A failure resets once one holds: back to the base interval.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        auto first = drive_probes(controller, now, 25 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 3);
++        require(first.failed.size() == 1 && controller.probe_interval() == 40 * kSecond, "one failure");
++        auto second = drive_probes(controller, now, 50 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 0);
++        require(second.kept.size() == 1 && controller.probe_interval() == 20 * kSecond, "a kept probe resets");
++    }
++    {
++        // Clearly impossible: a median of 32 ms is more than 1.4 x two
++        // periods (31.1 ms). No probe, and no backoff for it either.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive_probes(controller, now, 70 * kSecond, 32 * kMillisecond, 20 * kMillisecond, 0);
++        require(run.started.empty() && run.skipped.size() == 3, "skipped at 20, 40, 60 s: " +
++            std::to_string(run.skipped.size()));
++        require(controller.probe_interval() == 20 * kSecond, "skips do not grow the interval");
++    }
++    {
++        // Or the GPU says so: at 2X it would need 115% of the adapter.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive_probes(controller, now, 30 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 0, 1.15);
++        require(run.started.empty() && run.skipped.size() == 1, "GPU rules it out");
++        Nanoseconds later = now;
++        const auto fits = drive_probes(controller, later, 30 * kSecond, 27 * kMillisecond, 20 * kMillisecond, 0, 0.8);
++        require(fits.started.size() == 1, "and in once it fits");
++    }
++    {
++        // A probe that runs slow in 2X (p90 over two periods) without a
++        // missed slot fails as well.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive_probes(controller, now, 25 * kSecond, 27 * kMillisecond, 25 * kMillisecond, 0);
++        require(run.failed.size() == 1 && run.failed[0] - run.started[0] < 1500 * kMillisecond,
++            "slow fails the probe");
++    }
++    {
++        // The median is reported beside the p90.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        for (int i = 0; i < 10; ++i) {
++            controller.add_frame(start + 2 * kSecond + i, (10 + i) * kMillisecond, 1 * kMillisecond);
++        }
++        const auto stats = controller.stats(start + 3 * kSecond, 3 * kSecond);
++        require(stats.p50 == 14 * kMillisecond && stats.p90 == 18 * kMillisecond, "p50 and p90: " +
++            std::to_string(stats.p50) + " " + std::to_string(stats.p90));
++    }
++}
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): holds attributed to frames.
++
++void blocked_interval_tests() {
++    constexpr std::uint32_t render = 1;
++    constexpr std::uint32_t wait = 2;
++    {
++        // DCS's shape: the render thread released at 0 and held 5 ms in its
++        // xrEndFrame at the end; the wait thread held 4 ms in xrWaitFrame
++        // before the render thread could begin (at 8 ms), and 10 ms later
++        // while the render thread drew. Only the first wait counts.
++        BlockedIntervalLog log;
++        log.add(render, 30 * kMillisecond, 35 * kMillisecond);
++        log.add(wait, 2 * kMillisecond, 6 * kMillisecond);
++        log.add(wait, 12 * kMillisecond, 22 * kMillisecond);
++        const auto split = log.blocked(0, 35 * kMillisecond, render, 8 * kMillisecond);
++        require(split.own == 5 * kMillisecond, "own holds: " + std::to_string(split.own));
++        require(split.total == 9 * kMillisecond, "plus the wait before the begin: " + std::to_string(split.total));
++    }
++    {
++        // Two threads held at once delay the frame once; a hold straddling
++        // the frame's start is clipped to it.
++        BlockedIntervalLog log;
++        log.add(render, -5 * kMillisecond, 3 * kMillisecond);
++        log.add(wait, 1 * kMillisecond, 4 * kMillisecond);
++        const auto split = log.blocked(0, 20 * kMillisecond, render, 20 * kMillisecond);
++        require(split.own == 3 * kMillisecond && split.total == 4 * kMillisecond, "union, clipped");
++    }
++    {
++        // Holds outside the frame do not count; an empty interval is zero.
++        BlockedIntervalLog log;
++        log.add(render, 50 * kMillisecond, 60 * kMillisecond);
++        log.add(render, 5, 5);
++        require(log.blocked(0, 40 * kMillisecond, render, 40 * kMillisecond).total == 0, "outside");
++        require(log.blocked(10, 10, render, 10).total == 0, "empty frame");
++        // The ring forgets the oldest.
++        for (std::size_t i = 0; i < BlockedIntervalLog::kCapacity; ++i) {
++            log.add(render, 100 * kMillisecond + static_cast<Nanoseconds>(i) * 10, 100 * kMillisecond + static_cast<Nanoseconds>(i) * 10 + 5);
++        }
++        require(log.blocked(0, 70 * kMillisecond, render, 0).total == 0, "overwritten");
++        log.reset();
++        require(log.blocked(0, 200 * kMillisecond, render, 0).total == 0, "reset");
++    }
++}
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): GPU busy per frame.
++
++void gpu_busy_tests() {
++    {
++        GpuBusyMeter meter;
++        require(!meter.latest().valid, "nothing yet");
++        // 250 ms: the process's busiest engine ran 100 ms, the adapter's
++        // 150 ms, over 8 application frames.
++        meter.observe({kSecond, 100 * kMillisecond, 150 * kMillisecond, 8, 250 * kMillisecond});
++        const auto reading = meter.latest();
++        require(reading.valid && reading.per_frame == 12'500'000, "busy per frame: " + std::to_string(reading.per_frame));
++        require(reading.process_load > 0.399 && reading.process_load < 0.401, "process load");
++        require(reading.adapter_load > 0.599 && reading.adapter_load < 0.601, "adapter load");
++        require(meter.fresh(kSecond + 500 * kMillisecond, kSecond).valid, "fresh");
++        require(!meter.fresh(3 * kSecond, kSecond).valid, "stale");
++    }
++    {
++        // Short samples are folded into the next.
++        GpuBusyMeter meter;
++        meter.observe({100 * kMillisecond, 20 * kMillisecond, 20 * kMillisecond, 2, 100 * kMillisecond});
++        require(!meter.latest().valid, "too short alone");
++        meter.observe({200 * kMillisecond, 30 * kMillisecond, 40 * kMillisecond, 3, 100 * kMillisecond});
++        require(meter.latest().valid && meter.latest().per_frame == 10 * kMillisecond, "folded: " +
++            std::to_string(meter.latest().per_frame));
++        // No frames: loads, but nothing per frame.
++        meter.observe({500 * kMillisecond, 30 * kMillisecond, 40 * kMillisecond, 0, 300 * kMillisecond});
++        require(meter.latest().valid && meter.latest().per_frame == -1, "no frames");
++        // Counters that went backwards start over.
++        meter.observe({600 * kMillisecond, -5, 10, 1, 100 * kMillisecond});
++        meter.observe({700 * kMillisecond, 10 * kMillisecond, 10 * kMillisecond, 1, 100 * kMillisecond});
++        require(meter.latest().at == 500 * kMillisecond, "the bad sample and its fold are dropped");
++        // The adapter is never less loaded than the process on it.
++        GpuBusyMeter other;
++        other.observe({kSecond, 200 * kMillisecond, 100 * kMillisecond, 4, 400 * kMillisecond});
++        require(other.latest().adapter_load >= other.latest().process_load, "adapter >= process");
++    }
++    {
++        // 2X projection: the process's 40% grows by half, the 20% that is
++        // everyone else's stays.
++        const double load = projected_gpu_load_at_double_rate(0.4, 0.6);
++        require(load > 0.799 && load < 0.801, "projected: " + std::to_string(load));
++        require(projected_gpu_load_at_double_rate(0.7, 0.7) > 1.0, "a busy GPU projects past 1");
++    }
++}
++
++// ---------------------------------------------------------------------------
++// DCS VR Control (0007): 3X's deeper pipeline.
++
++void triple_depth_tests() {
++    {
++        TripleDepth depth;
++        depth.arm(true, 2);
++        require(!depth.pending, "2X has its own deeper pipeline");
++        depth.arm(false, 3);
++        require(!depth.pending, "shallow 3X takes no shift");
++        depth.arm(true, 3);
++        require(depth.pending, "deep 3X arms");
++        require(!depth.take(false, true, true), "only at a slot after a real frame");
++        require(!depth.take(true, false, true), "not ahead of a frame's second synthetic");
++        require(!depth.take(true, true, false), "not without a frame to re-present");
++        require(depth.take(true, true, true) && depth.inserted == 1 && depth.slots == 1, "taken once");
++        require(!depth.take(true, true, true) && depth.inserted == 1, "and only once");
++        // On time: no more.
++        for (std::uint32_t i = 0; i < 10 * TripleDepth::kWindow; ++i) {
++            require(!depth.observe_leader(i % 15 == 0), "two late in thirty asks for nothing");
++        }
++        require(!depth.pending && depth.slots == 1, "one slot holds");
++        // One hitch - three late at once, then on time - asks for nothing.
++        for (std::uint32_t i = 0; i < 4 * TripleDepth::kWindow; ++i) {
++            require(!depth.observe_leader(i >= 40 && i < 43), "one hitch asks for nothing");
++        }
++        // Three late in a window, two windows running: one more slot, then
++        // no more past two.
++        bool asked = false;
++        std::uint32_t seen = 0;
++        for (std::uint32_t i = 0; i < 2 * TripleDepth::kWindow && !asked; ++i, ++seen) {
++            asked = depth.observe_leader(i % 10 == 0);
++        }
++        require(asked && depth.pending && seen == 2 * TripleDepth::kWindow,
++            "three late in thirty, twice, asks for a second slot");
++        require(!depth.observe_leader(true), "nothing counted while one is pending");
++        require(depth.take(true, true, true) && depth.slots == 2 && depth.inserted == 2, "second slot");
++        for (std::uint32_t i = 0; i < 3 * TripleDepth::kWindow; ++i) {
++            require(!depth.observe_leader(true), "two is the most");
++        }
++        depth.arm(true, 3);
++        require(depth.pending && depth.slots == 0, "a new shape starts over");
++        require(depth.take(true, true, true) && depth.inserted == 3 && depth.slots == 1, "re-armed by a new shape");
++        depth.arm(true, 2);
++        require(!depth.active && !depth.observe_leader(true), "inactive outside 3X");
++    }
++    {
++        // The release delay keeps the depth's period in hand.
++        require(triple_slack_for_tuner(14 * kMillisecond, kPeriod, true) == 14 * kMillisecond - kPeriod, "deep");
++        require(triple_slack_for_tuner(14 * kMillisecond, kPeriod, false) == 14 * kMillisecond, "shallow");
++        // A deep 3X with 13.1 ms of measured slack (a period plus 2 ms) sits
++        // in the tuner's band: no raise, no back-off.
++        TripleReleaseTuner tuner;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_slack(tuner, kPeriod,
++                triple_slack_for_tuner(kPeriod + 2 * kMillisecond + 100'000, kPeriod, true));
++        }
++        require(window.closed && tuner.delay <= kMillisecond, "a period kept: delay " + std::to_string(tuner.delay));
++        // And one that falls under a period backs off at once.
++        tuner.delay = 6 * kMillisecond;
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_slack(tuner, kPeriod,
++                triple_slack_for_tuner(kPeriod - 3 * kMillisecond, kPeriod, true));
++        }
++        require(window.closed && tuner.delay < 6 * kMillisecond, "under a period backs off: " +
++            std::to_string(tuner.delay));
++    }
++}
++
+ void late_submission_tests() {
+     {
+         // The threshold is exclusive and configurable.
+@@ -934,6 +1287,10 @@ int main() {
+         late_submission_tests();
+         late_skip_tests();
+         gpu_split_tests();
++        probe_tests();
++        blocked_interval_tests();
++        gpu_busy_tests();
++        triple_depth_tests();
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_adaptive_frame_gen.cmake b/tests/layer_adaptive_frame_gen.cmake
+index 61189fb..418b52c 100644
+--- a/tests/layer_adaptive_frame_gen.cmake
++++ b/tests/layer_adaptive_frame_gen.cmake
+@@ -42,13 +42,14 @@ file(READ "${flight_log}" contents)
+ foreach(expected IN ITEMS
+         # Adaptive on at creation, starting in 3X as triple_frame_gen says.
+         "op=adaptive_switch result=5 dur_us=0 a=0 b=3 c=0"
+-        # The ring 3X needs, and the session's shape.
+-        "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=1"
++        # The ring 3X needs, and the session's shape: 3X with the deeper
++        # pipeline the ini asks for (DCS VR Control 0007).
++        "op=presenter_transition result=700 dur_us=0 a=3 b=1 c=1"
+         # Headroom: 3X -> 2X, then the live switch's own record.
+         "op=adaptive_switch result=1 dur_us=0 a=3 b=2 c="
+         "op=presenter_transition result=700 dur_us=0 a=2 b=1 c=2"
+         # Heavy in 2X: back to 3X.
+-        "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=2"
++        "op=presenter_transition result=700 dur_us=0 a=3 b=1 c=2"
+         # Status under adaptive control, in each mode.
+         "op=latency_status result=13 "
+         "op=latency_status result=12 "
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index 3d15cfc..2fe6177 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -200,6 +200,18 @@ int g_simulated_render_ms = 0;
+ // never engage.
+ bool g_late_skip_mode = false;
+ bool g_late_skip_expected = true;
++// dcs-triple-deep / dcs-triple-deep-jitter (DCS VR Control, 0007): dcs-latency's
++// shape in 3X with the deeper pipeline (deep_pipeline=1 in the ini), the
++// application steady at a third of the display rate with a frame that, at the
++// shallow depth, finishes close to its first synthetic's slot - and in the
++// -jitter case varies by up to 3 ms either way. With the depth no first
++// synthetic may go out late and every slot of the steady stretch must show a
++// fresh frame (the one re-presented slot that sets the depth comes first);
++// the flight log is checked for that by layer_triple_deep.cmake, the order of
++// what was shown here.
++bool g_triple_deep_mode = false;
++int g_triple_deep_jitter_us = 0;
++int g_simulated_render_us = 0;
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+ // dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
+ // time per frame set apart - CPU by a sleep from the frame's start, GPU by a
+@@ -2401,7 +2413,8 @@ int main(int argc, char** argv) {
+             "dcs|dcs-d3d11|dcs-latency|dcs-adaptive|dcs-throughput-down|"
+             "dcs-throughput-gpu|d3d11-bridge|"
+             "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted|"
+-            "d3d11-bridge-fallback|dcs-late-skip]\n";
++            "d3d11-bridge-fallback|dcs-late-skip|dcs-triple-deep|"
++            "dcs-triple-deep-jitter]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2417,6 +2430,12 @@ int main(int argc, char** argv) {
+     g_adaptive_latency_mode =
+         argc == 4 && std::strcmp(argv[3], "dcs-adaptive") == 0;
+     g_late_skip_mode = argc == 4 && std::strcmp(argv[3], "dcs-late-skip") == 0;
++    {
++        const bool steady = argc == 4 && std::strcmp(argv[3], "dcs-triple-deep") == 0;
++        const bool jitter = argc == 4 && std::strcmp(argv[3], "dcs-triple-deep-jitter") == 0;
++        g_triple_deep_mode = steady || jitter;
++        g_triple_deep_jitter_us = jitter ? 3000 : 0;
++    }
+     {
+         const bool throughput_down =
+             argc == 4 && std::strcmp(argv[3], "dcs-throughput-down") == 0;
+@@ -2429,6 +2448,7 @@ int main(int argc, char** argv) {
+         g_adaptive_latency_mode = g_adaptive_latency_mode || g_throughput_mode;
+     }
+     g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
++        g_triple_deep_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -3889,7 +3909,9 @@ int main(int argc, char** argv) {
+                 phases[2] = ms_since(mark);
+                 wait_thread.join();
+                 phases[3] = ms_since(mark);
+-                if (g_simulated_render_ms > 0) {
++                if (g_simulated_render_us > 0) {
++                    precise_sleep(std::chrono::microseconds(g_simulated_render_us));
++                } else if (g_simulated_render_ms > 0) {
+                     precise_sleep(std::chrono::milliseconds(g_simulated_render_ms));
+                 }
+                 if (g_throughput_mode) {
+@@ -4011,7 +4033,7 @@ int main(int argc, char** argv) {
+         // agreeing windows of thirty real frames), and in 3X for the queue
+         // to reach its depth first, then until it has.
+         const int kOverlappingFrames =
+-            (g_adaptive_latency_mode || g_late_skip_mode) ? 0
++            (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode) ? 0
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4022,9 +4044,30 @@ int main(int argc, char** argv) {
+         constexpr int kSettleBound = 400;
+         int settle_frames = 0;
+         if (g_display_latency_mode && !g_adaptive_latency_mode &&
+-            !g_late_skip_mode) {
++            !g_late_skip_mode && !g_triple_deep_mode) {
+             settle_frames = run_until_settled(kSettleBound);
+         }
++        // dcs-triple-deep (0007): 14 s of a steady application, the last 8
++        // of them the stretch checked here. Its frame takes 13 ms of render
++        // on top of the shape's 2 ms and the test's own overhead, varying by
++        // up to g_triple_deep_jitter_us either way in a fixed sequence.
++        std::size_t triple_deep_steady_from = 0;
++        if (g_triple_deep_mode) {
++            constexpr int kTripleDeepFrames = 460;
++            constexpr int kTripleDeepSteadyFrom = 200;
++            for (int index = 0; sequence_succeeded && index < kTripleDeepFrames;
++                 ++index) {
++                // -1, 0, +1 in thirds of the jitter, spread over the range.
++                const int step = static_cast<int>((static_cast<unsigned>(index) * 2654435761U) >> 29) % 7 - 3;
++                g_simulated_render_us = 13'000 + g_triple_deep_jitter_us * step / 3;
++                sequence_succeeded = run_frame(true);
++                if (index == kTripleDeepSteadyFrom) {
++                    std::scoped_lock lock(g_end_records_mutex);
++                    triple_deep_steady_from = g_end_records.size();
++                }
++            }
++            g_simulated_render_us = 0;
++        }
+         // dcs-late-skip (0006): where each phase starts in the records.
+         std::size_t late_skip_heavy_from = 0;
+         std::size_t late_skip_light_from = 0;
+@@ -4194,6 +4237,93 @@ int main(int argc, char** argv) {
+                       << throughput_frames << " frames\n";
+             return EXIT_SUCCESS;
+         }
++        if (g_triple_deep_mode) {
++            // 0007: over the steady stretch, every slot a fresh frame - two
++            // synthetics and a real one per application frame, nothing
++            // re-presented - and over the whole run nothing out of order.
++            std::vector<EndFrameRecord> records;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records = g_end_records;
++            }
++            std::vector<std::pair<float, XrTime>> told;
++            {
++                std::scoped_lock lock(g_told_mutex);
++                told = g_told_by_pose;
++            }
++            const auto told_for = [&](float pose_x) -> XrTime {
++                for (const auto& [pose, time] : told) {
++                    if (pose == pose_x) {
++                        return time;
++                    }
++                }
++                return -1;
++            };
++            std::size_t unordered = 0;
++            std::size_t repeats_steady = 0;
++            std::size_t repeats_total = 0;
++            std::size_t synthetic_steady = 0;
++            std::size_t real_steady = 0;
++            std::size_t empty_mid = 0;
++            XrTime last_told = 0;
++            for (std::size_t index = 0; index < records.size(); ++index) {
++                const EndFrameRecord& record = records[index];
++                if (record.layer_count == 0) {
++                    empty_mid += index + 1 < records.size() ? 1U : 0U;
++                    continue;
++                }
++                if (record.target != SubmittedTarget::current &&
++                    record.target != SubmittedTarget::synthetic) {
++                    continue;
++                }
++                const XrTime time = told_for(record.poses[0].position.x);
++                if (time >= 0) {
++                    unordered += time < last_told ? 1U : 0U;
++                    last_told = std::max(last_told, time);
++                }
++                const bool repeat = index > 0 &&
++                    record.target == SubmittedTarget::current &&
++                    records[index - 1].target == SubmittedTarget::current &&
++                    records[index - 1].poses[0].position.x ==
++                        record.poses[0].position.x;
++                repeats_total += repeat ? 1U : 0U;
++                // The last few submissions are the teardown's.
++                if (index >= triple_deep_steady_from && index + 6 < records.size()) {
++                    repeats_steady += repeat ? 1U : 0U;
++                    if (record.target == SubmittedTarget::synthetic) {
++                        ++synthetic_steady;
++                    } else if (!repeat) {
++                        ++real_steady;
++                    }
++                }
++            }
++            valid = sequence_succeeded && teardown_succeeded &&
++                presenter_seen && violations == 0 && unordered == 0 &&
++                empty_mid <= 1 && repeats_steady == 0 && real_steady >= 200 &&
++                synthetic_steady + 2 >= 2 * real_steady &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            if (!valid) {
++                std::cerr << "DCS 3X deep validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen
++                          << " violations=" << violations
++                          << " unordered=" << unordered
++                          << " empty-mid=" << empty_mid
++                          << " repeats-steady=" << repeats_steady
++                          << " repeats-total=" << repeats_total
++                          << " steady synthetic/real=" << synthetic_steady << '/'
++                          << real_steady << " records=" << records.size()
++                          << " steady-from=" << triple_deep_steady_from
++                          << " jitter-us=" << g_triple_deep_jitter_us << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << "OpenXR DCS 3X deep test passed: " << real_steady
++                      << " steady application frames with " << synthetic_steady
++                      << " synthetics and no slot re-presented (jitter "
++                      << g_triple_deep_jitter_us << " us, " << repeats_total
++                      << " re-presented over the run)\n";
++            return EXIT_SUCCESS;
++        }
+         if (g_late_skip_mode) {
+             std::vector<EndFrameRecord> records;
+             {
+diff --git a/tests/layer_lazy_history.cmake b/tests/layer_lazy_history.cmake
+index 8086c91..6d3e659 100644
+--- a/tests/layer_lazy_history.cmake
++++ b/tests/layer_lazy_history.cmake
+@@ -7,7 +7,9 @@
+ #     quad-view swapchains behind Quad Views),
+ #   - the named one took its history when it armed, once,
+ #   - its release copies were deferred while generation ran and made at release
+-#     again around the fall-back.
++#     again around the fall-back;
++#   - (0007) the runtime, which is not SteamVR here, was handed a binding
++#     queue of the layer's own (session_binding capability bit 16).
+ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN PIPELINE_INI WORK_DIR)
+     if(NOT DEFINED ${required_variable})
+         message(FATAL_ERROR "${required_variable} was not provided")
+@@ -44,6 +46,17 @@ endif()
+ list(GET flight_logs 0 flight_log)
+ file(READ "${flight_log}" contents)
+ 
++# DCS VR Control (0007): session_binding a= the binding structure type in its
++# low 32 bits and the capabilities above; 16 is the layer's own binding queue.
++string(REGEX MATCH "op=session_binding result=2 dur_us=0 a=([0-9]+) " binding "${contents}")
++if(binding STREQUAL "")
++    message(FATAL_ERROR "No session_binding record")
++endif()
++math(EXPR own_binding_queue "(${CMAKE_MATCH_1} >> 36) & 1")
++if(NOT own_binding_queue EQUAL 1)
++    message(FATAL_ERROR "The bridged session did not hand the runtime a queue of the layer's own: ${binding}")
++endif()
++
+ # The fake runtime's handles: 0x303 the named colour swapchain, 0x30e the
+ # never-named one.
+ set(named_handle 771)
+diff --git a/tests/layer_triple_deep.cmake b/tests/layer_triple_deep.cmake
+new file mode 100644
+index 0000000..9339dcb
+--- /dev/null
++++ b/tests/layer_triple_deep.cmake
+@@ -0,0 +1,158 @@
++# DCS VR Control (0007): runs dcs-triple-deep (CASE steady) or
++# dcs-triple-deep-jitter (CASE jitter) with TRIPLE_DEEP_INI beside the layer
++# DLL - 3X with deep_pipeline=1 on a runtime that paces like a display - and
++# checks from the flight log that
++#   - the session took 3X with the deeper pipeline (700 with a=3 b=1) and set
++#     its depth with a re-presented slot (403, the first with a=1; a second
++#     one, a=2, only if first synthetics kept going out late);
++#   - over the steady stretch (the last STEADY_SECONDS whole seconds before
++#     the teardown's) every second's submissions were fresh: no first
++#     synthetic late, nothing re-presented, and at least MIN_FRESH a real
++#     frame or a synthetic (the fake runs about 90 slots a second);
++#   - the late-frame skip never turned on.
++#
++# A second in which the test application itself stalled - one of its frames
++# took more than STALL_MS from one xrEndFrame to the next, which no pipeline
++# depth absorbs, and which a loaded machine produces on WARP now and then -
++# is left out of the judgement; at least MIN_JUDGED seconds must remain.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN TRIPLE_DEEP_INI WORK_DIR CASE)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++if(NOT DEFINED STEADY_SECONDS)
++    set(STEADY_SECONDS 8)
++endif()
++if(NOT DEFINED MIN_JUDGED)
++    set(MIN_JUDGED 5)
++endif()
++if(NOT DEFINED MIN_FRESH)
++    set(MIN_FRESH 80)
++endif()
++if(NOT DEFINED STALL_MS)
++    set(STALL_MS 50)
++endif()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${TRIPLE_DEEP_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(triple_deep_ini_name "${TRIPLE_DEEP_INI}" NAME)
++file(RENAME "${WORK_DIR}/${triple_deep_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++if(CASE STREQUAL "jitter")
++    set(mode dcs-triple-deep-jitter)
++else()
++    set(mode dcs-triple-deep)
++endif()
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        ${mode}
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${mode}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++string(FIND "${contents}" "op=presenter_transition result=700 dur_us=0 a=3 b=1 " shape)
++if(shape EQUAL -1)
++    message(FATAL_ERROR "The session did not take 3X with the deeper pipeline")
++endif()
++string(REGEX MATCHALL "op=presenter_transition result=403 dur_us=0 a=[0-9]+" depth_slots "${contents}")
++list(LENGTH depth_slots depth_slot_count)
++if(depth_slot_count LESS 1 OR depth_slot_count GREATER 2)
++    message(FATAL_ERROR "Expected one or two re-presented slots setting the depth, found ${depth_slot_count}")
++endif()
++list(GET depth_slots 0 first_depth_slot)
++if(NOT first_depth_slot MATCHES "a=1$")
++    message(FATAL_ERROR "The first depth slot is not the first: ${first_depth_slot}")
++endif()
++string(FIND "${contents}" "op=submission_timing result=3 dur_us=0 a=1 " skip_entered)
++if(NOT skip_entered EQUAL -1)
++    message(FATAL_ERROR "The late-frame skip turned on in 3X with the deeper pipeline")
++endif()
++
++# The application's own stalls: xrEndFrame to xrEndFrame over STALL_MS.
++string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=B op=app_end_frame" end_frames "${contents}")
++set(stalls "")
++set(previous_ms -1)
++foreach(record IN LISTS end_frames)
++    string(REGEX REPLACE "^ms=([0-9]+)\\.[0-9]+ .*" "\\1" at_ms "${record}")
++    if(previous_ms GREATER_EQUAL 0)
++        math(EXPR gap "${at_ms} - ${previous_ms}")
++        if(gap GREATER STALL_MS)
++            list(APPEND stalls "${at_ms}")
++        endif()
++    endif()
++    set(previous_ms "${at_ms}")
++endforeach()
++
++# Per second: a= submissions by kind (real, gen1, gen2, repeat; 16 bits
++# each), b= the late ones packed the same.
++string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=submission_timing result=1 dur_us=0 a=[0-9]+ b=[0-9]+" tallies "${contents}")
++list(LENGTH tallies tally_count)
++math(EXPR needed "${STEADY_SECONDS} + 1")
++if(tally_count LESS needed)
++    message(FATAL_ERROR "Only ${tally_count} per-second submission records")
++endif()
++# The last record is cut short by the teardown.
++math(EXPR last "${tally_count} - 2")
++math(EXPR first "${tally_count} - 1 - ${STEADY_SECONDS}")
++set(summary "")
++set(judged 0)
++foreach(index RANGE ${first} ${last})
++    list(GET tallies ${index} record)
++    string(REGEX REPLACE "^ms=([0-9]+)\\.[0-9]+ .* a=([0-9]+) b=([0-9]+)$" "\\1;\\2;\\3" fields "${record}")
++    list(GET fields 0 at_ms)
++    list(GET fields 1 counts)
++    list(GET fields 2 lates)
++    math(EXPR real "${counts} & 65535")
++    math(EXPR gen1 "(${counts} >> 16) & 65535")
++    math(EXPR gen2 "(${counts} >> 32) & 65535")
++    math(EXPR repeat "(${counts} >> 48) & 65535")
++    math(EXPR late_gen1 "(${lates} >> 16) & 65535")
++    math(EXPR fresh "${real} + ${gen1} + ${gen2}")
++    # A stall in this second (or right at its edges) excuses it.
++    math(EXPR window_from "${at_ms} - 1100")
++    math(EXPR window_to "${at_ms} + 100")
++    set(stalled OFF)
++    foreach(stall IN LISTS stalls)
++        if(stall GREATER window_from AND stall LESS window_to)
++            set(stalled ON)
++        endif()
++    endforeach()
++    if(stalled)
++        string(APPEND summary " [stalled: real ${real} gen1 ${gen1} gen2 ${gen2} repeat ${repeat} late-gen1 ${late_gen1}]")
++        continue()
++    endif()
++    math(EXPR judged "${judged} + 1")
++    string(APPEND summary " [real ${real} gen1 ${gen1} gen2 ${gen2} repeat ${repeat} late-gen1 ${late_gen1}]")
++    if(late_gen1 GREATER 0)
++        message(FATAL_ERROR "A first synthetic went out late in the steady stretch:${summary}")
++    endif()
++    if(repeat GREATER 0)
++        message(FATAL_ERROR "A slot was re-presented in the steady stretch:${summary}")
++    endif()
++    if(fresh LESS MIN_FRESH)
++        message(FATAL_ERROR "Fewer than ${MIN_FRESH} fresh frames in a steady second:${summary}")
++    endif()
++endforeach()
++if(judged LESS MIN_JUDGED)
++    message(FATAL_ERROR "Only ${judged} seconds without a stall of the test application:${summary}")
++endif()
++message(STATUS "3X deep (${CASE}) over ${STEADY_SECONDS} s, ${judged} judged, ${depth_slot_count} depth slot(s):${summary}")
+diff --git a/tests/layer_triple_frame_gen.cmake b/tests/layer_triple_frame_gen.cmake
+index 26c6422..f5ec9a2 100644
+--- a/tests/layer_triple_frame_gen.cmake
++++ b/tests/layer_triple_frame_gen.cmake
+@@ -82,9 +82,16 @@ endif()
+ list(GET flight_logs 0 flight_log)
+ file(READ "${flight_log}" contents)
+ 
+-# presenter_transition 700: a is the frames per application frame.
++# presenter_transition 700: a is the frames per application frame, b the
++# deeper pipeline - which the ini asks for and, since DCS VR Control 0007, 3X
++# takes on a D3D12 binding (the bridge's included) but not through Vulkan.
++if(MODE STREQUAL "vulkan")
++    set(expected_deep 0)
++else()
++    set(expected_deep 1)
++endif()
+ string(FIND "${contents}"
+-    "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=1" found)
++    "op=presenter_transition result=700 dur_us=0 a=3 b=${expected_deep} c=1" found)
+ if(found EQUAL -1)
+     message(FATAL_ERROR "The session did not take three frames per application frame")
+ endif()
+diff --git a/tests/ofxr_bridge_late_skip.ini b/tests/ofxr_bridge_late_skip.ini
+index ba9011e..d13b782 100644
+--- a/tests/ofxr_bridge_late_skip.ini
++++ b/tests/ofxr_bridge_late_skip.ini
+@@ -6,7 +6,9 @@ backend=fidelityfx
+ nvidia_preset=medium
+ nvidia_input_scale=50
+ nvidia_bidirectional=0
+-deep_pipeline=1
++; DCS VR Control (0007): the late-frame skip is 3X shallow's; with the
++; deeper pipeline the first synthetics of this scenario are on time.
++deep_pipeline=0
+ triple_frame_gen=1
+ late_frame_skip=1
+ 
+diff --git a/tests/ofxr_bridge_late_skip_off.ini b/tests/ofxr_bridge_late_skip_off.ini
+index a270f6c..418f79e 100644
+--- a/tests/ofxr_bridge_late_skip_off.ini
++++ b/tests/ofxr_bridge_late_skip_off.ini
+@@ -6,7 +6,9 @@ backend=fidelityfx
+ nvidia_preset=medium
+ nvidia_input_scale=50
+ nvidia_bidirectional=0
+-deep_pipeline=1
++; DCS VR Control (0007): the late-frame skip is 3X shallow's; with the
++; deeper pipeline the first synthetics of this scenario are on time.
++deep_pipeline=0
+ triple_frame_gen=1
+ late_frame_skip=0
+ 
+diff --git a/tests/ofxr_bridge_triple_deep.ini b/tests/ofxr_bridge_triple_deep.ini
+new file mode 100644
+index 0000000..ba9011e
+--- /dev/null
++++ b/tests/ofxr_bridge_triple_deep.ini
+@@ -0,0 +1,17 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=1
++late_frame_skip=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right

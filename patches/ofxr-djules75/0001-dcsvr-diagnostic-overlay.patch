@@ -1,0 +1,1513 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3c6a6a4..1c58ebb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -43,6 +43,7 @@ set(XRFG_NVIDIA_OPTICAL_FLOW_SDK_ROOT
+     "Path to the NVIDIA Optical Flow SDK 5.0.7 root")
+ 
+ add_library(xrfg_core STATIC
++    src/core/diagnostic_overlay_model.cpp
+     src/core/fps_overlay_model.cpp
+     src/core/image.cpp
+     src/core/optical_flow.cpp
+@@ -72,6 +73,14 @@ if(XRFG_BUILD_TESTS)
+     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
+     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
+     add_test(NAME xrfg_fps_overlay_tests COMMAND xrfg_fps_overlay_tests)
++    # DCS VR Control diagnostic panel model.
++    add_executable(xrfg_diagnostic_overlay_tests tests/diagnostic_overlay_tests.cpp)
++    target_link_libraries(xrfg_diagnostic_overlay_tests PRIVATE xrfg_core)
++    if(MSVC)
++        target_compile_options(xrfg_diagnostic_overlay_tests PRIVATE /W4 /permissive- /EHsc)
++        target_compile_definitions(xrfg_diagnostic_overlay_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
++    endif()
++    add_test(NAME xrfg_diagnostic_overlay_tests COMMAND xrfg_diagnostic_overlay_tests)
+ 
+     add_executable(xrfg_optical_flow_tests tests/optical_flow_tests.cpp)
+     target_link_libraries(xrfg_optical_flow_tests PRIVATE xrfg_core)
+@@ -290,6 +299,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         target_link_libraries(xrfg_openxr_fps_overlay_tests PRIVATE xrfg_fps_overlay)
+         add_test(NAME xrfg_openxr_fps_overlay_d3d12 COMMAND xrfg_openxr_fps_overlay_tests)
+         add_test(NAME xrfg_openxr_fps_overlay_d3d11 COMMAND xrfg_openxr_fps_overlay_tests d3d11)
++        # DCS VR Control diagnostic panel through the real overlay.
++        add_executable(xrfg_openxr_diagnostic_panel_tests tests/openxr_diagnostic_panel_tests.cpp)
++        target_link_libraries(xrfg_openxr_diagnostic_panel_tests PRIVATE xrfg_fps_overlay)
++        add_test(NAME xrfg_openxr_diagnostic_panel_d3d12 COMMAND xrfg_openxr_diagnostic_panel_tests)
++        add_test(NAME xrfg_openxr_diagnostic_panel_d3d11 COMMAND xrfg_openxr_diagnostic_panel_tests d3d11)
++        # The panel follows DCSVR_DIAG_* from the environment; keep the counter tests independent of the shell.
++        set_tests_properties(xrfg_openxr_fps_overlay_d3d12 xrfg_openxr_fps_overlay_d3d11 PROPERTIES
++            ENVIRONMENT "DCSVR_DIAG_OVERLAY=0;DCSVR_DIAG_HOTKEY=0:0")
+     endif()
+ 
+     add_library(XR_APILAYER_XRFrameBridge_diagnostic SHARED
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+new file mode 100644
+index 0000000..f3c146a
+--- /dev/null
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -0,0 +1,139 @@
++#pragma once
++// DCS VR Control: in-headset diagnostic panel (session-only toggle) drawn by the
++// FPS overlay. Pure model: no Windows or OpenXR calls, unit tested on its own.
++//
++// The panel shows the overall FPS, DLSS 5 (DLSS-NR) state read from the status
++// block the patched Cheeky runtime publishes in Local\DcsVrControlStatus-<pid>,
++// and this layer's own frame-generation state with application vs output rate.
++
++#include "xrfg/fps_overlay_model.hpp"
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace xrfg {
++
++// ABI shared with patches/cheeky/dcs_status_block.hpp (DcsVrStatusV1). The
++// static_asserts below pin the same layout on both sides.
++inline constexpr std::uint32_t kDcsVrStatusMagic = 0x53525644U; // "DVRS"
++inline constexpr std::uint32_t kDcsVrStatusVersion = 1U;
++enum DcsVrStatusFlag : std::uint32_t {
++    dcsvr_nr_enabled = 1U,
++    dcsvr_quad_focus = 2U,
++    dcsvr_nr_hotkey = 4U,
++    dcsvr_graphics_ready = 8U,
++    dcsvr_sr_enabled = 16U,
++    dcsvr_nr_foveated = 32U,
++};
++struct DcsVrStatusV1 {
++    std::uint32_t magic;
++    std::uint32_t version;
++    std::uint32_t structure_size;
++    std::uint32_t sequence;
++    std::uint64_t publish_tick_ms;
++    std::uint32_t publisher_pid;
++    std::uint32_t flags;
++    std::uint32_t nr_state;
++    std::uint32_t nr_evaluations_per_second;
++    std::uint32_t nr_failures_per_second;
++    std::uint32_t focus_views_mapped;
++    std::uint32_t focus_accepts_per_second;
++    std::uint32_t focus_rejects_per_second;
++    std::uint32_t focus_last_reject;
++    std::uint32_t nr_hotkey;
++    float nr_gpu_ms;
++    float present_fps;
++    char reason[56];
++};
++static_assert(sizeof(DcsVrStatusV1) == 128U);
++static_assert(offsetof(DcsVrStatusV1, sequence) == 12U && offsetof(DcsVrStatusV1, publish_tick_ms) == 16U);
++static_assert(offsetof(DcsVrStatusV1, flags) == 28U && offsetof(DcsVrStatusV1, focus_views_mapped) == 44U);
++static_assert(offsetof(DcsVrStatusV1, nr_gpu_ms) == 64U && offsetof(DcsVrStatusV1, reason) == 72U);
++
++// Sequence-counter read of a block another thread may be writing. False when
++// no settled copy was obtained or the block is not a V1 status.
++[[nodiscard]] bool load_dcsvr_status(const DcsVrStatusV1& shared, DcsVrStatusV1& out) noexcept;
++// Older than this and the panel says the status is not updating.
++inline constexpr std::uint64_t kDcsVrStatusStaleMs = 2000U;
++
++// "virtual-key:modifiers" in decimal (Ctrl 1, Alt 2, Shift 4), as DCSVR_NR_HOTKEY.
++struct DiagnosticHotkey { unsigned virtual_key{}, modifiers{}; };
++[[nodiscard]] bool parse_diagnostic_hotkey(std::string_view text, DiagnosticHotkey& hotkey) noexcept;
++[[nodiscard]] std::string diagnostic_hotkey_label(const DiagnosticHotkey& hotkey);
++// The key plus exactly the chosen modifiers, so Alt+Shift+F12 does not fire on
++// Ctrl+Alt+Shift+F12. key_down(virtual_key) reports the physical state.
++template<class KeyDown>
++bool diagnostic_hotkey_down(const DiagnosticHotkey& hotkey, KeyDown key_down) {
++    if (!hotkey.virtual_key || !key_down(hotkey.virtual_key)) return false;
++    constexpr unsigned modifier_keys[3]{0x11U /*VK_CONTROL*/, 0x12U /*VK_MENU*/, 0x10U /*VK_SHIFT*/};
++    for (unsigned bit = 0; bit < 3; ++bit)
++        if (key_down(modifier_keys[bit]) != (((hotkey.modifiers >> bit) & 1U) != 0)) return false;
++    return true;
++}
++
++// Edge-triggered, session-only visibility. Never persisted.
++class DiagnosticToggle {
++public:
++    explicit DiagnosticToggle(bool visible = false) noexcept : visible_(visible) {}
++    // `foreground`: the game owns the foreground window. True when toggled.
++    bool poll(bool down, bool foreground) noexcept {
++        const bool pressed = down && !was_down_;
++        was_down_ = down;
++        if (!pressed || !foreground) return false;
++        visible_ = !visible_;
++        return true;
++    }
++    [[nodiscard]] bool visible() const noexcept { return visible_; }
++private:
++    bool visible_{};
++    bool was_down_{};
++};
++
++// What this layer knows about its own generation, sampled on the application's
++// xrEndFrame thread right after the live controls are applied.
++struct GenerationStatus {
++    bool known{};
++    bool enabled{};            // [ofxr] enabled and the last control revision applied
++    bool nvidia{};             // optical-flow backend in use
++    bool nvidia_unavailable{}; // NVIDIA failed to initialise; FidelityFX took over
++    bool budget_exhausted{};   // runtime refused private swapchains: pass-through
++    std::uint32_t multiplier{2};
++};
++
++enum class DiagnosticColor : std::uint8_t { white, green, amber, grey, red };
++struct DiagnosticLine {
++    std::string text;
++    DiagnosticColor color{DiagnosticColor::white};
++};
++
++struct DiagnosticInputs {
++    float output_fps{};        // what the overlay's counter shows
++    float app_fps{};           // distinct application frames
++    bool generating{};         // a synthetic frame reached the runtime in the last 0.5 s
++    GenerationStatus generation;
++    bool cheeky_present{};     // the status block exists
++    bool cheeky_fresh{};       // and was published within kDcsVrStatusStaleMs
++    DcsVrStatusV1 cheeky{};
++    DiagnosticHotkey hotkey;   // shown as the hide hint when valid
++};
++
++[[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
++[[nodiscard]] std::string format_generation_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
++[[nodiscard]] std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& inputs);
++
++inline constexpr std::uint32_t kDiagnosticPanelWidth = 768;
++inline constexpr std::uint32_t kDiagnosticPanelHeight = 176;
++// Characters per line at the panel's fixed glyph scale; longer lines are cut.
++[[nodiscard]] std::size_t diagnostic_panel_columns(std::uint32_t width) noexcept;
++// Premultiplied RGBA (or BGRA) with a translucent dark background.
++[[nodiscard]] std::vector<std::uint32_t> rasterize_diagnostic_panel(
++    std::uint32_t width, std::uint32_t height, const std::vector<DiagnosticLine>& lines, bool bgra);
++// Beside the counter's corner (upper_right when the counter is off), towards
++// the centre, inside the same central 90 degrees.
++[[nodiscard]] OverlayPlacement diagnostic_panel_placement(
++    FpsOverlayPosition position, float left, float right, float down, float up) noexcept;
++
++} // namespace xrfg
+diff --git a/include/xrfg/openxr_fps_overlay.hpp b/include/xrfg/openxr_fps_overlay.hpp
+index bb78e72..2fb6a1f 100644
+--- a/include/xrfg/openxr_fps_overlay.hpp
++++ b/include/xrfg/openxr_fps_overlay.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "xrfg/fps_overlay_model.hpp"
++#include "xrfg/diagnostic_overlay_model.hpp"
+ #include "xrfg/steamvr_delivery.hpp"
+ #include <d3d11_4.h>
+ #include <d3d12.h>
+@@ -23,6 +24,11 @@ public:
+         // presenter, which reads the vsync anchor from the same connection.
+         SteamVrDelivery* delivery);
+     ~OpenXrFpsOverlay();
++    // DCS VR Control diagnostic panel: the generation state shown on it. Called
++    // on the application's end-frame thread before application_frame.
++    void set_generation_status(const GenerationStatus& status) noexcept;
++    // Whether the diagnostic panel is currently toggled on (session only).
++    [[nodiscard]] bool diagnostic_visible() const noexcept;
+     // Called on the application's end-frame thread, not the presenter thread.
+     // Uploads at most 4 Hz; no explicit GPU fence wait, image-wait timeout zero.
+     void application_frame(const XrFrameEndInfo* info) noexcept;
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+new file mode 100644
+index 0000000..31caa8f
+--- /dev/null
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -0,0 +1,271 @@
++#include "xrfg/diagnostic_overlay_model.hpp"
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++
++namespace xrfg {
++
++bool load_dcsvr_status(const DcsVrStatusV1& shared, DcsVrStatusV1& out) noexcept {
++    std::atomic_ref<std::uint32_t> sequence(const_cast<std::uint32_t&>(shared.sequence));
++    for (int attempt = 0; attempt < 8; ++attempt) {
++        const auto before = sequence.load(std::memory_order_acquire);
++        if (before & 1U) continue;
++        std::memcpy(&out, &shared, sizeof(out));
++        std::atomic_thread_fence(std::memory_order_acquire);
++        if (sequence.load(std::memory_order_relaxed) != before) continue;
++        out.reason[sizeof(out.reason) - 1] = 0;
++        return out.magic == kDcsVrStatusMagic && out.version == kDcsVrStatusVersion &&
++            out.structure_size == sizeof(out);
++    }
++    return false;
++}
++
++bool parse_diagnostic_hotkey(std::string_view text, DiagnosticHotkey& hotkey) noexcept {
++    const auto colon = text.find(':');
++    if (colon == std::string_view::npos || colon == 0 || colon + 1 >= text.size()) return false;
++    unsigned values[2]{};
++    const std::string_view parts[2]{text.substr(0, colon), text.substr(colon + 1)};
++    for (int i = 0; i < 2; ++i) {
++        if (parts[i].size() > 4) return false;
++        for (const char c : parts[i]) {
++            if (c < '0' || c > '9') return false;
++            values[i] = values[i] * 10U + static_cast<unsigned>(c - '0');
++        }
++    }
++    if (values[0] == 0 || values[0] > 0xFE || values[1] > 7) return false;
++    hotkey = {values[0], values[1]};
++    return true;
++}
++
++std::string diagnostic_hotkey_label(const DiagnosticHotkey& hotkey) {
++    if (!hotkey.virtual_key) return {};
++    std::string label;
++    if (hotkey.modifiers & 1U) label += "Ctrl+";
++    if (hotkey.modifiers & 2U) label += "Alt+";
++    if (hotkey.modifiers & 4U) label += "Shift+";
++    const unsigned key = hotkey.virtual_key;
++    char name[16]{};
++    if (key >= 0x70U && key <= 0x87U) std::snprintf(name, sizeof(name), "F%u", key - 0x6FU);
++    else if ((key >= '0' && key <= '9') || (key >= 'A' && key <= 'Z')) name[0] = static_cast<char>(key);
++    else switch (key) {
++        case 0x21U: std::snprintf(name, sizeof(name), "PageUp"); break;
++        case 0x22U: std::snprintf(name, sizeof(name), "PageDown"); break;
++        case 0x23U: std::snprintf(name, sizeof(name), "End"); break;
++        case 0x24U: std::snprintf(name, sizeof(name), "Home"); break;
++        case 0x2DU: std::snprintf(name, sizeof(name), "Insert"); break;
++        case 0x2EU: std::snprintf(name, sizeof(name), "Delete"); break;
++        default: std::snprintf(name, sizeof(name), "Key%u", key); break;
++    }
++    return label + name;
++}
++
++namespace {
++std::string fixed(float value, int decimals) {
++    char text[32]{};
++    std::snprintf(text, sizeof(text), "%.*f", decimals,
++        std::isfinite(value) ? static_cast<double>(std::clamp(value, 0.0f, 9999.0f)) : 0.0);
++    return text;
++}
++std::string whole(float value) { return fixed(value, 0); }
++}
++
++std::string format_dlss_line(const DiagnosticInputs& in, DiagnosticColor& color) {
++    const auto& s = in.cheeky;
++    if (!in.cheeky_present) { color = DiagnosticColor::grey; return "DLSS 5: not loaded"; }
++    if (!in.cheeky_fresh) { color = DiagnosticColor::amber; return "DLSS 5: status not updating"; }
++    if (!(s.flags & dcsvr_nr_enabled)) { color = DiagnosticColor::grey; return "DLSS 5: OFF"; }
++    if (s.nr_evaluations_per_second == 0U) {
++        color = DiagnosticColor::amber;
++        const std::string reason = s.reason[0] ? std::string(s.reason, strnlen(s.reason, sizeof(s.reason)))
++                                               : std::string("no NR evaluations");
++        return "DLSS 5: ON but not applied (" + reason + ")";
++    }
++    color = DiagnosticColor::green;
++    std::string detail;
++    if (s.flags & dcsvr_quad_focus) {
++        detail = std::to_string(s.focus_views_mapped) +
++            (s.focus_views_mapped == 1U ? " focus view" : " focus views");
++    } else {
++        detail = std::to_string(s.nr_evaluations_per_second) + "/s";
++    }
++    if (s.nr_gpu_ms > 0.0f && std::isfinite(s.nr_gpu_ms)) detail += ", " + fixed(s.nr_gpu_ms, 1) + " ms";
++    if (s.nr_failures_per_second) {
++        detail += ", " + std::to_string(s.nr_failures_per_second) + " failed/s";
++        color = DiagnosticColor::amber;
++    }
++    return "DLSS 5: ON (" + detail + ")";
++}
++
++std::string format_generation_line(const DiagnosticInputs& in, DiagnosticColor& color) {
++    const auto& g = in.generation;
++    if (!g.known) { color = DiagnosticColor::grey; return "Framegen: unknown"; }
++    if (!g.enabled) { color = DiagnosticColor::grey; return "Framegen: off"; }
++    if (g.budget_exhausted) { color = DiagnosticColor::red; return "Framegen: fallback (swapchain limit)"; }
++    std::string text = std::string("Framegen: OFXR ") + (g.nvidia && !g.nvidia_unavailable ? "NVIDIA" : "FidelityFX") +
++        " " + std::to_string(std::clamp<std::uint32_t>(g.multiplier, 2U, 3U)) + "x";
++    if (g.nvidia_unavailable) text += " (NVIDIA failed)";
++    if (!in.generating) {
++        color = DiagnosticColor::amber;
++        return text + " - not generating";
++    }
++    color = g.nvidia_unavailable ? DiagnosticColor::amber : DiagnosticColor::green;
++    return text;
++}
++
++std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& in) {
++    std::vector<DiagnosticLine> lines;
++    lines.push_back({"FPS " + whole(in.output_fps), DiagnosticColor::white});
++    DiagnosticLine dlss, generation;
++    dlss.text = format_dlss_line(in, dlss.color);
++    generation.text = format_generation_line(in, generation.color);
++    lines.push_back(std::move(dlss));
++    lines.push_back(std::move(generation));
++    lines.push_back({"App " + whole(in.app_fps) + " fps -> out " + whole(in.output_fps) + " fps",
++        DiagnosticColor::white});
++    if (in.hotkey.virtual_key)
++        lines.push_back({diagnostic_hotkey_label(in.hotkey) + ": hide", DiagnosticColor::grey});
++    return lines;
++}
++
++namespace {
++// Original 5x7 bitmap glyphs, rows top to bottom, bit 4 leftmost. Lowercase
++// letters are drawn as capitals; anything unknown as '?'.
++std::array<unsigned char, 7> text_glyph(char c) noexcept {
++    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
++    switch (c) {
++    case ' ': return {0,0,0,0,0,0,0};
++    case '0': return {14,17,19,21,25,17,14};
++    case '1': return {4,12,4,4,4,4,14};
++    case '2': return {14,17,1,2,4,8,31};
++    case '3': return {30,1,1,14,1,1,30};
++    case '4': return {2,6,10,18,31,2,2};
++    case '5': return {31,16,16,30,1,1,30};
++    case '6': return {14,16,16,30,17,17,14};
++    case '7': return {31,1,2,4,8,8,8};
++    case '8': return {14,17,17,14,17,17,14};
++    case '9': return {14,17,17,15,1,1,14};
++    case 'A': return {14,17,17,31,17,17,17};
++    case 'B': return {30,17,17,30,17,17,30};
++    case 'C': return {14,17,16,16,16,17,14};
++    case 'D': return {28,18,17,17,17,18,28};
++    case 'E': return {31,16,16,30,16,16,31};
++    case 'F': return {31,16,16,30,16,16,16};
++    case 'G': return {14,17,16,23,17,17,15};
++    case 'H': return {17,17,17,31,17,17,17};
++    case 'I': return {14,4,4,4,4,4,14};
++    case 'J': return {7,2,2,2,2,18,12};
++    case 'K': return {17,18,20,24,20,18,17};
++    case 'L': return {16,16,16,16,16,16,31};
++    case 'M': return {17,27,21,21,17,17,17};
++    case 'N': return {17,17,25,21,19,17,17};
++    case 'O': return {14,17,17,17,17,17,14};
++    case 'P': return {30,17,17,30,16,16,16};
++    case 'Q': return {14,17,17,17,21,18,13};
++    case 'R': return {30,17,17,30,20,18,17};
++    case 'S': return {15,16,16,14,1,1,30};
++    case 'T': return {31,4,4,4,4,4,4};
++    case 'U': return {17,17,17,17,17,17,14};
++    case 'V': return {17,17,17,17,17,10,4};
++    case 'W': return {17,17,17,21,21,21,10};
++    case 'X': return {17,17,10,4,10,17,17};
++    case 'Y': return {17,17,17,10,4,4,4};
++    case 'Z': return {31,1,2,4,8,16,31};
++    case '.': return {0,0,0,0,0,12,12};
++    case ',': return {0,0,0,0,12,4,8};
++    case ':': return {0,12,12,0,12,12,0};
++    case ';': return {0,12,12,0,12,4,8};
++    case '(': return {2,4,8,8,8,4,2};
++    case ')': return {8,4,2,2,2,4,8};
++    case '[': return {14,8,8,8,8,8,14};
++    case ']': return {14,2,2,2,2,2,14};
++    case '-': return {0,0,0,31,0,0,0};
++    case '+': return {0,4,4,31,4,4,0};
++    case '=': return {0,0,31,0,31,0,0};
++    case '/': return {0,1,2,4,8,16,0};
++    case '>': return {8,4,2,1,2,4,8};
++    case '<': return {2,4,8,16,8,4,2};
++    case '_': return {0,0,0,0,0,0,31};
++    case '\'': return {12,4,8,0,0,0,0};
++    case '!': return {4,4,4,4,4,0,4};
++    case '%': return {24,25,2,4,8,19,3};
++    case '#': return {10,10,31,10,31,10,10};
++    case '*': return {0,4,21,14,21,4,0};
++    default: return {14,17,1,2,4,0,4}; // '?'
++    }
++}
++constexpr unsigned kGlyphScale = 2;
++constexpr unsigned kCellWidth = 6 * kGlyphScale;
++constexpr unsigned kLineHeight = 10 * kGlyphScale;
++constexpr unsigned kMargin = 4 * kGlyphScale;
++}
++
++std::size_t diagnostic_panel_columns(std::uint32_t width) noexcept {
++    return width > 2 * kMargin ? (width - 2 * kMargin + kGlyphScale) / kCellWidth : 0;
++}
++
++std::vector<std::uint32_t> rasterize_diagnostic_panel(
++    std::uint32_t width, std::uint32_t height, const std::vector<DiagnosticLine>& lines, bool bgra) {
++    if (width < 64 || width > 4096 || height < 32 || height > 2048) return {};
++    const auto color = [bgra](unsigned r, unsigned g, unsigned b) {
++        return 0xff000000u | (bgra ? b | (g << 8) | (r << 16) : r | (g << 8) | (b << 16));
++    };
++    // Premultiplied: black at 60% coverage keeps the text readable over the cockpit.
++    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height, 0x99000000u);
++    const auto columns = diagnostic_panel_columns(width);
++    unsigned top = kMargin;
++    for (const auto& line : lines) {
++        if (top + 7 * kGlyphScale > height - kMargin / 2) break;
++        std::uint32_t ink{};
++        switch (line.color) {
++        case DiagnosticColor::green: ink = color(64, 235, 112); break;
++        case DiagnosticColor::amber: ink = color(255, 190, 60); break;
++        case DiagnosticColor::grey: ink = color(165, 165, 165); break;
++        case DiagnosticColor::red: ink = color(255, 80, 80); break;
++        default: ink = color(240, 240, 240); break;
++        }
++        unsigned x = kMargin;
++        for (std::size_t i = 0; i < line.text.size() && i < columns; ++i, x += kCellWidth) {
++            const auto rows = text_glyph(line.text[i]);
++            for (unsigned y = 0; y < 7; ++y) for (unsigned column = 0; column < 5; ++column) {
++                if ((rows[y] & (1u << (4 - column))) == 0) continue;
++                for (unsigned sy = 0; sy < kGlyphScale; ++sy) for (unsigned sx = 0; sx < kGlyphScale; ++sx) {
++                    const unsigned px = x + column * kGlyphScale + sx;
++                    const unsigned py = top + y * kGlyphScale + sy;
++                    if (px < width && py < height) pixels[static_cast<std::size_t>(py) * width + px] = ink;
++                }
++            }
++        }
++        top += kLineHeight;
++    }
++    return pixels;
++}
++
++OverlayPlacement diagnostic_panel_placement(
++    FpsOverlayPosition position, float left, float right, float down, float up) noexcept {
++    if (position == FpsOverlayPosition::off) position = FpsOverlayPosition::upper_right;
++    const auto counter = overlay_placement(position, left, right, down, up);
++    left = std::clamp(left, -1.0f, -0.1f);
++    right = std::clamp(right, 0.1f, 1.0f);
++    down = std::clamp(down, -1.0f, -0.1f);
++    up = std::clamp(up, 0.1f, 1.0f);
++    const float span_x = right - left, span_y = up - down;
++    // Tangent units; the quad sits 2 m away, so poses and sizes are doubled.
++    const float width = span_x * 0.30f;
++    const float height = width * static_cast<float>(kDiagnosticPanelHeight) / static_cast<float>(kDiagnosticPanelWidth);
++    const float cx = counter.x * 0.5f, cy = counter.y * 0.5f;
++    const float cw = counter.width * 0.5f, ch = counter.height * 0.5f;
++    const bool on_left = position == FpsOverlayPosition::upper_left || position == FpsOverlayPosition::lower_left;
++    const bool on_top = position == FpsOverlayPosition::upper_left || position == FpsOverlayPosition::upper_right;
++    const float gap = ch * 0.25f;
++    float x = on_left ? cx - cw * 0.5f + width * 0.5f : cx + cw * 0.5f - width * 0.5f;
++    float y = on_top ? cy - ch * 0.5f - gap - height * 0.5f : cy + ch * 0.5f + gap + height * 0.5f;
++    const float margin_x = span_x * 0.02f, margin_y = span_y * 0.02f;
++    x = std::clamp(x, left + margin_x + width * 0.5f, std::max(left + margin_x + width * 0.5f, right - margin_x - width * 0.5f));
++    y = std::clamp(y, down + margin_y + height * 0.5f, std::max(down + margin_y + height * 0.5f, up - margin_y - height * 0.5f));
++    return {2.0f * x, 2.0f * y, -2.0f, 2.0f * width, 2.0f * height};
++}
++
++} // namespace xrfg
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+index 2967686..5c4f8b0 100644
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -26,6 +26,18 @@ template<class T> bool load(PFN_xrGetInstanceProcAddr get, XrInstance instance,
+     output = reinterpret_cast<T>(function);
+     return true;
+ }
++// DCS VR Control passes these to the game. Missing or "0:0" leaves the panel
++// without a key; DCSVR_DIAG_OVERLAY=1 starts it visible. Neither is persisted.
++std::string environment(const char* name) {
++    char text[32]{};
++    const auto length = GetEnvironmentVariableA(name, text, sizeof(text));
++    return length > 0 && length < sizeof(text) ? std::string(text, length) : std::string();
++}
++bool game_in_foreground() noexcept {
++    const auto window = GetForegroundWindow();
++    DWORD process{};
++    return window && GetWindowThreadProcessId(window, &process) && process == GetCurrentProcessId();
++}
+ }
+ 
+ struct OpenXrFpsOverlay::Impl {
+@@ -45,23 +57,23 @@ struct OpenXrFpsOverlay::Impl {
+     PFN_xrReleaseSwapchainImage release{};
+     PFN_xrGetSystemProperties system_properties{};
+     std::filesystem::path ini;
+-    std::mutex mutex;
++    mutable std::mutex mutex;
+     FpsCounter counter;
++    // Application frames, for the panel's app -> out comparison.
++    FpsCounter application_counter;
+     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
+     std::int64_t next_refresh{};
+-    bool attempted{}, initialized{}, image_valid{}, acquired{}, waited{}, disabled{};
++    bool attempted{}, initialized{}, disabled{};
+     // The number the overlay draws is what the headset received where that
+     // can be known, and what was submitted everywhere else. Only SteamVR
+     // reports the former. Borrowed: the session owns it, because the presenter
+     // reads the vsync anchor from the same connection.
+     SteamVrDelivery* delivery{};
+     XrSpace space{};
+-    XrSwapchain swapchain{};
+-    std::uint32_t index{}, width{}, height{}, max_layers{};
++    std::uint32_t max_layers{}, max_width{}, max_height{};
+     DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+     OverlayPlacement placement{};
+     bool placement_valid{};
+-    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+     ComPtr<ID3D12Device> device12;
+     ComPtr<ID3D12CommandQueue> queue12;
+     ComPtr<ID3D12Fence> fence12;
+@@ -79,7 +91,25 @@ struct OpenXrFpsOverlay::Impl {
+         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+         std::uint64_t fence_value{};
+     };
+-    std::vector<Image> images;
++    // One small swapchain and its quad. The counter's is made with the
++    // overlay; the diagnostic panel's only when it is first shown, so a
++    // session that never opens it holds no extra swapchain.
++    struct Surface {
++        XrSwapchain swapchain{};
++        std::uint32_t index{}, width{}, height{};
++        bool attempted{}, ready{}, image_valid{}, acquired{}, waited{}, failed{};
++        XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
++        std::vector<Image> images;
++    };
++    Surface number;
++    Surface panel;
++    DiagnosticToggle toggle;
++    DiagnosticHotkey hotkey;
++    GenerationStatus generation;
++    OverlayPlacement panel_placement{};
++    HANDLE status_mapping{};
++    const DcsVrStatusV1* status_view{};
++    std::uint64_t next_status_open_ms{};
+ 
+     ~Impl() {
+         // Only teardown waits for this overlay's last upload. No global queue
+@@ -93,9 +123,73 @@ struct OpenXrFpsOverlay::Impl {
+             else result = S_FALSE;
+             if (result == S_OK) WaitForSingleObject(event, INFINITE);
+         }
+-        if (swapchain && destroy_swapchain) destroy_swapchain(swapchain);
++        if (panel.swapchain && destroy_swapchain) destroy_swapchain(panel.swapchain);
++        if (number.swapchain && destroy_swapchain) destroy_swapchain(number.swapchain);
+         if (space && destroy_space) destroy_space(space);
+         if (event) CloseHandle(event);
++        if (status_view) UnmapViewOfFile(status_view);
++        if (status_mapping) CloseHandle(status_mapping);
++    }
++
++    bool create_surface(Surface& surface, std::uint32_t surface_width, std::uint32_t surface_height) {
++        if (surface.attempted) return surface.ready;
++        surface.attempted = true;
++        if (surface_width > max_width || surface_height > max_height) return false;
++        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
++        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
++            XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
++        info.format = format;
++        info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
++        info.width = surface_width;
++        info.height = surface_height;
++        if (XR_FAILED(create_swapchain(session, &info, &surface.swapchain))) { surface.swapchain = XR_NULL_HANDLE; return false; }
++        std::uint32_t count{};
++        if (XR_FAILED(enumerate_images(surface.swapchain, 0, &count, nullptr)) || !count || count > 64) return false;
++        surface.images.resize(count);
++        if (device11) {
++            std::vector<XrSwapchainImageD3D11KHR> buffers(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
++            if (XR_FAILED(enumerate_images(surface.swapchain, count, &count,
++                reinterpret_cast<XrSwapchainImageBaseHeader*>(buffers.data())))) return false;
++            for (std::size_t i = 0; i < surface.images.size(); ++i) {
++                surface.images[i].texture11 = buffers[i].texture;
++                if (!surface.images[i].texture11) return false;
++            }
++        } else {
++            std::vector<XrSwapchainImageD3D12KHR> buffers(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
++            if (XR_FAILED(enumerate_images(surface.swapchain, count, &count,
++                reinterpret_cast<XrSwapchainImageBaseHeader*>(buffers.data())))) return false;
++            for (std::size_t i = 0; i < surface.images.size(); ++i) {
++                auto& image = surface.images[i];
++                image.texture12 = buffers[i].texture;
++                if (!image.texture12) return false;
++                const auto desc = image.texture12->GetDesc();
++                UINT64 bytes{};
++                device12->GetCopyableFootprints(&desc, 0, 1, 0, &image.footprint, nullptr, nullptr, &bytes);
++                D3D12_HEAP_PROPERTIES heap{};
++                heap.Type = D3D12_HEAP_TYPE_UPLOAD;
++                D3D12_RESOURCE_DESC upload_desc{};
++                upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++                upload_desc.Width = bytes;
++                upload_desc.Height = upload_desc.DepthOrArraySize = upload_desc.MipLevels = 1;
++                upload_desc.SampleDesc.Count = 1;
++                upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++                if (FAILED(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
++                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&image.upload))) ||
++                    FAILED(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&image.allocator))) ||
++                    FAILED(device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, image.allocator.Get(),
++                        nullptr, IID_PPV_ARGS(&image.list))) || FAILED(image.list->Close())) return false;
++            }
++        }
++        surface.width = surface_width;
++        surface.height = surface_height;
++        surface.quad.space = space;
++        surface.quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
++        surface.quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
++        surface.quad.subImage.swapchain = surface.swapchain;
++        surface.quad.subImage.imageRect.extent = {static_cast<std::int32_t>(surface_width), static_cast<std::int32_t>(surface_height)};
++        surface.quad.pose.orientation.w = 1;
++        surface.ready = true;
++        return true;
+     }
+ 
+     bool initialize(std::uint32_t eye_width) {
+@@ -115,6 +209,8 @@ struct OpenXrFpsOverlay::Impl {
+         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
+         if (XR_FAILED(system_properties(instance, system, &properties))) return false;
+         max_layers = std::min(properties.graphicsProperties.maxLayerCount, 128u);
++        max_width = properties.graphicsProperties.maxSwapchainImageWidth;
++        max_height = properties.graphicsProperties.maxSwapchainImageHeight;
+         if (max_layers < 2) return false;
+         std::uint32_t count{};
+         if (XR_FAILED(enumerate_formats(session, 0, &count, nullptr)) || !count || count > 1024) return false;
+@@ -125,34 +221,15 @@ struct OpenXrFpsOverlay::Impl {
+             if (std::find(formats.begin(), formats.end(), candidate) != formats.end()) { format = candidate; break; }
+         }
+         if (format == DXGI_FORMAT_UNKNOWN) return false;
+-        width = overlay_texture_width(eye_width);
+-        height = width / 2;
+-        if (width > properties.graphicsProperties.maxSwapchainImageWidth ||
+-            height > properties.graphicsProperties.maxSwapchainImageHeight) return false;
++        const auto width = overlay_texture_width(eye_width);
++        if (width > max_width || width / 2 > max_height) return false;
+         XrReferenceSpaceCreateInfo space_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+         space_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+         space_info.poseInReferenceSpace.orientation.w = 1;
+         if (XR_FAILED(create_space(session, &space_info, &space))) return false;
+-        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+-        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+-            XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+-        info.format = format;
+-        info.sampleCount = info.faceCount = info.arraySize = info.mipCount = 1;
+-        info.width = width;
+-        info.height = height;
+-        if (XR_FAILED(create_swapchain(session, &info, &swapchain))) return false;
+-        if (XR_FAILED(enumerate_images(swapchain, 0, &count, nullptr)) || !count || count > 64) return false;
+-        images.resize(count);
+         event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+         if (!event) return false;
+         if (device11) {
+-            std::vector<XrSwapchainImageD3D11KHR> buffers(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+-            if (XR_FAILED(enumerate_images(swapchain, count, &count,
+-                reinterpret_cast<XrSwapchainImageBaseHeader*>(buffers.data())))) return false;
+-            for (std::size_t i = 0; i < images.size(); ++i) {
+-                images[i].texture11 = buffers[i].texture;
+-                if (!images[i].texture11) return false;
+-            }
+             ComPtr<ID3D11DeviceContext> immediate;
+             device11->GetImmediateContext(&immediate);
+             if (!immediate || FAILED(immediate.As(&context11))) return false;
+@@ -160,67 +237,39 @@ struct OpenXrFpsOverlay::Impl {
+             ComPtr<ID3D11Device5> device5;
+             if (FAILED(device11.As(&device5)) || FAILED(device5->CreateFence(
+                 0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence11)))) return false;
+-        } else {
+-            std::vector<XrSwapchainImageD3D12KHR> buffers(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+-            if (XR_FAILED(enumerate_images(swapchain, count, &count,
+-                reinterpret_cast<XrSwapchainImageBaseHeader*>(buffers.data())))) return false;
+-            if (FAILED(device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence12)))) return false;
+-            for (std::size_t i = 0; i < images.size(); ++i) {
+-                auto& image = images[i];
+-                image.texture12 = buffers[i].texture;
+-                if (!image.texture12) return false;
+-                const auto desc = image.texture12->GetDesc();
+-                UINT64 bytes{};
+-                device12->GetCopyableFootprints(&desc, 0, 1, 0, &image.footprint, nullptr, nullptr, &bytes);
+-                D3D12_HEAP_PROPERTIES heap{};
+-                heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+-                D3D12_RESOURCE_DESC upload_desc{};
+-                upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+-                upload_desc.Width = bytes;
+-                upload_desc.Height = upload_desc.DepthOrArraySize = upload_desc.MipLevels = 1;
+-                upload_desc.SampleDesc.Count = 1;
+-                upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-                if (FAILED(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+-                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&image.upload))) ||
+-                    FAILED(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&image.allocator))) ||
+-                    FAILED(device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, image.allocator.Get(),
+-                        nullptr, IID_PPV_ARGS(&image.list))) || FAILED(image.list->Close())) return false;
+-            }
++        } else if (FAILED(device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence12)))) {
++            return false;
+         }
+-        quad.space = space;
+-        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+-        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+-        quad.subImage.swapchain = swapchain;
+-        quad.subImage.imageRect.extent = {static_cast<std::int32_t>(width), static_cast<std::int32_t>(height)};
+-        quad.pose.orientation.w = 1;
++        if (!create_surface(number, width, width / 2)) return false;
+         initialized = true;
+         return true;
+     }
+ 
+-    bool upload(const FpsSnapshot& snapshot) {
+-        if (!acquired) {
++    // Uploads one image of `surface`. A failure disables only that surface.
++    bool upload(Surface& surface, const std::vector<std::uint32_t>& pixels) {
++        if (surface.failed || !surface.ready) return false;
++        if (pixels.size() != static_cast<std::size_t>(surface.width) * surface.height) return false;
++        if (!surface.acquired) {
+             XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+-            if (XR_FAILED(acquire(swapchain, &info, &index))) { disabled = true; return false; }
+-            acquired = true;
+-            waited = false;
++            if (XR_FAILED(acquire(surface.swapchain, &info, &surface.index))) { surface.failed = true; return false; }
++            surface.acquired = true;
++            surface.waited = false;
+         }
+-        if (index >= images.size()) { disabled = true; return false; }
+-        if (!waited) {
++        if (surface.index >= surface.images.size()) { surface.failed = true; return false; }
++        if (!surface.waited) {
+             XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+             info.timeout = 0;
+-            const auto result = wait(swapchain, &info);
++            const auto result = wait(surface.swapchain, &info);
+             // XR_TIMEOUT_EXPIRED is positive, but does NOT grant ownership.
+             if (result == XR_TIMEOUT_EXPIRED) return false;
+-            if (result != XR_SUCCESS) { disabled = true; return false; }
+-            waited = true;
++            if (result != XR_SUCCESS) { surface.failed = true; return false; }
++            surface.waited = true;
+         }
+-        auto& image = images[index];
++        auto& image = surface.images[surface.index];
+         const auto completed = fence12 ? fence12->GetCompletedValue() : fence11->GetCompletedValue();
+-        if (completed == UINT64_MAX) { disabled = true; return false; }
++        if (completed == UINT64_MAX) { surface.failed = true; return false; }
+         if (completed < image.fence_value) return false;
+-        const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+-        const auto pixels = rasterize_fps_overlay(width, height, snapshot, bgra);
+-        if (pixels.empty()) return false;
++        const auto width = surface.width, height = surface.height;
+         HRESULT result = S_OK;
+         const auto value = next_fence++;
+         if (device11) {
+@@ -233,11 +282,11 @@ struct OpenXrFpsOverlay::Impl {
+             if (multithread11) multithread11->Leave();
+         } else {
+             if (FAILED(image.allocator->Reset()) || FAILED(image.list->Reset(image.allocator.Get(), nullptr))) {
+-                disabled = true; return false;
++                surface.failed = true; return false;
+             }
+             void* mapped{};
+             const D3D12_RANGE empty{};
+-            if (FAILED(image.upload->Map(0, &empty, &mapped))) { disabled = true; return false; }
++            if (FAILED(image.upload->Map(0, &empty, &mapped))) { surface.failed = true; return false; }
+             for (std::uint32_t row = 0; row < height; ++row)
+                 std::memcpy(static_cast<std::uint8_t*>(mapped) + image.footprint.Offset +
+                     static_cast<std::size_t>(row) * image.footprint.Footprint.RowPitch,
+@@ -259,23 +308,52 @@ struct OpenXrFpsOverlay::Impl {
+             image.list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+             image.list->ResourceBarrier(1, &barrier);
+-            if (FAILED(image.list->Close())) { disabled = true; return false; }
++            if (FAILED(image.list->Close())) { surface.failed = true; return false; }
+             ID3D12CommandList* lists[]{image.list.Get()};
+             queue12->ExecuteCommandLists(1, lists);
+             result = queue12->Signal(fence12.Get(), value);
+         }
+-        if (FAILED(result)) { disabled = true; return false; }
++        if (FAILED(result)) { surface.failed = true; return false; }
+         last_fence = image.fence_value = value;
+         XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+-        if (XR_FAILED(release(swapchain, &info))) { disabled = true; return false; }
+-        acquired = waited = false;
+-        image_valid = true;
++        if (XR_FAILED(release(surface.swapchain, &info))) { surface.failed = true; return false; }
++        surface.acquired = surface.waited = false;
++        surface.image_valid = true;
+         return true;
+     }
+ 
++    bool bgra() const noexcept {
++        return format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
++    }
++
++    // Cheeky's status block, opened lazily and retried once a second while absent.
++    void read_status(DiagnosticInputs& inputs) noexcept {
++        const auto tick = GetTickCount64();
++        if (!status_view && tick >= next_status_open_ms) {
++            next_status_open_ms = tick + 1000;
++            const auto name = L"Local\\DcsVrControlStatus-" + std::to_wstring(GetCurrentProcessId());
++            status_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
++            if (status_mapping) {
++                status_view = static_cast<const DcsVrStatusV1*>(
++                    MapViewOfFile(status_mapping, FILE_MAP_READ, 0, 0, sizeof(DcsVrStatusV1)));
++                if (!status_view) { CloseHandle(status_mapping); status_mapping = nullptr; }
++            }
++        }
++        if (!status_view) return;
++        inputs.cheeky_present = load_dcsvr_status(*status_view, inputs.cheeky);
++        inputs.cheeky_fresh = inputs.cheeky_present && inputs.cheeky.publish_tick_ms <= tick &&
++            tick - inputs.cheeky.publish_tick_ms <= kDcsVrStatusStaleMs;
++    }
++
+     void application_frame(const XrFrameEndInfo* info) {
+         const auto now = now_ns();
+         if (!info || info->type != XR_TYPE_FRAME_END_INFO) return;
++        application_counter.submitted(now, false);
++        // Every frame, so a short press is not missed between refreshes.
++        if (hotkey.virtual_key && toggle.poll(diagnostic_hotkey_down(hotkey,
++                [](unsigned key) { return (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0; }),
++                game_in_foreground()))
++            next_refresh = now;
+         if (now < next_refresh) return;
+         next_refresh = now + 250'000'000;
+         std::array<wchar_t, 32> setting{};
+@@ -284,7 +362,9 @@ struct OpenXrFpsOverlay::Impl {
+         std::string value;
+         for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
+         position = parse_overlay_position(value);
+-        if (position == FpsOverlayPosition::off || disabled || !info->layerCount || !info->layers) return;
++        const bool counter_on = position != FpsOverlayPosition::off;
++        const bool panel_on = toggle.visible();
++        if ((!counter_on && !panel_on) || disabled || !info->layerCount || !info->layers) return;
+         float left = -1, right = 1, down = -1, up = 1;
+         std::uint32_t eye_width = 0;
+         for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+@@ -314,8 +394,11 @@ struct OpenXrFpsOverlay::Impl {
+             }
+         }
+         if (!eye_width) return;
+-        placement = overlay_placement(position, left, right, down, up);
+-        placement_valid = true;
++        if (counter_on) {
++            placement = overlay_placement(position, left, right, down, up);
++            placement_valid = true;
++        }
++        panel_placement = diagnostic_panel_placement(position, left, right, down, up);
+         if (!initialize(eye_width)) return;
+         // A quad layer in front of the view, which the runtime composites in
+         // the order the layer list gives. An application that submits its own
+@@ -324,15 +407,30 @@ struct OpenXrFpsOverlay::Impl {
+         // head turns enough to move it off. Reproduced in Callisto Protocol,
+         // and reported as the counter vanishing, so rule it out before
+         // suspecting the upload path.
+-        quad.pose.position = {placement.x, placement.y, placement.z};
+-        quad.size = {placement.width, placement.height};
+         auto snapshot = counter.snapshot(now);
+         if (delivery) {
+             if (const auto received = delivery->delivered_fps(now)) {
+                 snapshot.submitted_fps = delivered_new_images(*received, snapshot);
+             }
+         }
+-        upload(snapshot);
++        if (counter_on) {
++            number.quad.pose.position = {placement.x, placement.y, placement.z};
++            number.quad.size = {placement.width, placement.height};
++            upload(number, rasterize_fps_overlay(number.width, number.height, snapshot, bgra()));
++        }
++        if (panel_on && create_surface(panel, kDiagnosticPanelWidth, kDiagnosticPanelHeight)) {
++            panel.quad.pose.position = {panel_placement.x, panel_placement.y, panel_placement.z};
++            panel.quad.size = {panel_placement.width, panel_placement.height};
++            DiagnosticInputs inputs;
++            inputs.output_fps = snapshot.submitted_fps;
++            inputs.app_fps = application_counter.snapshot(now).submitted_fps;
++            inputs.generating = snapshot.active;
++            inputs.generation = generation;
++            inputs.hotkey = hotkey;
++            read_status(inputs);
++            upload(panel, rasterize_diagnostic_panel(panel.width, panel.height,
++                format_diagnostic_lines(inputs), bgra()));
++        }
+     }
+ };
+ 
+@@ -346,6 +444,8 @@ OpenXrFpsOverlay::OpenXrFpsOverlay(XrInstance instance, XrSession session, XrSys
+     impl_->device12 = device12; impl_->queue12 = queue12; impl_->device11 = device11;
+     impl_->ini = ini;
+     impl_->delivery = delivery;
++    if (!parse_diagnostic_hotkey(environment("DCSVR_DIAG_HOTKEY"), impl_->hotkey)) impl_->hotkey = {};
++    impl_->toggle = DiagnosticToggle(environment("DCSVR_DIAG_OVERLAY") == "1");
+ }
+ OpenXrFpsOverlay::~OpenXrFpsOverlay() = default;
+ 
+@@ -353,10 +453,20 @@ void OpenXrFpsOverlay::application_frame(const XrFrameEndInfo* info) noexcept {
+     try { std::scoped_lock lock(impl_->mutex); impl_->application_frame(info); }
+     catch (...) { /* Overlay is optional: never fail the game's frame. */ }
+ }
++void OpenXrFpsOverlay::set_generation_status(const GenerationStatus& status) noexcept {
++    std::scoped_lock lock(impl_->mutex);
++    impl_->generation = status;
++}
++bool OpenXrFpsOverlay::diagnostic_visible() const noexcept {
++    std::scoped_lock lock(impl_->mutex);
++    return impl_->toggle.visible();
++}
+ void OpenXrFpsOverlay::reset_metrics() noexcept {
+     std::scoped_lock lock(impl_->mutex);
+     impl_->counter.reset();
+-    impl_->image_valid = false;
++    impl_->application_counter.reset();
++    impl_->number.image_valid = false;
++    impl_->panel.image_valid = false;
+     impl_->next_refresh = 0;
+     impl_->placement_valid = false;
+ }
+@@ -364,8 +474,10 @@ void OpenXrFpsOverlay::reset_metrics() noexcept {
+ void OpenXrFpsOverlay::suspend() noexcept {
+     std::scoped_lock lock(impl_->mutex);
+     impl_->disabled = true;
+-    impl_->image_valid = false;
++    impl_->number.image_valid = false;
++    impl_->panel.image_valid = false;
+     impl_->counter.reset();
++    impl_->application_counter.reset();
+ }
+ 
+ FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
+@@ -375,7 +487,8 @@ FpsSnapshot OpenXrFpsOverlay::metrics() const noexcept {
+ 
+ std::optional<OverlayPlacement> OpenXrFpsOverlay::marker_placement() const noexcept {
+     std::scoped_lock lock(impl_->mutex);
+-    if (impl_->disabled || impl_->position == FpsOverlayPosition::off || !impl_->placement_valid)
++    if (impl_->disabled || impl_->number.failed || impl_->position == FpsOverlayPosition::off ||
++        !impl_->placement_valid)
+         return std::nullopt;
+     return impl_->placement;
+ }
+@@ -387,18 +500,25 @@ XrResult OpenXrFpsOverlay::end_frame(
+     XrFrameEndInfo composed{};
+     const bool nonempty = info && info->type == XR_TYPE_FRAME_END_INFO && info->layers && info->layerCount;
+     const XrFrameEndInfo* submitted = info;
+-    if (nonempty && impl_->initialized && impl_->image_valid && !impl_->disabled &&
+-        impl_->position != FpsOverlayPosition::off && info->layerCount < impl_->max_layers) {
++    auto& impl = *impl_;
++    const bool usable = nonempty && impl.initialized && !impl.disabled;
++    const bool add_number = usable && impl.number.image_valid && !impl.number.failed &&
++        impl.position != FpsOverlayPosition::off;
++    const bool add_panel = usable && impl.panel.ready && impl.panel.image_valid && !impl.panel.failed &&
++        impl.toggle.visible();
++    std::uint32_t room = usable && info->layerCount < impl.max_layers ? impl.max_layers - info->layerCount : 0;
++    if (room && (add_number || add_panel)) {
+         std::copy_n(info->layers, info->layerCount, layers.begin());
+-        layers[info->layerCount] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl_->quad);
+         composed = *info; // Preserve every app layer, next chain and display time.
+         composed.layers = layers.data();
+-        ++composed.layerCount;
++        // The counter keeps its place; the panel goes on top when there is room for it.
++        if (add_number && room) { layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl.number.quad); --room; }
++        if (add_panel && room) { layers[composed.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&impl.panel.quad); --room; }
+         submitted = &composed;
+     }
+-    const auto result = impl_->downstream_end(impl_->session, submitted);
++    const auto result = impl.downstream_end(impl.session, submitted);
+     if (result == XR_SUCCESS && nonempty)
+-        impl_->counter.submitted(now_ns(), synthetic, new_content);
++        impl.counter.submitted(now_ns(), synthetic, new_content);
+     return result;
+ }
+ 
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index ef4023a..de92cae 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -10751,6 +10751,18 @@ XrResult layer_end_frame_impl(
+     }
+     if (state->fps_overlay && !manually_disarmed) {
+         std::scoped_lock gpu_lock(state->gpu_mutex);
++        // DCS VR Control diagnostic panel: what generation is doing now, as
++        // apply_embedded_control just left it.
++        xrfg::GenerationStatus generation;
++        generation.known = true;
++        generation.enabled = state->menu_enabled.load();
++        generation.nvidia =
++            state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia;
++        generation.nvidia_unavailable = state->nvidia_backend_unavailable;
++        generation.budget_exhausted =
++            state->generation_budget_exhausted.load(std::memory_order_acquire);
++        generation.multiplier = state->frames_per_application_frame.load();
++        state->fps_overlay->set_generation_status(generation);
+         state->fps_overlay->application_frame(end_info);
+     }
+ 
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+new file mode 100644
+index 0000000..716b3e5
+--- /dev/null
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -0,0 +1,187 @@
++// DCS VR Control diagnostic panel: status ABI, hotkey, toggle, text and placement.
++#include "xrfg/diagnostic_overlay_model.hpp"
++#include <cmath>
++#include <cstring>
++#include <iostream>
++#include <set>
++#include <stdexcept>
++#include <string>
++
++namespace {
++void require(bool pass, const std::string& message) { if (!pass) throw std::runtime_error(message); }
++xrfg::DcsVrStatusV1 status(std::uint32_t flags) {
++    xrfg::DcsVrStatusV1 s{};
++    s.magic = xrfg::kDcsVrStatusMagic; s.version = xrfg::kDcsVrStatusVersion; s.structure_size = sizeof(s);
++    s.flags = flags | xrfg::dcsvr_graphics_ready;
++    return s;
++}
++xrfg::DiagnosticInputs inputs() {
++    xrfg::DiagnosticInputs in;
++    in.output_fps = 89.6f; in.app_fps = 44.8f; in.generating = true;
++    in.generation = {true, true, true, false, false, 2};
++    in.cheeky_present = in.cheeky_fresh = true;
++    in.cheeky = status(xrfg::dcsvr_nr_enabled | xrfg::dcsvr_quad_focus);
++    in.cheeky.nr_evaluations_per_second = 90; in.cheeky.focus_views_mapped = 2; in.cheeky.nr_gpu_ms = 1.84f;
++    return in;
++}
++std::string dlss(const xrfg::DiagnosticInputs& in, xrfg::DiagnosticColor expected) {
++    xrfg::DiagnosticColor color{};
++    auto text = xrfg::format_dlss_line(in, color);
++    require(color == expected, "DLSS line colour for: " + text);
++    return text;
++}
++std::string generation(const xrfg::DiagnosticInputs& in, xrfg::DiagnosticColor expected) {
++    xrfg::DiagnosticColor color{};
++    auto text = xrfg::format_generation_line(in, color);
++    require(color == expected, "Framegen line colour for: " + text);
++    return text;
++}
++}
++
++int main() {
++    try {
++        using namespace xrfg;
++        using C = DiagnosticColor;
++        // ABI pinned identically by patches/cheeky/dcs_status_block.hpp.
++        require(sizeof(DcsVrStatusV1) == 128 && offsetof(DcsVrStatusV1, reason) == 72 &&
++            kDcsVrStatusMagic == 0x53525644U, "status ABI");
++
++        // Sequence-counter read: settled copy only, V1 only.
++        DcsVrStatusV1 shared = status(dcsvr_nr_enabled), read{};
++        shared.sequence = 4; shared.nr_evaluations_per_second = 90;
++        std::memset(shared.reason, 'x', sizeof(shared.reason)); // unterminated on purpose
++        require(load_dcsvr_status(shared, read) && read.nr_evaluations_per_second == 90 &&
++            std::strlen(read.reason) == sizeof(read.reason) - 1, "settled status not read or not terminated");
++        shared.sequence = 5;
++        require(!load_dcsvr_status(shared, read), "torn status accepted");
++        shared.sequence = 6; shared.structure_size = 64;
++        require(!load_dcsvr_status(shared, read), "foreign status size accepted");
++
++        // Hotkey: same format as DCSVR_NR_HOTKEY.
++        DiagnosticHotkey key{};
++        require(parse_diagnostic_hotkey("123:6", key) && key.virtual_key == 123 && key.modifiers == 6, "Alt+Shift+F12 not parsed");
++        for (const char* bad : {"0:0", "", "123", ":6", "123:", "123:8", "255:1", "12a:1", "12345:1", "-1:2"})
++            require(!parse_diagnostic_hotkey(bad, key), std::string("invalid hotkey accepted: ") + bad);
++        require(diagnostic_hotkey_label({0x7B, 6}) == "Alt+Shift+F12", "label F12");
++        require(diagnostic_hotkey_label({0x24, 7}) == "Ctrl+Alt+Shift+Home", "label Home");
++        require(diagnostic_hotkey_label({0x79, 7}) == "Ctrl+Alt+Shift+F10", "label F10");
++        require(diagnostic_hotkey_label({0x2D, 5}) == "Ctrl+Shift+Insert", "label Insert");
++        require(diagnostic_hotkey_label({}).empty(), "label of no key");
++        const auto held = [](std::set<unsigned> keys) { return [keys](unsigned k) { return keys.count(k) != 0; }; };
++        const DiagnosticHotkey alt_shift_f12{0x7B, 6};
++        require(diagnostic_hotkey_down(alt_shift_f12, held({0x7B, 0x12, 0x10})), "Alt+Shift+F12 not detected");
++        require(!diagnostic_hotkey_down(alt_shift_f12, held({0x7B, 0x11, 0x10})), "Ctrl+Shift+F12 (DLSS 5 toggle) fired the panel");
++        require(!diagnostic_hotkey_down(alt_shift_f12, held({0x7B, 0x11, 0x12, 0x10})), "extra Ctrl accepted");
++        require(!diagnostic_hotkey_down(alt_shift_f12, held({0x12, 0x10})), "modifiers alone fired");
++        require(!diagnostic_hotkey_down({}, held({0x7B, 0x12, 0x10})), "disabled hotkey fired");
++
++        // Toggle: edge-triggered, foreground only, starts as configured.
++        DiagnosticToggle toggle;
++        require(!toggle.visible(), "starts hidden by default");
++        require(!toggle.poll(true, false) && !toggle.visible(), "background press toggled");
++        require(!toggle.poll(false, true), "release toggled");
++        require(toggle.poll(true, true) && toggle.visible(), "press did not show");
++        require(!toggle.poll(true, true) && toggle.visible(), "held key repeated");
++        toggle.poll(false, true);
++        require(toggle.poll(true, true) && !toggle.visible(), "second press did not hide");
++        require(DiagnosticToggle(true).visible(), "DCSVR_DIAG_OVERLAY=1 start");
++
++        // DLSS 5 line.
++        auto in = inputs();
++        require(dlss(in, C::green) == "DLSS 5: ON (2 focus views, 1.8 ms)", "quad ON line: " + dlss(in, C::green));
++        in.cheeky.nr_gpu_ms = 0;
++        require(dlss(in, C::green) == "DLSS 5: ON (2 focus views)", "ON without timing");
++        in.cheeky.flags &= ~dcsvr_quad_focus; in.cheeky.nr_gpu_ms = 2.0f;
++        require(dlss(in, C::green) == "DLSS 5: ON (90/s, 2.0 ms)", "stereo ON line: " + dlss(in, C::green));
++        in.cheeky.nr_failures_per_second = 3;
++        require(dlss(in, C::amber) == "DLSS 5: ON (90/s, 2.0 ms, 3 failed/s)", "failures");
++        in = inputs(); in.cheeky.nr_evaluations_per_second = 0;
++        { const char text[] = "focus views not identified"; std::memcpy(in.cheeky.reason, text, sizeof(text)); }
++        require(dlss(in, C::amber) == "DLSS 5: ON but not applied (focus views not identified)", "not applied");
++        in.cheeky.reason[0] = 0;
++        require(dlss(in, C::amber) == "DLSS 5: ON but not applied (no NR evaluations)", "not applied fallback");
++        in = inputs(); in.cheeky.flags &= ~dcsvr_nr_enabled;
++        require(dlss(in, C::grey) == "DLSS 5: OFF", "OFF");
++        in.cheeky_fresh = false;
++        require(dlss(in, C::amber) == "DLSS 5: status not updating", "stale");
++        in.cheeky_present = false;
++        require(dlss(in, C::grey) == "DLSS 5: not loaded", "absent");
++
++        // Framegen line.
++        in = inputs();
++        require(generation(in, C::green) == "Framegen: OFXR NVIDIA 2x", "NVIDIA 2x");
++        in.generation.multiplier = 3;
++        require(generation(in, C::green) == "Framegen: OFXR NVIDIA 3x", "3x");
++        in.generation.multiplier = 2; in.generation.nvidia = false;
++        require(generation(in, C::green) == "Framegen: OFXR FidelityFX 2x", "FidelityFX");
++        in.generation.nvidia_unavailable = true;
++        require(generation(in, C::amber) == "Framegen: OFXR FidelityFX 2x (NVIDIA failed)", "NVIDIA fallback");
++        in = inputs(); in.generating = false;
++        require(generation(in, C::amber) == "Framegen: OFXR NVIDIA 2x - not generating", "not generating");
++        in.generation.budget_exhausted = true;
++        require(generation(in, C::red) == "Framegen: fallback (swapchain limit)", "budget");
++        in.generation.enabled = false;
++        require(generation(in, C::grey) == "Framegen: off", "off");
++        in.generation.known = false;
++        require(generation(in, C::grey) == "Framegen: unknown", "unknown");
++
++        // Whole panel.
++        in = inputs(); in.hotkey = {0x7B, 6};
++        const auto lines = format_diagnostic_lines(in);
++        require(lines.size() == 5 && lines[0].text == "FPS 90" && lines[3].text == "App 45 fps -> out 90 fps" &&
++            lines[4].text == "Alt+Shift+F12: hide" && lines[4].color == C::grey, "panel lines");
++        in.hotkey = {};
++        require(format_diagnostic_lines(in).size() == 4, "hint without a key");
++        // Every line the formatter can produce fits the panel.
++        in = inputs(); in.cheeky.nr_evaluations_per_second = 0;
++        std::memset(in.cheeky.reason, 'w', sizeof(in.cheeky.reason) - 1); in.cheeky.reason[sizeof(in.cheeky.reason) - 1] = 0;
++        require(diagnostic_panel_columns(kDiagnosticPanelWidth) >= 50, "panel too narrow");
++        require(diagnostic_panel_columns(kDiagnosticPanelWidth) >=
++            std::string("Framegen: OFXR FidelityFX 3x (NVIDIA failed) - not generating").size(), "framegen line cut");
++
++        // Raster: translucent background, coloured ink, BGRA swap, long lines cut, bad sizes refused.
++        std::vector<DiagnosticLine> sample{{"DLSS 5: ON", C::green}, {"Framegen: off", C::grey},
++            {std::string(200, '#'), C::amber}};
++        const auto rgba = rasterize_diagnostic_panel(kDiagnosticPanelWidth, kDiagnosticPanelHeight, sample, false);
++        const auto bgra = rasterize_diagnostic_panel(kDiagnosticPanelWidth, kDiagnosticPanelHeight, sample, true);
++        require(rgba.size() == static_cast<std::size_t>(kDiagnosticPanelWidth) * kDiagnosticPanelHeight, "raster size");
++        std::size_t background = 0, green = 0, green_bgra = 0, grey = 0, amber = 0, amber_right_edge = 0;
++        for (std::size_t i = 0; i < rgba.size(); ++i) {
++            background += rgba[i] == 0x99000000u;
++            green += rgba[i] == 0xff70eb40u;
++            green_bgra += bgra[i] == 0xff40eb70u;
++            grey += rgba[i] == 0xffa5a5a5u;
++            amber += rgba[i] == 0xff3cbeffu;
++            if (rgba[i] == 0xff3cbeffu && i % kDiagnosticPanelWidth >= kDiagnosticPanelWidth - 4) ++amber_right_edge;
++        }
++        require(background > rgba.size() / 2, "background not translucent black");
++        require(green > 100 && green == green_bgra && grey > 100 && amber > 100, "line colours missing");
++        require(amber_right_edge == 0, "long line drawn past the margin");
++        require(rasterize_diagnostic_panel(8, 8, sample, false).empty(), "tiny raster accepted");
++
++        // Placement: inside the central 90 degrees, beside the counter, never on top of it.
++        for (auto position : {FpsOverlayPosition::upper_right, FpsOverlayPosition::upper_left,
++                 FpsOverlayPosition::lower_left, FpsOverlayPosition::lower_right, FpsOverlayPosition::off}) {
++            for (const float wide : {1.0f, 0.6f}) {
++                const auto panel = diagnostic_panel_placement(position, -wide, wide, -0.9f, 0.8f);
++                const auto counter = overlay_placement(
++                    position == FpsOverlayPosition::off ? FpsOverlayPosition::upper_right : position, -wide, wide, -0.9f, 0.8f);
++                const float l = panel.x - panel.width / 2, r = panel.x + panel.width / 2;
++                const float b = panel.y - panel.height / 2, t = panel.y + panel.height / 2;
++                require(panel.z == -2.0f && panel.width > counter.width && panel.height > 0, "panel size");
++                require(l >= -2.0f * wide && r <= 2.0f * wide && b >= -1.8f && t <= 1.6f, "panel outside the view");
++                const bool top = position == FpsOverlayPosition::upper_left || position == FpsOverlayPosition::upper_right ||
++                    position == FpsOverlayPosition::off;
++                require(top ? t <= counter.y - counter.height / 2 : b >= counter.y + counter.height / 2, "panel overlaps the counter");
++                require((panel.y > 0) == top, "panel left the counter's half");
++                require(std::abs(panel.width / panel.height -
++                    static_cast<float>(kDiagnosticPanelWidth) / kDiagnosticPanelHeight) < 0.01f, "panel aspect");
++            }
++        }
++        std::cout << "Diagnostic overlay status, hotkey, toggle, text, raster and placement passed\n";
++        return 0;
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}
+diff --git a/tests/openxr_diagnostic_panel_tests.cpp b/tests/openxr_diagnostic_panel_tests.cpp
+new file mode 100644
+index 0000000..63db225
+--- /dev/null
++++ b/tests/openxr_diagnostic_panel_tests.cpp
+@@ -0,0 +1,300 @@
++// DCS VR Control diagnostic panel through the real OpenXrFpsOverlay on WARP:
++// lazy second swapchain, layer budget, live Cheeky status block, GPU pixels.
++#include "xrfg/openxr_fps_overlay.hpp"
++#include <openxr/openxr_platform.h>
++#include <windows.h>
++#include <dxgi1_6.h>
++#include <wrl/client.h>
++#include <array>
++#include <chrono>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <map>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++namespace {
++void check(bool pass, const char* message) { if (!pass) throw std::runtime_error(message); }
++template<class T> T handle(std::uintptr_t value) { return reinterpret_cast<T>(value); }
++const auto session = handle<XrSession>(2);
++const auto overlay_space = handle<XrSpace>(4);
++bool d3d11{};
++ComPtr<ID3D12Device> device;
++ComPtr<ID3D12CommandQueue> queue;
++ComPtr<ID3D11Device> device11;
++struct Chain {
++    std::uint32_t width{}, height{}, acquired{}, released{}, acquires{};
++    std::vector<ComPtr<ID3D12Resource>> textures;
++    std::vector<ComPtr<ID3D11Texture2D>> textures11;
++};
++std::map<std::uintptr_t, Chain> chains;
++std::uintptr_t next_chain{5};
++unsigned destroyed{}, max_layers{4}, observed_count{};
++std::vector<const XrCompositionLayerQuad*> observed_quads;
++
++XrResult XRAPI_CALL create_space(XrSession, const XrReferenceSpaceCreateInfo*, XrSpace* output) { *output = overlay_space; return XR_SUCCESS; }
++XrResult XRAPI_CALL destroy_space(XrSpace) { return XR_SUCCESS; }
++XrResult XRAPI_CALL formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* output) {
++    *count = 1; if (capacity) output[0] = DXGI_FORMAT_R8G8B8A8_UNORM; return XR_SUCCESS;
++}
++XrResult XRAPI_CALL properties(XrInstance, XrSystemId, XrSystemProperties* output) {
++    output->graphicsProperties = {4096, 4096, max_layers}; return XR_SUCCESS;
++}
++XrResult XRAPI_CALL create_chain(XrSession, const XrSwapchainCreateInfo* info, XrSwapchain* output) {
++    check(info->arraySize == 1 && info->format == DXGI_FORMAT_R8G8B8A8_UNORM &&
++        (info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT), "overlay swapchain description");
++    auto& chain = chains[next_chain];
++    chain.width = info->width; chain.height = info->height;
++    if (d3d11) {
++        D3D11_TEXTURE2D_DESC desc{};
++        desc.Width = info->width; desc.Height = info->height; desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
++        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++        chain.textures11.resize(3);
++        for (auto& texture : chain.textures11) check(SUCCEEDED(device11->CreateTexture2D(&desc, nullptr, &texture)), "D3D11 texture");
++    } else {
++        D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC desc{};
++        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        desc.Width = info->width; desc.Height = info->height; desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
++        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++        chain.textures.resize(3);
++        for (auto& texture : chain.textures) check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
++            &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&texture))), "D3D12 texture");
++    }
++    *output = handle<XrSwapchain>(next_chain++);
++    return XR_SUCCESS;
++}
++XrResult XRAPI_CALL destroy_chain(XrSwapchain) { ++destroyed; return XR_SUCCESS; }
++XrResult XRAPI_CALL enumerate(XrSwapchain swapchain, std::uint32_t capacity, std::uint32_t* count, XrSwapchainImageBaseHeader* output) {
++    auto& chain = chains.at(reinterpret_cast<std::uintptr_t>(swapchain));
++    *count = 3;
++    if (capacity) for (unsigned i = 0; i < 3; ++i) {
++        if (d3d11) reinterpret_cast<XrSwapchainImageD3D11KHR*>(output)[i].texture = chain.textures11[i].Get();
++        else reinterpret_cast<XrSwapchainImageD3D12KHR*>(output)[i].texture = chain.textures[i].Get();
++    }
++    return XR_SUCCESS;
++}
++XrResult XRAPI_CALL acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
++    auto& chain = chains.at(reinterpret_cast<std::uintptr_t>(swapchain));
++    chain.acquired = chain.acquires++ % 3; *index = chain.acquired; return XR_SUCCESS;
++}
++XrResult XRAPI_CALL wait(XrSwapchain, const XrSwapchainImageWaitInfo* info) {
++    check(info->timeout == 0, "blocking image wait"); return XR_SUCCESS;
++}
++XrResult XRAPI_CALL release(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
++    auto& chain = chains.at(reinterpret_cast<std::uintptr_t>(swapchain));
++    chain.released = chain.acquired; return XR_SUCCESS;
++}
++XrResult XRAPI_CALL end(XrSession, const XrFrameEndInfo* info) {
++    observed_count = info->layerCount;
++    check(info->layerCount <= max_layers, "exceeded maxLayerCount");
++    observed_quads.clear();
++    for (std::uint32_t i = 1; i < info->layerCount; ++i) {
++        const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[i]);
++        if (quad->type != XR_TYPE_COMPOSITION_LAYER_QUAD) continue;
++        check(quad->space == overlay_space && quad->layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT &&
++            chains.count(reinterpret_cast<std::uintptr_t>(quad->subImage.swapchain)), "invalid overlay quad");
++        observed_quads.push_back(quad);
++    }
++    return XR_SUCCESS;
++}
++XrResult XRAPI_CALL get(XrInstance, const char* name, PFN_xrVoidFunction* output) {
++#define FN(n, f) if (std::strcmp(name, n) == 0) { *output = reinterpret_cast<PFN_xrVoidFunction>(f); return XR_SUCCESS; }
++    FN("xrCreateReferenceSpace", create_space) FN("xrDestroySpace", destroy_space)
++    FN("xrCreateSwapchain", create_chain) FN("xrDestroySwapchain", destroy_chain)
++    FN("xrEnumerateSwapchainFormats", formats) FN("xrEnumerateSwapchainImages", enumerate)
++    FN("xrAcquireSwapchainImage", acquire) FN("xrWaitSwapchainImage", wait) FN("xrReleaseSwapchainImage", release)
++    FN("xrGetSystemProperties", properties)
++#undef FN
++    *output = nullptr; return XR_ERROR_FUNCTION_UNSUPPORTED;
++}
++
++// Test-only readback of the last released image of `chain`.
++std::size_t pixel_count(const Chain& chain, std::uint32_t wanted) {
++    std::size_t result{};
++    if (d3d11) {
++        D3D11_TEXTURE2D_DESC desc{}; chain.textures11[chain.released]->GetDesc(&desc);
++        desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++        ComPtr<ID3D11Texture2D> staging;
++        check(SUCCEEDED(device11->CreateTexture2D(&desc, nullptr, &staging)), "staging11");
++        ComPtr<ID3D11DeviceContext> context; device11->GetImmediateContext(&context);
++        context->CopyResource(staging.Get(), chain.textures11[chain.released].Get());
++        D3D11_MAPPED_SUBRESOURCE mapped{};
++        check(SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "map11");
++        for (unsigned y = 0; y < chain.height; ++y) {
++            const auto* row = reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped.pData) + y * mapped.RowPitch);
++            for (unsigned x = 0; x < chain.width; ++x) result += row[x] == wanted;
++        }
++        context->Unmap(staging.Get(), 0);
++        return result;
++    }
++    auto* texture = chain.textures[chain.released].Get();
++    const auto desc = texture->GetDesc();
++    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; UINT64 bytes{};
++    device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
++    D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_READBACK;
++    D3D12_RESOURCE_DESC buffer{}; buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    buffer.Width = bytes; buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = buffer.SampleDesc.Count = 1;
++    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    ComPtr<ID3D12Resource> readback; ComPtr<ID3D12CommandAllocator> allocator;
++    ComPtr<ID3D12GraphicsCommandList> list; ComPtr<ID3D12Fence> fence;
++    check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
++        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))), "readback12");
++    check(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))), "allocator12");
++    check(SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list))), "list12");
++    D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barrier.Transition.pResource = texture; barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET; barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    list->ResourceBarrier(1, &barrier);
++    D3D12_TEXTURE_COPY_LOCATION source{}, dest{};
++    source.pResource = texture; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    dest.pResource = readback.Get(); dest.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dest.PlacedFootprint = footprint;
++    list->CopyTextureRegion(&dest, 0, 0, 0, &source, nullptr);
++    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter); list->ResourceBarrier(1, &barrier);
++    check(SUCCEEDED(list->Close()), "close12");
++    ID3D12CommandList* lists[]{list.Get()}; queue->ExecuteCommandLists(1, lists);
++    check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))), "fence12");
++    check(SUCCEEDED(queue->Signal(fence.Get(), 1)), "signal12");
++    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++    check(event && SUCCEEDED(fence->SetEventOnCompletion(1, event)), "event12");
++    check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "GPU readback timed out"); CloseHandle(event);
++    void* mapped{}; const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
++    check(SUCCEEDED(readback->Map(0, &range, &mapped)), "map12");
++    for (unsigned y = 0; y < chain.height; ++y) {
++        const auto* row = reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped) + footprint.Offset + y * footprint.Footprint.RowPitch);
++        for (unsigned x = 0; x < chain.width; ++x) result += row[x] == wanted;
++    }
++    const D3D12_RANGE empty{}; readback->Unmap(0, &empty);
++    return result;
++}
++const Chain* panel_chain() {
++    for (const auto& [id, chain] : chains) if (chain.width == xrfg::kDiagnosticPanelWidth) return &chain;
++    return nullptr;
++}
++void write_position(const std::filesystem::path& ini, const char* position) {
++    std::ofstream(ini, std::ios::binary | std::ios::trunc) << "[overlay]\r\nposition=" << position << "\r\n";
++}
++}
++
++int main(int argc, char** argv) {
++    const auto ini = std::filesystem::temp_directory_path() /
++        (L"ofxr-diagnostic-panel-test-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
++    HANDLE mapping{};
++    void* view{};
++    try {
++        d3d11 = argc > 1 && std::string(argv[1]) == "d3d11";
++        if (d3d11) {
++            check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
++                D3D11_SDK_VERSION, &device11, nullptr, nullptr)), "WARP D3D11");
++        } else {
++            ComPtr<IDXGIFactory4> factory; ComPtr<IDXGIAdapter> warp;
++            check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) &&
++                SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");
++            check(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))), "WARP D3D12");
++            D3D12_COMMAND_QUEUE_DESC desc{};
++            check(SUCCEEDED(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue))), "queue12");
++        }
++        XrCompositionLayerProjectionView projection_view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
++        projection_view.fov = {-0.8f, 0.8f, 0.8f, -0.8f};
++        projection_view.subImage.imageRect.extent = {2688, 2784};
++        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
++        projection.viewCount = 1; projection.views = &projection_view;
++        std::array<const XrCompositionLayerBaseHeader*, 4> layers{};
++        layers.fill(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection));
++        XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO}; info.layerCount = 1; info.layers = layers.data();
++        write_position(ini, "upper_right");
++
++        // Hidden by default: no second swapchain is ever made.
++        SetEnvironmentVariableW(L"DCSVR_DIAG_OVERLAY", nullptr);
++        SetEnvironmentVariableW(L"DCSVR_DIAG_HOTKEY", L"123:6");
++        {
++            xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1), session, 1, get, end,
++                device.Get(), queue.Get(), device11.Get(), ini, nullptr);
++            overlay.application_frame(&info);
++            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "counter missing");
++            check(chains.size() == 1 && !overlay.diagnostic_visible(), "hidden panel created a swapchain");
++        }
++        chains.clear();
++        destroyed = 0;
++
++        // Cheeky's status block, published the way the runtime does.
++        const auto name = L"Local\\DcsVrControlStatus-" + std::to_wstring(GetCurrentProcessId());
++        mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, name.c_str());
++        check(mapping != nullptr, "status mapping");
++        view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(xrfg::DcsVrStatusV1));
++        check(view != nullptr, "status view");
++        auto& status = *static_cast<xrfg::DcsVrStatusV1*>(view);
++        status.magic = xrfg::kDcsVrStatusMagic; status.version = xrfg::kDcsVrStatusVersion;
++        status.structure_size = sizeof(status); status.sequence = 2;
++        status.flags = xrfg::dcsvr_nr_enabled | xrfg::dcsvr_quad_focus | xrfg::dcsvr_graphics_ready;
++        status.nr_evaluations_per_second = 90; status.focus_views_mapped = 2; status.nr_gpu_ms = 1.5f;
++        status.publish_tick_ms = GetTickCount64();
++
++        SetEnvironmentVariableW(L"DCSVR_DIAG_OVERLAY", L"1");
++        {
++            xrfg::OpenXrFpsOverlay overlay(handle<XrInstance>(1), session, 1, get, end,
++                device.Get(), queue.Get(), device11.Get(), ini, nullptr);
++            check(overlay.diagnostic_visible(), "DCSVR_DIAG_OVERLAY=1 did not start visible");
++            overlay.set_generation_status({true, true, true, false, false, 2});
++            overlay.application_frame(&info);
++            check(overlay.end_frame(&info, true) == XR_SUCCESS && observed_count == 3, "counter + panel not submitted");
++            const auto* panel = panel_chain();
++            check(chains.size() == 2 && panel && panel->height == xrfg::kDiagnosticPanelHeight, "panel swapchain");
++            check(observed_quads.size() == 2 && observed_quads[1]->size.width > observed_quads[0]->size.width,
++                "panel must follow the counter");
++            check(observed_quads[1]->pose.position.y < observed_quads[0]->pose.position.y, "panel not below the counter");
++            // Green "DLSS 5: ON (2 focus views, 1.5 ms)" and the translucent background reached the GPU image.
++            check(pixel_count(*panel, 0xff70eb40u) > 200, "panel DLSS line missing on GPU");
++            check(pixel_count(*panel, 0x99000000u) > static_cast<std::size_t>(panel->width) * panel->height / 2,
++                "panel background missing on GPU");
++
++            // NR off in Cheeky and framegen off here: no green line remains.
++            overlay.set_generation_status({true, false, true, false, false, 2});
++            status.sequence = 3; status.flags &= ~xrfg::dcsvr_nr_enabled; status.publish_tick_ms = GetTickCount64(); status.sequence = 4;
++            std::this_thread::sleep_for(std::chrono::milliseconds(260));
++            overlay.application_frame(&info);
++            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 3, "panel lost on refresh");
++            check(pixel_count(*panel, 0xff70eb40u) == 0 && pixel_count(*panel, 0xffa5a5a5u) > 100,
++                "DLSS 5 OFF not redrawn");
++
++            // One free layer: the counter keeps its place, the panel waits for room.
++            info.layerCount = max_layers - 1;
++            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == max_layers &&
++                observed_quads.size() == 1 && observed_quads[0]->subImage.imageRect.extent.width !=
++                    static_cast<int>(xrfg::kDiagnosticPanelWidth), "layer budget");
++            info.layerCount = max_layers;
++            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == max_layers, "full frame changed");
++            info.layerCount = 1;
++
++            // Counter off: the panel stays.
++            write_position(ini, "off");
++            std::this_thread::sleep_for(std::chrono::milliseconds(260));
++            overlay.application_frame(&info);
++            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2 &&
++                observed_quads.size() == 1 && observed_quads[0]->subImage.imageRect.extent.width ==
++                    static_cast<int>(xrfg::kDiagnosticPanelWidth), "panel without counter");
++            check(!overlay.marker_placement(), "counter marker while counter is off");
++
++            // Manual stop removes everything at once.
++            overlay.suspend();
++            check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 1, "suspend kept the panel");
++        }
++        check(destroyed == 2, "panel swapchain leaked");
++        UnmapViewOfFile(view); CloseHandle(mapping);
++        std::filesystem::remove(ini);
++        std::cout << "Diagnostic panel " << (d3d11 ? "D3D11" : "D3D12")
++                  << " lazy swapchain, status block, layer budget, GPU text and lifetime passed\n";
++        return 0;
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        if (view) UnmapViewOfFile(view);
++        if (mapping) CloseHandle(mapping);
++        std::error_code ignored; std::filesystem::remove(ini, ignored);
++        return 1;
++    }
++}

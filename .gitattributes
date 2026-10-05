@@ -1,0 +1,6 @@
+# Patches and patch inputs are applied byte for byte: keep LF on every checkout.
+*.patch text eol=lf
+patches/** text eol=lf
+scripts/*.py text eol=lf
+*.png binary
+*.ico binary

@@ -1,0 +1,12 @@
+.tools/
+.cache/
+artifacts/
+external/
+**/bin/
+**/obj/
+*.user
+*.log
+*.dmp
+.vs/
+__pycache__/
+*.pyc

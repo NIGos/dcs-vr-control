@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 640" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#070d15"/>
+      <stop offset=".38" stop-color="#14263a"/>
+      <stop offset=".66" stop-color="#3a4f63"/>
+      <stop offset=".8" stop-color="#a27450"/>
+      <stop offset=".9" stop-color="#5a4a42"/>
+      <stop offset="1" stop-color="#151c24"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="1120" cy="505" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd59a" stop-opacity=".95"/>
+      <stop offset=".08" stop-color="#f5ac5c" stop-opacity=".7"/>
+      <stop offset=".35" stop-color="#c06f3c" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#c06f3c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="trail" x1="0" x2="1">
+      <stop offset="0" stop-color="#dfe8ef" stop-opacity="0"/>
+      <stop offset="1" stop-color="#e9eef2" stop-opacity=".55"/>
+    </linearGradient>
+    <linearGradient id="jet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c3946"/>
+      <stop offset="1" stop-color="#0b1118"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="haze" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="4"/></filter>
+    <pattern id="scan" width="4" height="4" patternUnits="userSpaceOnUse"><path d="M0 0H4" stroke="#fff" stroke-opacity=".025"/></pattern>
+  </defs>
+  <rect width="1600" height="640" fill="url(#sky)"/>
+  <rect width="1600" height="640" fill="url(#sun)"/>
+  <g fill="#c99a78" opacity=".22" filter="url(#soft)">
+    <ellipse cx="300" cy="420" rx="420" ry="26"/>
+    <ellipse cx="980" cy="440" rx="520" ry="22"/>
+    <ellipse cx="1420" cy="400" rx="300" ry="18"/>
+  </g>
+  <g fill="#8fa6b8" opacity=".14" filter="url(#soft)">
+    <ellipse cx="520" cy="250" rx="380" ry="18"/>
+    <ellipse cx="1280" cy="210" rx="340" ry="14"/>
+  </g>
+  <path d="M0 520 120 486 210 500 330 462 430 490 560 456 700 492 820 470 940 500 1080 474 1180 496 1320 466 1460 492 1600 476V640H0Z" fill="#26303b" opacity=".85" filter="url(#haze)"/>
+  <path d="M0 560 160 528 290 548 420 516 600 552 760 530 900 560 1050 534 1240 562 1400 536 1600 556V640H0Z" fill="#141b23"/>
+  <path d="M0 600 220 584 480 598 760 582 1040 600 1320 586 1600 598V640H0Z" fill="#0b1016"/>
+  <path d="M120 318C420 296 760 282 1008 266" stroke="url(#trail)" stroke-width="3" fill="none" stroke-linecap="round" filter="url(#haze)"/>
+  <path d="M140 330C440 308 770 292 1008 272" stroke="url(#trail)" stroke-width="2" fill="none" stroke-linecap="round" opacity=".6" filter="url(#haze)"/>
+  <g transform="translate(1010 236) rotate(-3) scale(1.5)" fill="url(#jet)" stroke="#5d6f7e" stroke-width=".8" stroke-opacity=".7">
+    <path d="M0 22 18 14 70 10 112 4 168 0 196 6 168 14 120 20 70 26 18 28Z"/>
+    <path d="M58 14 92 -24 110 -24 98 8Z"/>
+    <path d="M78 20 118 52 136 52 108 18Z"/>
+    <path d="M2 18 12 4 22 6 22 16Z"/>
+    <path d="M138 4 152 -2 170 2 160 8Z" fill="#7d6b52" stroke="none" opacity=".9"/>
+  </g>
+  <circle cx="1010" cy="268" r="7" fill="#ffcf8f" opacity=".8" filter="url(#haze)"/>
+  <rect width="1600" height="640" fill="url(#scan)"/>
+</svg>

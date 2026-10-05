@@ -1,0 +1,2749 @@
+{
+  "scope": "Offscreen synthetic GPU stages only; excludes DCS rendering, SR, DX11, sharpening, headset and pacing.",
+  "neuralSha256": "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e",
+  "runs": [
+    {
+      "sourceId": "4e8cda1acfd940cdb220143931469c48",
+      "passed": true,
+      "timingComparable": true,
+      "maxRunVariationPercent": 7.325544750585267,
+      "gpuBefore": [
+        "name, driver_version, pstate, clocks.current.graphics [MHz], power.draw [W], temperature.gpu, utilization.gpu [%]",
+        "NVIDIA GeForce RTX 5090, 617.14, P0, 2685 MHz, 87.67 W, 50, 13 %"
+      ],
+      "gpuAfter": [
+        "name, driver_version, pstate, clocks.current.graphics [MHz], power.draw [W], temperature.gpu, utilization.gpu [%]",
+        "NVIDIA GeForce RTX 5090, 617.14, P0, 3105 MHz, 132.71 W, 55, 40 %"
+      ],
+      "results": [
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 15728640,
+          "wallSeconds": 0.947,
+          "neural": {
+            "medianUs": 4080.64,
+            "p95Us": 4530.24,
+            "minUs": 3878.88
+          },
+          "composition": {
+            "medianUs": 46.016,
+            "p95Us": 47.872,
+            "minUs": 45.024
+          },
+          "opticalFlow": {
+            "medianUs": 1524.0,
+            "p95Us": 2148.0,
+            "minUs": 1305.0
+          },
+          "gpuStageSum": {
+            "medianUs": 5627.984,
+            "p95Us": 6130.136,
+            "minUs": 5313.848
+          },
+          "cpuRecording": {
+            "medianUs": 477.5,
+            "p95Us": 549.1,
+            "minUs": 455.8
+          },
+          "run": 0,
+          "caseIndex": 0
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.944,
+          "neural": {
+            "medianUs": 4197.984,
+            "p95Us": 4543.328,
+            "minUs": 3996.928
+          },
+          "composition": {
+            "medianUs": 48.288,
+            "p95Us": 49.44,
+            "minUs": 47.424
+          },
+          "opticalFlow": {
+            "medianUs": 1460.0,
+            "p95Us": 1798.0,
+            "minUs": 1305.0
+          },
+          "gpuStageSum": {
+            "medianUs": 5805.056,
+            "p95Us": 6334.968,
+            "minUs": 5365.328
+          },
+          "cpuRecording": {
+            "medianUs": 468.9,
+            "p95Us": 544.1,
+            "minUs": 449.1
+          },
+          "run": 0,
+          "caseIndex": 1
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 0.94,
+          "neural": {
+            "medianUs": 4306.208,
+            "p95Us": 4634.88,
+            "minUs": 4091.744
+          },
+          "composition": {
+            "medianUs": 49.728,
+            "p95Us": 50.112,
+            "minUs": 48.896
+          },
+          "opticalFlow": {
+            "medianUs": 1450.0,
+            "p95Us": 1793.0,
+            "minUs": 1326.0
+          },
+          "gpuStageSum": {
+            "medianUs": 5941.912,
+            "p95Us": 6257.48,
+            "minUs": 5482.896
+          },
+          "cpuRecording": {
+            "medianUs": 501.8,
+            "p95Us": 548.4,
+            "minUs": 455.5
+          },
+          "run": 0,
+          "caseIndex": 2
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 1.0,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 37748736,
+          "wallSeconds": 0.974,
+          "neural": {
+            "medianUs": 4871.616,
+            "p95Us": 5031.264,
+            "minUs": 4461.888
+          },
+          "composition": {
+            "medianUs": 52.576,
+            "p95Us": 53.216,
+            "minUs": 48.672
+          },
+          "opticalFlow": {
+            "medianUs": 1473.0,
+            "p95Us": 1870.0,
+            "minUs": 1274.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6402.216,
+            "p95Us": 6825.896,
+            "minUs": 5889.368
+          },
+          "cpuRecording": {
+            "medianUs": 472.1,
+            "p95Us": 569.3,
+            "minUs": 446.0
+          },
+          "run": 0,
+          "caseIndex": 3
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 0.97,
+          "neural": {
+            "medianUs": 4307.008,
+            "p95Us": 4904.256,
+            "minUs": 4084.256
+          },
+          "composition": {
+            "medianUs": 49.696,
+            "p95Us": 50.88,
+            "minUs": 48.736
+          },
+          "opticalFlow": {
+            "medianUs": 1724.0,
+            "p95Us": 2016.0,
+            "minUs": 1531.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6155.856,
+            "p95Us": 6760.368,
+            "minUs": 5730.752
+          },
+          "cpuRecording": {
+            "medianUs": 459.5,
+            "p95Us": 594.0,
+            "minUs": 448.5
+          },
+          "run": 0,
+          "caseIndex": 4
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.971,
+          "neural": {
+            "medianUs": 4307.936,
+            "p95Us": 4711.328,
+            "minUs": 3993.664
+          },
+          "composition": {
+            "medianUs": 49.184,
+            "p95Us": 50.208,
+            "minUs": 48.128
+          },
+          "opticalFlow": {
+            "medianUs": 1792.0,
+            "p95Us": 2121.0,
+            "minUs": 1545.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6092.872,
+            "p95Us": 6741.928,
+            "minUs": 5610.76
+          },
+          "cpuRecording": {
+            "medianUs": 597.9,
+            "p95Us": 826.4,
+            "minUs": 458.7
+          },
+          "run": 0,
+          "caseIndex": 5
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "slow",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.978,
+          "neural": {
+            "medianUs": 4184.768,
+            "p95Us": 4693.76,
+            "minUs": 3995.904
+          },
+          "composition": {
+            "medianUs": 48.832,
+            "p95Us": 49.728,
+            "minUs": 47.84
+          },
+          "opticalFlow": {
+            "medianUs": 2192.0,
+            "p95Us": 2497.0,
+            "minUs": 2084.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6509.36,
+            "p95Us": 7104.552,
+            "minUs": 6167.096
+          },
+          "cpuRecording": {
+            "medianUs": 464.7,
+            "p95Us": 677.7,
+            "minUs": 455.4
+          },
+          "run": 0,
+          "caseIndex": 6
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 75,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 1.024,
+          "neural": {
+            "medianUs": 4198.72,
+            "p95Us": 4686.528,
+            "minUs": 3989.312
+          },
+          "composition": {
+            "medianUs": 48.768,
+            "p95Us": 236.832,
+            "minUs": 47.776
+          },
+          "opticalFlow": {
+            "medianUs": 2015.0,
+            "p95Us": 2401.0,
+            "minUs": 1861.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6422.296,
+            "p95Us": 6852.592,
+            "minUs": 5954.552
+          },
+          "cpuRecording": {
+            "medianUs": 461.6,
+            "p95Us": 542.0,
+            "minUs": 452.5
+          },
+          "run": 0,
+          "caseIndex": 7
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 100,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.996,
+          "neural": {
+            "medianUs": 4200.64,
+            "p95Us": 4660.928,
+            "minUs": 3998.4
+          },
+          "composition": {
+            "medianUs": 48.8,
+            "p95Us": 50.304,
+            "minUs": 47.776
+          },
+          "opticalFlow": {
+            "medianUs": 2920.0,
+            "p95Us": 3101.0,
+            "minUs": 2700.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7107.84,
+            "p95Us": 7472.248,
+            "minUs": 6746.272
+          },
+          "cpuRecording": {
+            "medianUs": 490.2,
+            "p95Us": 550.7,
+            "minUs": 458.2
+          },
+          "run": 0,
+          "caseIndex": 8
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 35389440,
+          "wallSeconds": 1.021,
+          "neural": {
+            "medianUs": 4665.312,
+            "p95Us": 5019.552,
+            "minUs": 4158.912
+          },
+          "composition": {
+            "medianUs": 125.856,
+            "p95Us": 127.424,
+            "minUs": 119.744
+          },
+          "opticalFlow": {
+            "medianUs": 2283.0,
+            "p95Us": 2475.0,
+            "minUs": 2160.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7154.48,
+            "p95Us": 7380.992,
+            "minUs": 6707.528
+          },
+          "cpuRecording": {
+            "medianUs": 549.1,
+            "p95Us": 719.9,
+            "minUs": 458.0
+          },
+          "run": 0,
+          "caseIndex": 9
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 46762480,
+          "wallSeconds": 1.023,
+          "neural": {
+            "medianUs": 5125.568,
+            "p95Us": 5344.032,
+            "minUs": 4551.744
+          },
+          "composition": {
+            "medianUs": 128.576,
+            "p95Us": 130.24,
+            "minUs": 123.744
+          },
+          "opticalFlow": {
+            "medianUs": 2416.0,
+            "p95Us": 2694.0,
+            "minUs": 2170.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7607.856,
+            "p95Us": 8098.392,
+            "minUs": 6859.376
+          },
+          "cpuRecording": {
+            "medianUs": 463.8,
+            "p95Us": 629.3,
+            "minUs": 454.8
+          },
+          "run": 0,
+          "caseIndex": 10
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 56033280,
+          "wallSeconds": 1.008,
+          "neural": {
+            "medianUs": 4710.752,
+            "p95Us": 5269.024,
+            "minUs": 4699.072
+          },
+          "composition": {
+            "medianUs": 128.064,
+            "p95Us": 129.216,
+            "minUs": 127.232
+          },
+          "opticalFlow": {
+            "medianUs": 2427.0,
+            "p95Us": 2736.0,
+            "minUs": 2129.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7320.728,
+            "p95Us": 7848.008,
+            "minUs": 6962.664
+          },
+          "cpuRecording": {
+            "medianUs": 459.2,
+            "p95Us": 564.2,
+            "minUs": 450.9
+          },
+          "run": 0,
+          "caseIndex": 11
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 56033280,
+          "wallSeconds": 1.018,
+          "neural": {
+            "medianUs": 4726.336,
+            "p95Us": 5232.768,
+            "minUs": 4695.968
+          },
+          "composition": {
+            "medianUs": 127.392,
+            "p95Us": 334.752,
+            "minUs": 123.584
+          },
+          "opticalFlow": {
+            "medianUs": 2695.0,
+            "p95Us": 3006.0,
+            "minUs": 2564.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7746.928,
+            "p95Us": 8039.696,
+            "minUs": 7445.432
+          },
+          "cpuRecording": {
+            "medianUs": 462.6,
+            "p95Us": 562.5,
+            "minUs": 453.2
+          },
+          "run": 0,
+          "caseIndex": 12
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 62914560,
+          "wallSeconds": 1.077,
+          "neural": {
+            "medianUs": 4800.48,
+            "p95Us": 5245.728,
+            "minUs": 4596.576
+          },
+          "composition": {
+            "medianUs": 217.184,
+            "p95Us": 422.016,
+            "minUs": 215.872
+          },
+          "opticalFlow": {
+            "medianUs": 3556.0,
+            "p95Us": 3943.0,
+            "minUs": 3436.0
+          },
+          "gpuStageSum": {
+            "medianUs": 8634.704,
+            "p95Us": 9160.104,
+            "minUs": 8335.512
+          },
+          "cpuRecording": {
+            "medianUs": 460.9,
+            "p95Us": 551.4,
+            "minUs": 447.9
+          },
+          "run": 0,
+          "caseIndex": 13
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 83158140,
+          "wallSeconds": 1.116,
+          "neural": {
+            "medianUs": 5713.536,
+            "p95Us": 6178.144,
+            "minUs": 5460.576
+          },
+          "composition": {
+            "medianUs": 217.664,
+            "p95Us": 446.496,
+            "minUs": 212.512
+          },
+          "opticalFlow": {
+            "medianUs": 3522.0,
+            "p95Us": 4049.0,
+            "minUs": 3458.0
+          },
+          "gpuStageSum": {
+            "medianUs": 9638.712,
+            "p95Us": 10115.04,
+            "minUs": 9187.192
+          },
+          "cpuRecording": {
+            "medianUs": 466.1,
+            "p95Us": 559.5,
+            "minUs": 453.0
+          },
+          "run": 0,
+          "caseIndex": 14
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 99614720,
+          "wallSeconds": 1.141,
+          "neural": {
+            "medianUs": 6489.632,
+            "p95Us": 6866.752,
+            "minUs": 6036.32
+          },
+          "composition": {
+            "medianUs": 218.592,
+            "p95Us": 220.832,
+            "minUs": 205.472
+          },
+          "opticalFlow": {
+            "medianUs": 3637.0,
+            "p95Us": 4029.0,
+            "minUs": 3475.0
+          },
+          "gpuStageSum": {
+            "medianUs": 10247.688,
+            "p95Us": 11000.576,
+            "minUs": 9866.824
+          },
+          "cpuRecording": {
+            "medianUs": 466.0,
+            "p95Us": 694.9,
+            "minUs": 454.6
+          },
+          "run": 0,
+          "caseIndex": 15
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 99614720,
+          "wallSeconds": 1.142,
+          "neural": {
+            "medianUs": 6263.968,
+            "p95Us": 6716.256,
+            "minUs": 6044.576
+          },
+          "composition": {
+            "medianUs": 218.432,
+            "p95Us": 451.648,
+            "minUs": 207.008
+          },
+          "opticalFlow": {
+            "medianUs": 4194.0,
+            "p95Us": 4446.0,
+            "minUs": 4093.0
+          },
+          "gpuStageSum": {
+            "medianUs": 10705.616,
+            "p95Us": 11381.52,
+            "minUs": 10395.616
+          },
+          "cpuRecording": {
+            "medianUs": 460.6,
+            "p95Us": 543.2,
+            "minUs": 451.2
+          },
+          "run": 0,
+          "caseIndex": 16
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 99614720,
+          "wallSeconds": 1.189,
+          "neural": {
+            "medianUs": 6598.24,
+            "p95Us": 6849.664,
+            "minUs": 6041.024
+          },
+          "composition": {
+            "medianUs": 217.792,
+            "p95Us": 220.512,
+            "minUs": 211.872
+          },
+          "opticalFlow": {
+            "medianUs": 4225.0,
+            "p95Us": 5674.0,
+            "minUs": 4104.0
+          },
+          "gpuStageSum": {
+            "medianUs": 11073.76,
+            "p95Us": 12541.136,
+            "minUs": 10600.216
+          },
+          "cpuRecording": {
+            "medianUs": 469.6,
+            "p95Us": 698.2,
+            "minUs": 455.9
+          },
+          "run": 1,
+          "caseIndex": 16
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 99614720,
+          "wallSeconds": 1.139,
+          "neural": {
+            "medianUs": 6554.144,
+            "p95Us": 6975.616,
+            "minUs": 6040.32
+          },
+          "composition": {
+            "medianUs": 217.76,
+            "p95Us": 419.904,
+            "minUs": 206.4
+          },
+          "opticalFlow": {
+            "medianUs": 3587.0,
+            "p95Us": 3887.0,
+            "minUs": 3445.0
+          },
+          "gpuStageSum": {
+            "medianUs": 10463.352,
+            "p95Us": 10869.464,
+            "minUs": 9964.112
+          },
+          "cpuRecording": {
+            "medianUs": 471.6,
+            "p95Us": 591.2,
+            "minUs": 452.8
+          },
+          "run": 1,
+          "caseIndex": 15
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 83158140,
+          "wallSeconds": 1.122,
+          "neural": {
+            "medianUs": 5698.656,
+            "p95Us": 6344.288,
+            "minUs": 5447.712
+          },
+          "composition": {
+            "medianUs": 218.112,
+            "p95Us": 424.736,
+            "minUs": 211.968
+          },
+          "opticalFlow": {
+            "medianUs": 3556.0,
+            "p95Us": 3960.0,
+            "minUs": 3444.0
+          },
+          "gpuStageSum": {
+            "medianUs": 9634.024,
+            "p95Us": 10342.336,
+            "minUs": 9180.976
+          },
+          "cpuRecording": {
+            "medianUs": 465.0,
+            "p95Us": 652.7,
+            "minUs": 448.8
+          },
+          "run": 1,
+          "caseIndex": 14
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 62914560,
+          "wallSeconds": 1.09,
+          "neural": {
+            "medianUs": 4806.976,
+            "p95Us": 5535.328,
+            "minUs": 4596.8
+          },
+          "composition": {
+            "medianUs": 217.312,
+            "p95Us": 424.416,
+            "minUs": 205.792
+          },
+          "opticalFlow": {
+            "medianUs": 3627.0,
+            "p95Us": 3960.0,
+            "minUs": 3447.0
+          },
+          "gpuStageSum": {
+            "medianUs": 8734.296,
+            "p95Us": 9400.32,
+            "minUs": 8276.984
+          },
+          "cpuRecording": {
+            "medianUs": 464.6,
+            "p95Us": 569.1,
+            "minUs": 453.0
+          },
+          "run": 1,
+          "caseIndex": 13
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 56033280,
+          "wallSeconds": 1.026,
+          "neural": {
+            "medianUs": 4918.08,
+            "p95Us": 5450.176,
+            "minUs": 4708.0
+          },
+          "composition": {
+            "medianUs": 128.224,
+            "p95Us": 329.216,
+            "minUs": 126.752
+          },
+          "opticalFlow": {
+            "medianUs": 2679.0,
+            "p95Us": 2984.0,
+            "minUs": 2567.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7820.328,
+            "p95Us": 8319.8,
+            "minUs": 7401.752
+          },
+          "cpuRecording": {
+            "medianUs": 467.9,
+            "p95Us": 529.2,
+            "minUs": 450.5
+          },
+          "run": 1,
+          "caseIndex": 12
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 56033280,
+          "wallSeconds": 1.028,
+          "neural": {
+            "medianUs": 5098.976,
+            "p95Us": 5428.256,
+            "minUs": 4700.384
+          },
+          "composition": {
+            "medianUs": 128.576,
+            "p95Us": 129.344,
+            "minUs": 126.72
+          },
+          "opticalFlow": {
+            "medianUs": 2260.0,
+            "p95Us": 2535.0,
+            "minUs": 2154.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7498.48,
+            "p95Us": 8147.024,
+            "minUs": 6990.384
+          },
+          "cpuRecording": {
+            "medianUs": 497.3,
+            "p95Us": 577.8,
+            "minUs": 455.9
+          },
+          "run": 1,
+          "caseIndex": 11
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 46762480,
+          "wallSeconds": 1.041,
+          "neural": {
+            "medianUs": 4749.888,
+            "p95Us": 4796.384,
+            "minUs": 4556.64
+          },
+          "composition": {
+            "medianUs": 129.6,
+            "p95Us": 334.88,
+            "minUs": 127.904
+          },
+          "opticalFlow": {
+            "medianUs": 2341.0,
+            "p95Us": 3024.0,
+            "minUs": 2202.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7219.144,
+            "p95Us": 7742.704,
+            "minUs": 7047.16
+          },
+          "cpuRecording": {
+            "medianUs": 457.9,
+            "p95Us": 590.1,
+            "minUs": 448.4
+          },
+          "run": 1,
+          "caseIndex": 10
+        },
+        {
+          "passed": true,
+          "focusDimension": 1536,
+          "stereoDimension": 3072,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 35389440,
+          "wallSeconds": 1.023,
+          "neural": {
+            "medianUs": 4745.856,
+            "p95Us": 4967.328,
+            "minUs": 4331.04
+          },
+          "composition": {
+            "medianUs": 125.312,
+            "p95Us": 126.56,
+            "minUs": 123.968
+          },
+          "opticalFlow": {
+            "medianUs": 2374.0,
+            "p95Us": 2578.0,
+            "minUs": 2209.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7300.28,
+            "p95Us": 7529.072,
+            "minUs": 6713.936
+          },
+          "cpuRecording": {
+            "medianUs": 462.6,
+            "p95Us": 505.6,
+            "minUs": 454.9
+          },
+          "run": 1,
+          "caseIndex": 9
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 100,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 1.082,
+          "neural": {
+            "medianUs": 4571.68,
+            "p95Us": 4786.272,
+            "minUs": 4274.72
+          },
+          "composition": {
+            "medianUs": 49.28,
+            "p95Us": 50.368,
+            "minUs": 48.608
+          },
+          "opticalFlow": {
+            "medianUs": 3011.0,
+            "p95Us": 3211.0,
+            "minUs": 2795.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7628.528,
+            "p95Us": 7970.08,
+            "minUs": 7156.352
+          },
+          "cpuRecording": {
+            "medianUs": 489.3,
+            "p95Us": 585.1,
+            "minUs": 454.1
+          },
+          "run": 1,
+          "caseIndex": 8
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 75,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.963,
+          "neural": {
+            "medianUs": 4207.584,
+            "p95Us": 4693.792,
+            "minUs": 4001.696
+          },
+          "composition": {
+            "medianUs": 48.992,
+            "p95Us": 50.112,
+            "minUs": 47.872
+          },
+          "opticalFlow": {
+            "medianUs": 2039.0,
+            "p95Us": 2522.0,
+            "minUs": 1913.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6464.96,
+            "p95Us": 6943.864,
+            "minUs": 6009.568
+          },
+          "cpuRecording": {
+            "medianUs": 462.5,
+            "p95Us": 583.3,
+            "minUs": 454.1
+          },
+          "run": 1,
+          "caseIndex": 7
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "slow",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 1.052,
+          "neural": {
+            "medianUs": 4312.864,
+            "p95Us": 4671.136,
+            "minUs": 3998.112
+          },
+          "composition": {
+            "medianUs": 48.8,
+            "p95Us": 49.856,
+            "minUs": 47.744
+          },
+          "opticalFlow": {
+            "medianUs": 2225.0,
+            "p95Us": 2637.0,
+            "minUs": 2085.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6616.256,
+            "p95Us": 7103.96,
+            "minUs": 6228.744
+          },
+          "cpuRecording": {
+            "medianUs": 475.0,
+            "p95Us": 630.5,
+            "minUs": 455.0
+          },
+          "run": 1,
+          "caseIndex": 6
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.947,
+          "neural": {
+            "medianUs": 4196.128,
+            "p95Us": 4684.736,
+            "minUs": 3994.784
+          },
+          "composition": {
+            "medianUs": 48.832,
+            "p95Us": 49.92,
+            "minUs": 47.872
+          },
+          "opticalFlow": {
+            "medianUs": 1655.0,
+            "p95Us": 2083.0,
+            "minUs": 1513.0
+          },
+          "gpuStageSum": {
+            "medianUs": 5952.672,
+            "p95Us": 6524.136,
+            "minUs": 5565.448
+          },
+          "cpuRecording": {
+            "medianUs": 458.1,
+            "p95Us": 601.3,
+            "minUs": 450.3
+          },
+          "run": 1,
+          "caseIndex": 5
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 0.959,
+          "neural": {
+            "medianUs": 4290.112,
+            "p95Us": 4802.112,
+            "minUs": 4096.032
+          },
+          "composition": {
+            "medianUs": 50.208,
+            "p95Us": 50.944,
+            "minUs": 42.432
+          },
+          "opticalFlow": {
+            "medianUs": 1701.0,
+            "p95Us": 2071.0,
+            "minUs": 1539.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6112.88,
+            "p95Us": 6632.816,
+            "minUs": 5771.216
+          },
+          "cpuRecording": {
+            "medianUs": 482.3,
+            "p95Us": 669.3,
+            "minUs": 455.5
+          },
+          "run": 1,
+          "caseIndex": 4
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 1.0,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 37748736,
+          "wallSeconds": 1.068,
+          "neural": {
+            "medianUs": 4665.472,
+            "p95Us": 5158.176,
+            "minUs": 4462.24
+          },
+          "composition": {
+            "medianUs": 52.896,
+            "p95Us": 53.664,
+            "minUs": 50.208
+          },
+          "opticalFlow": {
+            "medianUs": 1476.0,
+            "p95Us": 2344.0,
+            "minUs": 1351.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6400.608,
+            "p95Us": 6867.616,
+            "minUs": 5926.896
+          },
+          "cpuRecording": {
+            "medianUs": 499.9,
+            "p95Us": 595.7,
+            "minUs": 455.3
+          },
+          "run": 1,
+          "caseIndex": 3
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 0.953,
+          "neural": {
+            "medianUs": 4301.76,
+            "p95Us": 4720.32,
+            "minUs": 4084.704
+          },
+          "composition": {
+            "medianUs": 49.536,
+            "p95Us": 50.912,
+            "minUs": 48.704
+          },
+          "opticalFlow": {
+            "medianUs": 1458.0,
+            "p95Us": 2071.0,
+            "minUs": 1335.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6010.328,
+            "p95Us": 6503.368,
+            "minUs": 5508.656
+          },
+          "cpuRecording": {
+            "medianUs": 471.6,
+            "p95Us": 542.7,
+            "minUs": 450.9
+          },
+          "run": 1,
+          "caseIndex": 2
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 20808176,
+          "wallSeconds": 0.936,
+          "neural": {
+            "medianUs": 4200.32,
+            "p95Us": 4693.44,
+            "minUs": 3994.624
+          },
+          "composition": {
+            "medianUs": 48.512,
+            "p95Us": 50.4,
+            "minUs": 47.36
+          },
+          "opticalFlow": {
+            "medianUs": 1451.0,
+            "p95Us": 1740.0,
+            "minUs": 1323.0
+          },
+          "gpuStageSum": {
+            "medianUs": 5705.008,
+            "p95Us": 6320.648,
+            "minUs": 5440.864
+          },
+          "cpuRecording": {
+            "medianUs": 463.6,
+            "p95Us": 503.3,
+            "minUs": 453.7
+          },
+          "run": 1,
+          "caseIndex": 1
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 15728640,
+          "wallSeconds": 0.933,
+          "neural": {
+            "medianUs": 4092.128,
+            "p95Us": 4639.136,
+            "minUs": 3896.864
+          },
+          "composition": {
+            "medianUs": 46.272,
+            "p95Us": 48.416,
+            "minUs": 44.992
+          },
+          "opticalFlow": {
+            "medianUs": 1477.0,
+            "p95Us": 1788.0,
+            "minUs": 1348.0
+          },
+          "gpuStageSum": {
+            "medianUs": 5681.4,
+            "p95Us": 6344.352,
+            "minUs": 5291.144
+          },
+          "cpuRecording": {
+            "medianUs": 459.1,
+            "p95Us": 710.6,
+            "minUs": 451.6
+          },
+          "run": 1,
+          "caseIndex": 0
+        }
+      ]
+    },
+    {
+      "sourceId": "0e94603dc06f42e4a48497de12745ee2",
+      "passed": true,
+      "timingComparable": true,
+      "maxRunVariationPercent": 1.9757237307583608,
+      "gpuBefore": [
+        "name, driver_version, pstate, clocks.current.graphics [MHz], power.draw [W], temperature.gpu, utilization.gpu [%]",
+        "NVIDIA GeForce RTX 5090, 617.14, P0, 2932 MHz, 100.97 W, 53, 6 %"
+      ],
+      "gpuAfter": [
+        "name, driver_version, pstate, clocks.current.graphics [MHz], power.draw [W], temperature.gpu, utilization.gpu [%]",
+        "NVIDIA GeForce RTX 5090, 617.14, P0, 2917 MHz, 135.76 W, 57, 65 %"
+      ],
+      "results": [
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 0.948,
+          "neural": {
+            "medianUs": 4307.264,
+            "p95Us": 4757.792,
+            "minUs": 4074.688
+          },
+          "composition": {
+            "medianUs": 49.728,
+            "p95Us": 50.784,
+            "minUs": 48.928
+          },
+          "opticalFlow": {
+            "medianUs": 2449.0,
+            "p95Us": 2764.0,
+            "minUs": 2301.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6909.992,
+            "p95Us": 7344.4,
+            "minUs": 6424.936
+          },
+          "cpuRecording": {
+            "medianUs": 459.7,
+            "p95Us": 519.3,
+            "minUs": 449.2
+          },
+          "run": 0,
+          "caseIndex": 0
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.209,
+          "neural": {
+            "medianUs": 4407.008,
+            "p95Us": 4770.592,
+            "minUs": 4083.712
+          },
+          "composition": {
+            "medianUs": 49.536,
+            "p95Us": 50.656,
+            "minUs": 48.832
+          },
+          "opticalFlow": {
+            "medianUs": 10902.0,
+            "p95Us": 11152.0,
+            "minUs": 10628.0
+          },
+          "gpuStageSum": {
+            "medianUs": 15348.176,
+            "p95Us": 15881.768,
+            "minUs": 14869.08
+          },
+          "cpuRecording": {
+            "medianUs": 465.2,
+            "p95Us": 544.2,
+            "minUs": 455.2
+          },
+          "run": 0,
+          "caseIndex": 1
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 1.0,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 150994944,
+          "wallSeconds": 1.771,
+          "neural": {
+            "medianUs": 9442.24,
+            "p95Us": 9824.16,
+            "minUs": 9010.528
+          },
+          "composition": {
+            "medianUs": 216.992,
+            "p95Us": 431.584,
+            "minUs": 212.256
+          },
+          "opticalFlow": {
+            "medianUs": 21488.0,
+            "p95Us": 21850.0,
+            "minUs": 21257.0
+          },
+          "gpuStageSum": {
+            "medianUs": 31322.232,
+            "p95Us": 31629.096,
+            "minUs": 30521.736
+          },
+          "cpuRecording": {
+            "medianUs": 493.0,
+            "p95Us": 574.0,
+            "minUs": 462.0
+          },
+          "run": 0,
+          "caseIndex": 2
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 1.565,
+          "neural": {
+            "medianUs": 11814.976,
+            "p95Us": 12620.224,
+            "minUs": 11454.976
+          },
+          "composition": {
+            "medianUs": 471.264,
+            "p95Us": 766.048,
+            "minUs": 449.152
+          },
+          "opticalFlow": {
+            "medianUs": 8511.0,
+            "p95Us": 8758.0,
+            "minUs": 8436.0
+          },
+          "gpuStageSum": {
+            "medianUs": 20881.52,
+            "p95Us": 21651.912,
+            "minUs": 20396.624
+          },
+          "cpuRecording": {
+            "medianUs": 480.1,
+            "p95Us": 597.2,
+            "minUs": 455.8
+          },
+          "run": 0,
+          "caseIndex": 3
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 1.624,
+          "neural": {
+            "medianUs": 11733.408,
+            "p95Us": 12144.864,
+            "minUs": 11301.056
+          },
+          "composition": {
+            "medianUs": 471.104,
+            "p95Us": 730.784,
+            "minUs": 457.696
+          },
+          "opticalFlow": {
+            "medianUs": 7022.0,
+            "p95Us": 7295.0,
+            "minUs": 6890.0
+          },
+          "gpuStageSum": {
+            "medianUs": 19290.816,
+            "p95Us": 19734.52,
+            "minUs": 18911.8
+          },
+          "cpuRecording": {
+            "medianUs": 541.1,
+            "p95Us": 859.0,
+            "minUs": 471.7
+          },
+          "run": 0,
+          "caseIndex": 4
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 187161724,
+          "wallSeconds": 1.48,
+          "neural": {
+            "medianUs": 9687.232,
+            "p95Us": 10121.92,
+            "minUs": 9416.736
+          },
+          "composition": {
+            "medianUs": 473.728,
+            "p95Us": 689.728,
+            "minUs": 462.88
+          },
+          "opticalFlow": {
+            "medianUs": 7019.0,
+            "p95Us": 7377.0,
+            "minUs": 6866.0
+          },
+          "gpuStageSum": {
+            "medianUs": 17283.12,
+            "p95Us": 17723.088,
+            "minUs": 16902.624
+          },
+          "cpuRecording": {
+            "medianUs": 463.9,
+            "p95Us": 565.2,
+            "minUs": 454.8
+          },
+          "run": 0,
+          "caseIndex": 5
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 141557760,
+          "wallSeconds": 1.405,
+          "neural": {
+            "medianUs": 6949.312,
+            "p95Us": 7570.016,
+            "minUs": 6447.072
+          },
+          "composition": {
+            "medianUs": 469.248,
+            "p95Us": 687.072,
+            "minUs": 461.6
+          },
+          "opticalFlow": {
+            "medianUs": 7190.0,
+            "p95Us": 7751.0,
+            "minUs": 6985.0
+          },
+          "gpuStageSum": {
+            "medianUs": 14788.32,
+            "p95Us": 15203.496,
+            "minUs": 14087.688
+          },
+          "cpuRecording": {
+            "medianUs": 502.9,
+            "p95Us": 939.2,
+            "minUs": 455.3
+          },
+          "run": 0,
+          "caseIndex": 6
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 141557760,
+          "wallSeconds": 1.439,
+          "neural": {
+            "medianUs": 7307.488,
+            "p95Us": 7768.96,
+            "minUs": 6442.112
+          },
+          "composition": {
+            "medianUs": 469.792,
+            "p95Us": 666.496,
+            "minUs": 461.44
+          },
+          "opticalFlow": {
+            "medianUs": 7214.0,
+            "p95Us": 7625.0,
+            "minUs": 7015.0
+          },
+          "gpuStageSum": {
+            "medianUs": 15005.856,
+            "p95Us": 15489.04,
+            "minUs": 14393.704
+          },
+          "cpuRecording": {
+            "medianUs": 527.2,
+            "p95Us": 832.2,
+            "minUs": 459.5
+          },
+          "run": 1,
+          "caseIndex": 6
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 187161724,
+          "wallSeconds": 1.461,
+          "neural": {
+            "medianUs": 9829.568,
+            "p95Us": 10225.248,
+            "minUs": 9527.808
+          },
+          "composition": {
+            "medianUs": 471.2,
+            "p95Us": 717.792,
+            "minUs": 462.336
+          },
+          "opticalFlow": {
+            "medianUs": 7139.0,
+            "p95Us": 7438.0,
+            "minUs": 6922.0
+          },
+          "gpuStageSum": {
+            "medianUs": 17444.928,
+            "p95Us": 18006.664,
+            "minUs": 16923.872
+          },
+          "cpuRecording": {
+            "medianUs": 463.1,
+            "p95Us": 580.0,
+            "minUs": 452.1
+          },
+          "run": 1,
+          "caseIndex": 5
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 1.515,
+          "neural": {
+            "medianUs": 11679.456,
+            "p95Us": 12054.144,
+            "minUs": 11125.216
+          },
+          "composition": {
+            "medianUs": 471.072,
+            "p95Us": 705.824,
+            "minUs": 468.704
+          },
+          "opticalFlow": {
+            "medianUs": 6990.0,
+            "p95Us": 7183.0,
+            "minUs": 6891.0
+          },
+          "gpuStageSum": {
+            "medianUs": 19298.768,
+            "p95Us": 19789.072,
+            "minUs": 18543.032
+          },
+          "cpuRecording": {
+            "medianUs": 463.4,
+            "p95Us": 572.3,
+            "minUs": 453.7
+          },
+          "run": 1,
+          "caseIndex": 4
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 1.538,
+          "neural": {
+            "medianUs": 11548.128,
+            "p95Us": 11931.328,
+            "minUs": 11125.536
+          },
+          "composition": {
+            "medianUs": 472.0,
+            "p95Us": 476.064,
+            "minUs": 464.64
+          },
+          "opticalFlow": {
+            "medianUs": 8462.0,
+            "p95Us": 8785.0,
+            "minUs": 8368.0
+          },
+          "gpuStageSum": {
+            "medianUs": 20476.952,
+            "p95Us": 20969.08,
+            "minUs": 20065.008
+          },
+          "cpuRecording": {
+            "medianUs": 467.7,
+            "p95Us": 579.5,
+            "minUs": 455.6
+          },
+          "run": 1,
+          "caseIndex": 3
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 1.0,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 150994944,
+          "wallSeconds": 1.771,
+          "neural": {
+            "medianUs": 9833.696,
+            "p95Us": 10111.776,
+            "minUs": 9224.288
+          },
+          "composition": {
+            "medianUs": 216.864,
+            "p95Us": 218.08,
+            "minUs": 210.464
+          },
+          "opticalFlow": {
+            "medianUs": 21492.0,
+            "p95Us": 22666.0,
+            "minUs": 21281.0
+          },
+          "gpuStageSum": {
+            "medianUs": 31603.248,
+            "p95Us": 32256.344,
+            "minUs": 30811.992
+          },
+          "cpuRecording": {
+            "medianUs": 484.9,
+            "p95Us": 828.4,
+            "minUs": 462.5
+          },
+          "run": 1,
+          "caseIndex": 2
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.299,
+          "neural": {
+            "medianUs": 4287.584,
+            "p95Us": 4952.8,
+            "minUs": 4094.176
+          },
+          "composition": {
+            "medianUs": 49.728,
+            "p95Us": 50.08,
+            "minUs": 42.624
+          },
+          "opticalFlow": {
+            "medianUs": 11154.0,
+            "p95Us": 11574.0,
+            "minUs": 10766.0
+          },
+          "gpuStageSum": {
+            "medianUs": 15630.264,
+            "p95Us": 15939.424,
+            "minUs": 15117.92
+          },
+          "cpuRecording": {
+            "medianUs": 480.7,
+            "p95Us": 643.6,
+            "minUs": 458.2
+          },
+          "run": 1,
+          "caseIndex": 1
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.055,
+          "neural": {
+            "medianUs": 4110.944,
+            "p95Us": 4545.408,
+            "minUs": 4089.536
+          },
+          "composition": {
+            "medianUs": 49.792,
+            "p95Us": 50.752,
+            "minUs": 48.96
+          },
+          "opticalFlow": {
+            "medianUs": 2520.0,
+            "p95Us": 2731.0,
+            "minUs": 2299.0
+          },
+          "gpuStageSum": {
+            "medianUs": 6802.024,
+            "p95Us": 7227.36,
+            "minUs": 6460.968
+          },
+          "cpuRecording": {
+            "medianUs": 451.6,
+            "p95Us": 485.9,
+            "minUs": 444.5
+          },
+          "run": 1,
+          "caseIndex": 0
+        }
+      ]
+    },
+    {
+      "sourceId": "7ffa54133bd3493c907e06a55c1cbd33",
+      "passed": true,
+      "timingComparable": false,
+      "maxRunVariationPercent": 137.1936522178934,
+      "gpuBefore": [
+        "name, driver_version, pstate, clocks.current.graphics [MHz], power.draw [W], temperature.gpu, utilization.gpu [%]",
+        "NVIDIA GeForce RTX 5090, 617.14, P0, 2782 MHz, 416.12 W, 75, 92 %"
+      ],
+      "gpuAfter": [
+        "name, driver_version, pstate, clocks.current.graphics [MHz], power.draw [W], temperature.gpu, utilization.gpu [%]",
+        "NVIDIA GeForce RTX 5090, 617.14, P0, 2820 MHz, 112.63 W, 66, 64 %"
+      ],
+      "results": [
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.781,
+          "neural": {
+            "medianUs": 8691.616,
+            "p95Us": 11662.08,
+            "minUs": 6270.048
+          },
+          "composition": {
+            "medianUs": 51.424,
+            "p95Us": 52.96,
+            "minUs": 49.984
+          },
+          "opticalFlow": {
+            "medianUs": 8618.0,
+            "p95Us": 12229.0,
+            "minUs": 5269.0
+          },
+          "gpuStageSum": {
+            "medianUs": 17933.472,
+            "p95Us": 21776.392,
+            "minUs": 12193.488
+          },
+          "cpuRecording": {
+            "medianUs": 1189.2,
+            "p95Us": 3278.9,
+            "minUs": 919.2
+          },
+          "run": 0,
+          "caseIndex": 0
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.78,
+          "neural": {
+            "medianUs": 7289.408,
+            "p95Us": 9109.376,
+            "minUs": 4999.232
+          },
+          "composition": {
+            "medianUs": 51.264,
+            "p95Us": 52.896,
+            "minUs": 49.472
+          },
+          "opticalFlow": {
+            "medianUs": 14294.0,
+            "p95Us": 17062.0,
+            "minUs": 11883.0
+          },
+          "gpuStageSum": {
+            "medianUs": 21014.896,
+            "p95Us": 23909.2,
+            "minUs": 17531.344
+          },
+          "cpuRecording": {
+            "medianUs": 761.9,
+            "p95Us": 999.0,
+            "minUs": 676.3
+          },
+          "run": 0,
+          "caseIndex": 1
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 1.0,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 150994944,
+          "wallSeconds": 2.58,
+          "neural": {
+            "medianUs": 16823.296,
+            "p95Us": 22933.024,
+            "minUs": 11499.616
+          },
+          "composition": {
+            "medianUs": 441.92,
+            "p95Us": 2421.984,
+            "minUs": 219.36
+          },
+          "opticalFlow": {
+            "medianUs": 28015.0,
+            "p95Us": 30649.0,
+            "minUs": 23626.0
+          },
+          "gpuStageSum": {
+            "medianUs": 45953.344,
+            "p95Us": 51269.592,
+            "minUs": 39825.776
+          },
+          "cpuRecording": {
+            "medianUs": 1082.7,
+            "p95Us": 1740.7,
+            "minUs": 739.5
+          },
+          "run": 0,
+          "caseIndex": 2
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 2.545,
+          "neural": {
+            "medianUs": 20579.424,
+            "p95Us": 27164.672,
+            "minUs": 14397.728
+          },
+          "composition": {
+            "medianUs": 482.496,
+            "p95Us": 2918.24,
+            "minUs": 465.056
+          },
+          "opticalFlow": {
+            "medianUs": 13152.0,
+            "p95Us": 17800.0,
+            "minUs": 10100.0
+          },
+          "gpuStageSum": {
+            "medianUs": 35250.568,
+            "p95Us": 39538.296,
+            "minUs": 30889.936
+          },
+          "cpuRecording": {
+            "medianUs": 899.1,
+            "p95Us": 2942.2,
+            "minUs": 720.1
+          },
+          "run": 0,
+          "caseIndex": 3
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 2.303,
+          "neural": {
+            "medianUs": 20284.192,
+            "p95Us": 28726.272,
+            "minUs": 11426.592
+          },
+          "composition": {
+            "medianUs": 482.688,
+            "p95Us": 1152.128,
+            "minUs": 469.92
+          },
+          "opticalFlow": {
+            "medianUs": 11605.0,
+            "p95Us": 17237.0,
+            "minUs": 6985.0
+          },
+          "gpuStageSum": {
+            "medianUs": 34384.304,
+            "p95Us": 48584.336,
+            "minUs": 18910.928
+          },
+          "cpuRecording": {
+            "medianUs": 846.2,
+            "p95Us": 1935.0,
+            "minUs": 625.6
+          },
+          "run": 0,
+          "caseIndex": 4
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 187161724,
+          "wallSeconds": 3.314,
+          "neural": {
+            "medianUs": 16477.824,
+            "p95Us": 33735.328,
+            "minUs": 12252.832
+          },
+          "composition": {
+            "medianUs": 8419.264,
+            "p95Us": 18418.88,
+            "minUs": 461.6
+          },
+          "opticalFlow": {
+            "medianUs": 24453.0,
+            "p95Us": 27586.0,
+            "minUs": 9100.0
+          },
+          "gpuStageSum": {
+            "medianUs": 54609.968,
+            "p95Us": 61812.864,
+            "minUs": 43346.224
+          },
+          "cpuRecording": {
+            "medianUs": 897.6,
+            "p95Us": 1194.2,
+            "minUs": 738.5
+          },
+          "run": 0,
+          "caseIndex": 5
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 141557760,
+          "wallSeconds": 3.076,
+          "neural": {
+            "medianUs": 11382.56,
+            "p95Us": 12550.432,
+            "minUs": 9185.728
+          },
+          "composition": {
+            "medianUs": 480.544,
+            "p95Us": 482.592,
+            "minUs": 475.904
+          },
+          "opticalFlow": {
+            "medianUs": 32142.0,
+            "p95Us": 47136.0,
+            "minUs": 20640.0
+          },
+          "gpuStageSum": {
+            "medianUs": 45321.016,
+            "p95Us": 58778.24,
+            "minUs": 33668.96
+          },
+          "cpuRecording": {
+            "medianUs": 903.6,
+            "p95Us": 1145.2,
+            "minUs": 700.5
+          },
+          "run": 0,
+          "caseIndex": 6
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.5,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 141557760,
+          "wallSeconds": 2.995,
+          "neural": {
+            "medianUs": 11119.616,
+            "p95Us": 15407.36,
+            "minUs": 9478.272
+          },
+          "composition": {
+            "medianUs": 481.696,
+            "p95Us": 485.312,
+            "minUs": 476.576
+          },
+          "opticalFlow": {
+            "medianUs": 31418.0,
+            "p95Us": 46044.0,
+            "minUs": 10441.0
+          },
+          "gpuStageSum": {
+            "medianUs": 43719.424,
+            "p95Us": 57441.088,
+            "minUs": 26266.152
+          },
+          "cpuRecording": {
+            "medianUs": 1014.4,
+            "p95Us": 1616.4,
+            "minUs": 807.3
+          },
+          "run": 1,
+          "caseIndex": 6
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.65,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 187161724,
+          "wallSeconds": 3.216,
+          "neural": {
+            "medianUs": 29945.28,
+            "p95Us": 43041.92,
+            "minUs": 11729.408
+          },
+          "composition": {
+            "medianUs": 4157.6,
+            "p95Us": 18171.808,
+            "minUs": 464.736
+          },
+          "opticalFlow": {
+            "medianUs": 24682.0,
+            "p95Us": 27399.0,
+            "minUs": 8070.0
+          },
+          "gpuStageSum": {
+            "medianUs": 54195.48,
+            "p95Us": 67833.776,
+            "minUs": 43247.528
+          },
+          "cpuRecording": {
+            "medianUs": 1005.6,
+            "p95Us": 1601.9,
+            "minUs": 739.0
+          },
+          "run": 1,
+          "caseIndex": 5
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "fast",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 3.19,
+          "neural": {
+            "medianUs": 31403.744,
+            "p95Us": 48073.504,
+            "minUs": 11340.928
+          },
+          "composition": {
+            "medianUs": 473.024,
+            "p95Us": 2113.728,
+            "minUs": 463.008
+          },
+          "opticalFlow": {
+            "medianUs": 23162.0,
+            "p95Us": 41934.0,
+            "minUs": 6940.0
+          },
+          "gpuStageSum": {
+            "medianUs": 58998.736,
+            "p95Us": 88004.72,
+            "minUs": 18755.264
+          },
+          "cpuRecording": {
+            "medianUs": 846.6,
+            "p95Us": 1077.1,
+            "minUs": 668.7
+          },
+          "run": 1,
+          "caseIndex": 4
+        },
+        {
+          "passed": true,
+          "focusDimension": 3072,
+          "stereoDimension": 6144,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 224133120,
+          "wallSeconds": 1.746,
+          "neural": {
+            "medianUs": 12933.632,
+            "p95Us": 13486.976,
+            "minUs": 11324.352
+          },
+          "composition": {
+            "medianUs": 669.248,
+            "p95Us": 831.424,
+            "minUs": 458.72
+          },
+          "opticalFlow": {
+            "medianUs": 8791.0,
+            "p95Us": 9179.0,
+            "minUs": 8484.0
+          },
+          "gpuStageSum": {
+            "medianUs": 22409.368,
+            "p95Us": 23296.4,
+            "minUs": 20676.384
+          },
+          "cpuRecording": {
+            "medianUs": 895.8,
+            "p95Us": 1641.5,
+            "minUs": 664.8
+          },
+          "run": 1,
+          "caseIndex": 3
+        },
+        {
+          "passed": true,
+          "focusDimension": 2048,
+          "stereoDimension": 4096,
+          "neuralScale": 1.0,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": false,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 150994944,
+          "wallSeconds": 1.83,
+          "neural": {
+            "medianUs": 9494.624,
+            "p95Us": 9963.232,
+            "minUs": 9216.512
+          },
+          "composition": {
+            "medianUs": 217.952,
+            "p95Us": 219.328,
+            "minUs": 211.424
+          },
+          "opticalFlow": {
+            "medianUs": 21537.0,
+            "p95Us": 22588.0,
+            "minUs": 21357.0
+          },
+          "gpuStageSum": {
+            "medianUs": 31462.352,
+            "p95Us": 32405.056,
+            "minUs": 30897.544
+          },
+          "cpuRecording": {
+            "medianUs": 551.0,
+            "p95Us": 785.8,
+            "minUs": 486.5
+          },
+          "run": 1,
+          "caseIndex": 2
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 100,
+          "flowPreset": "slow",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.327,
+          "neural": {
+            "medianUs": 4117.888,
+            "p95Us": 4463.04,
+            "minUs": 4096.384
+          },
+          "composition": {
+            "medianUs": 49.344,
+            "p95Us": 50.432,
+            "minUs": 48.512
+          },
+          "opticalFlow": {
+            "medianUs": 11235.0,
+            "p95Us": 11823.0,
+            "minUs": 11071.0
+          },
+          "gpuStageSum": {
+            "medianUs": 15580.976,
+            "p95Us": 15996.472,
+            "minUs": 15216.408
+          },
+          "cpuRecording": {
+            "medianUs": 475.2,
+            "p95Us": 543.6,
+            "minUs": 457.4
+          },
+          "run": 1,
+          "caseIndex": 1
+        },
+        {
+          "passed": true,
+          "focusDimension": 1024,
+          "stereoDimension": 2048,
+          "neuralScale": 0.75,
+          "flowScale": 50,
+          "flowPreset": "medium",
+          "bidirectional": true,
+          "samples": 24,
+          "warmupFrames": 6,
+          "neuralEvaluations": 60,
+          "neuralFailures": 0,
+          "codecCreations": 2,
+          "steadyStateRecreations": 0,
+          "neuralIntermediateBytesPerView": 24903680,
+          "wallSeconds": 1.119,
+          "neural": {
+            "medianUs": 4551.264,
+            "p95Us": 5151.904,
+            "minUs": 4116.896
+          },
+          "composition": {
+            "medianUs": 48.672,
+            "p95Us": 65.824,
+            "minUs": 42.016
+          },
+          "opticalFlow": {
+            "medianUs": 2717.0,
+            "p95Us": 4321.0,
+            "minUs": 2383.0
+          },
+          "gpuStageSum": {
+            "medianUs": 7560.688,
+            "p95Us": 10099.864,
+            "minUs": 6605.488
+          },
+          "cpuRecording": {
+            "medianUs": 697.5,
+            "p95Us": 1076.4,
+            "minUs": 466.7
+          },
+          "run": 1,
+          "caseIndex": 0
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 1
+}

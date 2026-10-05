@@ -1,0 +1,250 @@
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index 4cfd3da..20da322 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -210,11 +210,28 @@ Nanoseconds rebase_display_time_correction(
+ //             max_downshift_window), with no missed slot in it (the layer
+ //             reports missed slots in 2X only: in 3X they are the release
+ //             delay probing), and at least nine frames in ten judged.
+-//   2X -> 3X  p90 value > two periods, or upshift_late_events missed slots,
+-//             over the last upshift_window (0.75 s).
++//   2X -> 3X  p90 value > two periods over the last upshift_window (0.75 s),
++//             or upshift_late_episodes episodes of missed slots over the
++//             last upshift_late_window (2 s).
+ //
+ // Never within min_dwell of the previous switch, and samples within settle of
+ // a switch are not counted: the pipeline re-phases once on a switch.
++//
++// DCS VR Control (0005): one hitch is not a trend. Live DCS flights in 2X
++// with p90 work of 12-16 ms (of a 22.2 ms budget) went back to 3X every time
++// a single application frame ran long - 52, 72 or 100 ms, terrain streaming
++// or a view change - because that one frame left two first synthetics
++// unwritten 20 ms apart, and two missed slots in 0.75 s was the whole test.
++// Each such switch re-phases the pipeline, moves the display time the
++// application is told by a whole period or two, and is followed by a
++// downshift a few seconds later: a hitch became four. Missed slots now count
++// as episodes - every miss within late_episode_gap of the first miss of an
++// episode belongs to it - and it takes several episodes within a longer
++// window. An application that really cannot hold 2X misses a slot every few
++// frames and gets there within a few hundred milliseconds, and its p90 work
++// says so as well. Frames longer than stall (a pause, a loading screen, a
++// menu: one sample of 15 s was seen) say nothing about the rate an
++// application can hold and are not counted at all.
+ struct AdaptiveConfig {
+     double downshift_fraction{0.85};
+     Nanoseconds downshift_window{3 * kSecond};
+@@ -224,7 +241,10 @@ struct AdaptiveConfig {
+     Nanoseconds settle{1 * kSecond};
+     // An upshift this soon after a downshift is a flap.
+     Nanoseconds flap_window{20 * kSecond};
+-    std::uint32_t upshift_late_events{2};
++    Nanoseconds late_episode_gap{100 * kMillisecond};
++    Nanoseconds upshift_late_window{2 * kSecond};
++    std::uint32_t upshift_late_episodes{3};
++    Nanoseconds stall{250 * kMillisecond};
+     std::uint32_t min_samples_down{20};
+     std::uint32_t min_samples_up{6};
+ };
+@@ -247,6 +267,8 @@ struct AdaptiveStats {
+     Nanoseconds p90{-1};
+     // Judged frames.
+     std::uint32_t samples{};
++    // Episodes of missed slots (DCS VR Control 0005: not single misses; see
++    // AdaptiveConfig).
+     std::uint32_t late{};
+     // Each component on its own, -1 without samples.
+     Nanoseconds cpu_p90{-1};
+@@ -272,11 +294,14 @@ public:
+     // Starts (or restarts) in `mode` at `now`; the dwell counts from here.
+     void start(std::uint32_t mode, Nanoseconds now) noexcept;
+     // One application frame: its CPU time and its GPU time (negative: not
+-    // measured). A negative CPU time is ignored.
++    // measured). A negative CPU time is ignored, and so is a frame either of
++    // whose times is over the stall bound.
+     void add_frame(Nanoseconds at, Nanoseconds cpu, Nanoseconds gpu) noexcept;
+     // One frame's pipeline latency, release to first synthetic written.
+     // Diagnostic, and the fallback for frames without a GPU figure.
+     void add_latency(Nanoseconds at, Nanoseconds latency) noexcept;
++    // Missed slots at `at`. Counted as episodes: one that falls within
++    // late_episode_gap of the first miss of the current episode belongs to it.
+     void add_late(Nanoseconds at, std::uint32_t count = 1) noexcept;
+     [[nodiscard]] AdaptiveDecision evaluate(
+         Nanoseconds now, Nanoseconds period) const noexcept;
+@@ -308,6 +333,7 @@ private:
+     std::array<Nanoseconds, kWorkSamples> latency_{};
+     std::size_t latency_count_{};
+     std::size_t latency_next_{};
++    // Each entry is the first miss of an episode.
+     std::array<Nanoseconds, kLateEvents> late_at_{};
+     std::size_t late_count_{};
+     std::size_t late_next_{};
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+index 3c81a2b..6e4b5d0 100644
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -261,6 +261,10 @@ void AdaptiveFrameGenController::add_frame(
+     if (cpu < 0) {
+         return;
+     }
++    // DCS VR Control (0005): a stall is not a rate; see AdaptiveConfig.
++    if (cpu > config_.stall || gpu > config_.stall) {
++        return;
++    }
+     frame_at_[frame_next_] = at;
+     cpu_[frame_next_] = cpu;
+     gpu_[frame_next_] = gpu < 0 ? -1 : gpu;
+@@ -270,7 +274,7 @@ void AdaptiveFrameGenController::add_frame(
+ 
+ void AdaptiveFrameGenController::add_latency(
+     Nanoseconds at, Nanoseconds latency) noexcept {
+-    if (latency < 0) {
++    if (latency < 0 || latency > config_.stall) {
+         return;
+     }
+     latency_at_[latency_next_] = at;
+@@ -280,11 +284,22 @@ void AdaptiveFrameGenController::add_latency(
+ }
+ 
+ void AdaptiveFrameGenController::add_late(Nanoseconds at, std::uint32_t count) noexcept {
+-    for (std::uint32_t index = 0; index < count; ++index) {
+-        late_at_[late_next_] = at;
+-        late_next_ = (late_next_ + 1) % kLateEvents;
+-        late_count_ = std::min(late_count_ + 1, kLateEvents);
++    if (count == 0) {
++        return;
++    }
++    // DCS VR Control (0005): an episode, not a count. Anchored at its first
++    // miss rather than extended by each one, so misses that keep coming open
++    // a new episode every late_episode_gap.
++    if (late_count_ != 0) {
++        const Nanoseconds episode =
++            late_at_[(late_next_ + kLateEvents - 1) % kLateEvents];
++        if (at >= episode && at - episode < config_.late_episode_gap) {
++            return;
++        }
+     }
++    late_at_[late_next_] = at;
++    late_next_ = (late_next_ + 1) % kLateEvents;
++    late_count_ = std::min(late_count_ + 1, kLateEvents);
+ }
+ 
+ namespace {
+@@ -381,10 +396,12 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+     }
+     decision.threshold = two_periods;
+     decision.stats = stats(now, config_.upshift_window);
++    // Missed slots over their own, longer window (0005).
++    decision.stats.late = stats(now, config_.upshift_late_window).late;
+     if (now - last_switch_ < config_.min_dwell) {
+         return decision;
+     }
+-    if (decision.stats.late >= config_.upshift_late_events) {
++    if (decision.stats.late >= config_.upshift_late_episodes) {
+         decision.target = 3;
+         decision.reason = AdaptiveReason::late;
+     } else if (decision.stats.samples >= config_.min_samples_up &&
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index 6406bcb..c88ca11 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -610,6 +610,100 @@ void adaptive_tests() {
+         require(decision.target == 3 && decision.reason == AdaptiveReason::slow &&
+             decision.stats.limiter == AdaptiveLimiter::cpu, "CPU-bound upshift");
+     }
++    {
++        // DCS VR Control (0005), the live flights' shape: steady 2X at 12-16
++        // ms of work, with one long application frame now and then (52, 72,
++        // 100 ms) that leaves two first synthetics unwritten 20 ms apart.
++        // That used to be the whole test for 2X -> 3X; it is one episode now.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        AdaptiveDecision decision{};
++        bool moved = false;
++        std::uint32_t frame = 0;
++        while (now < start + 60 * kSecond && !moved) {
++            ++frame;
++            // A hitch every 7 s: one 72 ms frame, then two misses 20 ms apart.
++            const bool hitch = frame % 315 == 0;
++            now += hitch ? 72 * kMillisecond : 2 * kPeriod;
++            controller.add_frame(now, hitch ? 70 * kMillisecond : 14 * kMillisecond, 15 * kMillisecond);
++            if (hitch) {
++                controller.add_late(now);
++                controller.add_late(now + 20 * kMillisecond);
++            }
++            decision = controller.evaluate(now, kPeriod);
++            moved = decision.target != 0;
++        }
++        require(!moved, "single hitches do not leave 2X");
++        require(controller.stats(now, 60 * kSecond).late >= 5, "each hitch is one episode");
++    }
++    {
++        // A longer hitch, misses over 150 ms: two episodes, still not enough.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        const Nanoseconds at = start + 10 * kSecond;
++        controller.add_late(at);
++        controller.add_late(at + 50 * kMillisecond);
++        controller.add_late(at + 99 * kMillisecond);
++        controller.add_late(at + 150 * kMillisecond);
++        const auto stats = controller.stats(at + kSecond, 2 * kSecond);
++        require(stats.late == 2, "misses within the gap of an episode's first belong to it");
++        require(controller.evaluate(at + 200 * kMillisecond, kPeriod).target == 0, "two episodes stay in 2X");
++        // A third, distinct one inside the window: the trouble is sustained.
++        controller.add_late(at + 900 * kMillisecond);
++        const auto decision = controller.evaluate(at + 900 * kMillisecond, kPeriod);
++        require(decision.target == 3 && decision.reason == AdaptiveReason::late && decision.stats.late == 3,
++            "three episodes in the late window go to 3X");
++        // The same three spread wider than the window do not.
++        AdaptiveFrameGenController spread;
++        spread.start(2, start);
++        spread.add_late(at);
++        spread.add_late(at + kSecond);
++        spread.add_late(at + 2100 * kMillisecond);
++        require(spread.evaluate(at + 2100 * kMillisecond, kPeriod).target == 0, "episodes outside the window");
++    }
++    {
++        // An application that cannot hold 2X misses continuously: one miss
++        // every 50 ms is an episode every 100 ms, and it leaves 2X as soon as
++        // the dwell allows.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        AdaptiveDecision decision{};
++        while (now < start + 10 * kSecond && decision.target == 0) {
++            now += 50 * kMillisecond;
++            controller.add_frame(now, 14 * kMillisecond, 15 * kMillisecond);
++            controller.add_late(now);
++            decision = controller.evaluate(now, kPeriod);
++        }
++        require(decision.target == 3 && decision.reason == AdaptiveReason::late, "sustained misses go to 3X");
++        require(now - start < 5 * kSecond + 100 * kMillisecond, "right after the dwell");
++    }
++    {
++        // A stall (a pause, a loading screen) is not a rate: its frame is not
++        // a sample, in either direction.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start + 10 * kSecond;
++        for (int i = 0; i < 5; ++i) {
++            now += 2 * kPeriod;
++            controller.add_frame(now, 14 * kMillisecond, 15 * kMillisecond);
++        }
++        now += 15 * kSecond;
++        controller.add_frame(now, 15 * kSecond, 15 * kSecond);
++        controller.add_latency(now, 15 * kSecond);
++        for (int i = 0; i < 2; ++i) {
++            now += 2 * kPeriod;
++            controller.add_frame(now, 14 * kMillisecond, 15 * kMillisecond);
++        }
++        const auto stats = controller.stats(now, 20 * kSecond);
++        require(stats.frames == 7 && stats.p90 == 15 * kMillisecond && stats.latency_p90 == -1,
++            "stall frames are not counted");
++        require(controller.evaluate(now, kPeriod).target == 0, "a stall does not leave 2X");
++        // But a frame of 200 ms, under the stall bound, is still evidence.
++        controller.add_frame(now + 1, 200 * kMillisecond, 15 * kMillisecond);
++        require(controller.stats(now + 1, 20 * kSecond).frames == 8, "slow frames count");
++    }
+     {
+         // Steady 2X with margin stays there.
+         AdaptiveFrameGenController controller;

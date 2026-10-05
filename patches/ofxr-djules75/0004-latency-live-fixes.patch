@@ -1,0 +1,2956 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d695966..8a3a350 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -213,6 +213,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+     add_library(xrfg_d3d12_history STATIC
+         src/d3d11/d3d11_d3d12_interop.cpp
+         src/d3d11/d3d11_bridge.cpp
++        src/d3d11/frame_gpu_timer.cpp
+         src/vulkan/vulkan_d3d12_interop.cpp
+         src/d3d12/d3d12_history.cpp
+         src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -815,6 +816,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-frame-gen"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_frame_gen.cmake")
+         set_tests_properties(xrfg_layer_adaptive_frame_gen PROPERTIES TIMEOUT 120)
++        # DCS VR Control (0004): adaptive control judges throughput, not
++        # pipeline latency. An application whose frames take far longer end to
++        # end than either its CPU or its GPU needs per frame goes to 2X; one
++        # whose GPU cannot hold two periods stays in 3X.
++        foreach(case down gpu)
++            add_test(
++                NAME xrfg_layer_adaptive_throughput_${case}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DADAPTIVE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-throughput-${case}"
++                    "-DCASE=${case}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_throughput.cmake")
++            set_tests_properties(xrfg_layer_adaptive_throughput_${case} PROPERTIES TIMEOUT 120)
++        endforeach()
+         # Adaptive starting in 2X with the deeper pipeline off still reserves
+         # 3X's synthetic ring (the call chain expects two synthetic slots
+         # whenever adaptive_frame_gen=1), and the scenarios hold as they are.
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 9e9a09a..dfe9318 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -177,20 +177,35 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // had headroom for 2X, 2 its p90 work was over two display periods in
+     // 2X, 3 2X missed slots, 4 the ini's triple_frame_gen changed, 5 adaptive
+     // turned on (a=0) or off (b=0). a= the multiplier before, b= after, c= the
+-    // p90 work in microseconds that decided it (0 when not measured).
++    // p90 in microseconds that decided it (0004: of max(CPU, GPU) per
++    // application frame, see adaptive_throughput; 0 when not measured).
+     adaptive_switch,
+     // DCS VR Control. Once a second while the presenter runs: result= the
+-    // frame multiplier, plus 10 under adaptive control; a= the p90 of the
+-    // application's work over that second in microseconds (release to first
+-    // synthetic written, so CPU and GPU), 0 without samples; b= samples in
+-    // bits 0-15, missed slots in bits 16-31; c= the display time correction
+-    // in microseconds.
++    // frame multiplier, plus 10 under adaptive control; a= the p90 over that
++    // second of the value adaptive control judges, max(CPU, GPU) per
++    // application frame (see adaptive_throughput), in microseconds, 0
++    // without samples; b= judged frames in bits 0-15, missed slots in bits
++    // 16-31; c= the display time correction in microseconds.
+     latency_status,
+     // DCS VR Control. The display time the application is told moved: result=
+     // the median residual that moved it, real presentation minus told, in
+     // microseconds (signed); a= the correction before, b= after, both in
+     // microseconds; c= the shape (0 2X, 1 2X deep, 2 3X).
+     display_time_correction,
++    // DCS VR Control (0004). Once a second under adaptive control, beside
++    // latency_status, over the same second; all times p90s in microseconds,
++    // 0 without samples.
++    //   result=1: a= CPU per application frame (its interval less what it
++    //     spent blocked in the layer), b= GPU per application frame (the
++    //     application's frame on its own context or queue plus the layer's
++    //     synthesis and copies), c= the limiter (1 CPU, 2 GPU, 0 neither
++    //     measured) plus 10 x the GPU source (0 none, 1 D3D11 context
++    //     bracket, 2 D3D12 queue bracket).
++    //   result=2: a= the application's own GPU bracket, b= the layer's GPU
++    //     time per application frame (synthesis and bridge copies), c= the
++    //     pipeline latency, release to first synthetic written (what the
++    //     first version of adaptive control judged; diagnostic now).
++    adaptive_throughput,
+ };
+ 
+ struct BridgeFlightToken {
+@@ -239,6 +254,16 @@ public:
+         std::uint64_t b = 0,
+         std::uint64_t c = 0) noexcept;
+ 
++    // DCS VR Control (0004): an instant record that carries a duration
++    // measured elsewhere (a GPU span) in its dur_us column.
++    void timed_event(
++        BridgeFlightOperation operation,
++        std::int64_t result,
++        std::uint64_t duration_us,
++        std::uint64_t a = 0,
++        std::uint64_t b = 0,
++        std::uint64_t c = 0) noexcept;
++
+ private:
+     struct Impl;
+     std::unique_ptr<Impl> impl_;
+diff --git a/include/xrfg/d3d11_bridge.hpp b/include/xrfg/d3d11_bridge.hpp
+index b1385a5..e473c87 100644
+--- a/include/xrfg/d3d11_bridge.hpp
++++ b/include/xrfg/d3d11_bridge.hpp
+@@ -132,6 +132,14 @@ public:
+ 
+     [[nodiscard]] HRESULT wait_for_idle() noexcept;
+ 
++    // DCS VR Control (0004): the GPU time of this swapchain's copies into
++    // the runtime's images that have completed since the last call, in
++    // nanoseconds (two timestamps around each copy list on the layer's
++    // queue, read back without waiting). Part of the layer's own GPU cost
++    // per application frame, for adaptive 2X/3X. Zero where the queue
++    // cannot time.
++    [[nodiscard]] std::int64_t consume_copy_gpu_nanoseconds() noexcept;
++
+ private:
+     struct Impl;
+     std::unique_ptr<Impl> impl_;
+diff --git a/include/xrfg/frame_gpu_timer.hpp b/include/xrfg/frame_gpu_timer.hpp
+new file mode 100644
+index 0000000..e3a2495
+--- /dev/null
++++ b/include/xrfg/frame_gpu_timer.hpp
+@@ -0,0 +1,130 @@
++#pragma once
++// DCS VR Control (0004): the GPU time of an application frame, for adaptive
++// 2X/3X (xrfg::latency::AdaptiveFrameGenController).
++//
++// A bracket of two GPU timestamps on the application's own submission path:
++// opened when the layer releases the application to render a frame (its
++// xrEndFrame returns) and closed when that frame comes back (its next
++// xrEndFrame is entered), both from the thread that calls xrEndFrame. Read
++// back asynchronously - a bracket is collected once the GPU has passed it,
++// never waited for - so a frame's figure arrives a frame or two after it.
++//
++// What a bracket covers, and what it does not:
++//  - It is elapsed GPU time between the two marks on that one context or
++//    queue, not exclusive busy time. Whatever else the GPU runs in the same
++//    stretch - the layer's synthesis, the runtime's compositor, another
++//    process - counts, and so does the GPU waiting for the application's
++//    CPU to submit. An application that submits as it records (the D3D11
++//    immediate context flushes as its command buffer fills; DCS World) keeps
++//    that wait small; one that submits its whole frame at the end has a
++//    bracket nearer CPU plus GPU. Every error is an overestimate: adaptive
++//    control can only be kept in 3X by it, never moved to 2X.
++//  - GPU work the application submits on other contexts or queues is
++//    covered only where the bracketed one waits for it. D3D11 has one
++//    immediate context per device, and every deferred context's work is
++//    executed through it, so a D3D11 application's whole frame is inside.
++//    A D3D12 application's work on other queues (async compute, copy) is
++//    inside only as far as the queue it hands the layer waits on it.
++//  - Work queued between a close and the next open - another thread
++//    submitting while the layer holds the render thread inside xrEndFrame -
++//    would fall between brackets. D3D11 cannot do that (the immediate context
++//    is single-threaded). On D3D12 the open mark's own GPU time is compared,
++//    through the queue's clock calibration, with the moment it was submitted
++//    and with the previous close: if the queue was still busy when it was
++//    submitted, the stretch from the later of the two to the open mark is
++//    added to the bracket.
++//  - The marks are queued on the context from the xrEndFrame thread. A
++//    D3D11 immediate context is single-threaded; the bridge already uses it
++//    from that thread at every swapchain release, and this adds two queries
++//    and a flush per frame there.
++#include <cstddef>
++#include <cstdint>
++#include <span>
++
++#include <d3d11.h>
++#include <d3d12.h>
++#include <wrl/client.h>
++
++namespace xrfg {
++
++class FrameGpuTimer {
++public:
++    virtual ~FrameGpuTimer() = default;
++    // The application was released to render a frame.
++    virtual void open() noexcept = 0;
++    // Its frame came back. A close with no open bracket does nothing.
++    virtual void close() noexcept = 0;
++    // Brackets the GPU has completed since the last call, oldest first, in
++    // nanoseconds; never waits. Returns how many were written. A bracket the
++    // GPU reported unreliable (D3D11 disjoint) is dropped.
++    virtual std::size_t collect(std::span<std::int64_t> output) noexcept = 0;
++};
++
++// On a D3D11 application's immediate context: TIMESTAMP_DISJOINT around two
++// TIMESTAMP queries.
++class D3D11FrameGpuTimer final : public FrameGpuTimer {
++public:
++    [[nodiscard]] HRESULT initialize(
++        ID3D11Device* device, ID3D11DeviceContext* context) noexcept;
++    void open() noexcept override;
++    void close() noexcept override;
++    std::size_t collect(std::span<std::int64_t> output) noexcept override;
++
++private:
++    static constexpr std::size_t kSlots = 8;
++    struct Slot {
++        Microsoft::WRL::ComPtr<ID3D11Query> disjoint;
++        Microsoft::WRL::ComPtr<ID3D11Query> begin;
++        Microsoft::WRL::ComPtr<ID3D11Query> end;
++        bool pending{};
++    };
++    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
++    Slot slots_[kSlots];
++    std::size_t next_{};     // the slot the next open uses
++    std::size_t oldest_{};   // the oldest pending slot
++    std::size_t pending_{};
++    bool open_{};
++};
++
++// On a D3D12 application's queue: two one-query command lists per bracket,
++// resolved into a readback buffer, completion told by a fence of its own.
++class D3D12QueueFrameGpuTimer final : public FrameGpuTimer {
++public:
++    [[nodiscard]] HRESULT initialize(
++        ID3D12Device* device, ID3D12CommandQueue* queue) noexcept;
++    void open() noexcept override;
++    void close() noexcept override;
++    std::size_t collect(std::span<std::int64_t> output) noexcept override;
++
++private:
++    static constexpr std::size_t kSlots = 8;
++    struct Slot {
++        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
++        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> open_list;
++        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> close_list;
++        std::uint64_t fence_value{};
++        // QueryPerformanceCounter when the open mark was submitted.
++        std::int64_t open_submitted_qpc{};
++        bool pending{};
++    };
++    [[nodiscard]] std::int64_t to_qpc(std::uint64_t ticks) const noexcept;
++    [[nodiscard]] bool record(Slot& slot, std::size_t index) noexcept;
++    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
++    Microsoft::WRL::ComPtr<ID3D12QueryHeap> heap_;
++    Microsoft::WRL::ComPtr<ID3D12Resource> readback_;
++    Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
++    std::uint64_t frequency_{};
++    std::uint64_t qpc_frequency_{};
++    std::uint64_t calibration_ticks_{};
++    std::uint64_t calibration_qpc_{};
++    // The previous bracket's close mark, on the QPC timeline; -1 for none.
++    std::int64_t previous_close_qpc_{-1};
++    std::uint64_t next_fence_value_{1};
++    Slot slots_[kSlots];
++    std::size_t next_{};
++    std::size_t oldest_{};
++    std::size_t pending_{};
++    bool open_{};
++};
++
++} // namespace xrfg
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index 38cdf48..4cfd3da 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -60,6 +60,9 @@ struct TripleReleaseTuner {
+     // First synthetics handed to the runtime before their output was written,
+     // this window. Recorded for the log whatever the test in force.
+     std::uint32_t window_unwritten{};
++    // DCS VR Control (0004): the slack test's window; see
++    // observe_triple_slack.
++    std::array<Nanoseconds, kWindowFrames> slack{};
+ 
+     void reset() noexcept { *this = TripleReleaseTuner{}; }
+ };
+@@ -71,12 +74,48 @@ struct TripleReleaseWindow {
+     std::uint32_t late{};
+     std::uint32_t unwritten{};
+     std::uint32_t hold{};
++    // The slack test only: the window's second-lowest and median slack.
++    bool slack_valid{};
++    Nanoseconds slack_low{};
++    Nanoseconds slack_median{};
+ };
+ 
+ // One frame's observation. A non-positive period is ignored.
+ TripleReleaseWindow observe_triple_release(
+     TripleReleaseTuner& tuner, Nanoseconds period, bool late) noexcept;
+ 
++// DCS VR Control (0004): the release delay steered on slack rather than on a
++// yes/no lateness test, for runtimes that pace the presenter with their own
++// wait (everything but SteamVR).
++//
++// Why: judged yes/no at the first synthetic's own hand-over, a first live
++// flight on Pimax OpenXR (DCS World, 90 Hz, 3X) logged "delay 0, 30 of 30
++// late, 30 unwritten, ceiling 22.2 ms" every second for the whole flight.
++// Its frames were queued ~1.5 ms before their first synthetic's slot and
++// that synthetic was written ~30 ms later: the delay could only ever be at
++// zero, which is right, but the test could not tell that from a title with
++// 28 ms of room and two slow frames a second - with any lateness at zero
++// delay it never raised, and it never said how much room there was.
++//
++// One sample per application frame: how long before its hand-over the
++// frame's first synthetic was written (negative: after it; a slot that came
++// with nothing queued is reported as minus one period). Judged kWindowFrames
++// at a time on the second-lowest sample, so one outlier a second neither
++// raises nor lowers it:
++//   low >= kSlackMargin   raise by what is left above the margin, at most
++//                         kMaxSlackRaise, through the same ceiling and hold
++//                         as observe_triple_release
++//   low < 0, delay > 0    back off by the shortfall plus the margin (at least
++//                         kBackoffStep), put the ceiling there and hold it,
++//                         doubling the hold for every further failure
++//   otherwise             in band, or late with nothing to give back: hold.
++// `late` in the window report counts negative samples.
++inline constexpr Nanoseconds kSlackMargin = 2 * kMillisecond;
++inline constexpr Nanoseconds kMaxSlackRaise = 4 * kMillisecond;
++
++TripleReleaseWindow observe_triple_slack(
++    TripleReleaseTuner& tuner, Nanoseconds period, Nanoseconds slack) noexcept;
++
+ // ---------------------------------------------------------------------------
+ // Display time correction.
+ //
+@@ -143,18 +182,35 @@ Nanoseconds rebase_display_time_correction(
+ // ---------------------------------------------------------------------------
+ // Adaptive 2X / 3X.
+ //
+-// Fed the application's work per frame - from its release to the moment its
+-// frame's first synthetic exists, so CPU and GPU both - and every frame that
+-// missed its slot. Decides from that, not from the application's paced
+-// interval: an application paced to a third of the refresh in 3X may well be
+-// able to hold half of it.
++// Fed throughput evidence per application frame and every frame that missed
++// its slot. Decides from that, not from the application's paced interval: an
++// application paced to a third of the refresh in 3X may well be able to hold
++// half of it.
++//
++// DCS VR Control (0004): throughput, not latency. The first version was fed
++// the application's pipeline latency - from its release to the moment its
++// frame's first synthetic existed - and a live DCS flight never left 3X on
++// it: p90 50-57 ms against a 18.9 ms threshold, every second, while the
++// application spent a p50 of 17.5 ms per frame on the CPU. CPU and GPU
++// overlap, and so do consecutive frames, so a frame can take 50 ms end to
++// end in an application that can start one every 20 ms. A frame's sample is
++// now its two throughput costs:
++//   cpu  the frame's interval less the time it spent blocked in the layer
++//        (the virtual wait, the once-per-frame hold and release delay, the
++//        queue's capacity bound, swapchain waits)
++//   gpu  the GPU time the frame costs (the layer measures the application's
++//        frame on its own context or queue and adds its own synthesis and
++//        copy time; negative when nothing measured it)
++// and the value judged is max(cpu, gpu). A frame without a GPU figure is
++// judged on max(cpu, p90 pipeline latency) when latency samples exist - the
++// old, conservative evidence - and is not counted at all otherwise.
+ //
+-//   3X -> 2X  p90 work <= downshift_fraction of two periods over the last
++//   3X -> 2X  p90 value <= downshift_fraction of two periods over the last
+ //             downshift_window (3 s, doubled after each flap, up to
+ //             max_downshift_window), with no missed slot in it (the layer
+ //             reports missed slots in 2X only: in 3X they are the release
+-//             delay probing).
+-//   2X -> 3X  p90 work > two periods, or upshift_late_events missed slots,
++//             delay probing), and at least nine frames in ten judged.
++//   2X -> 3X  p90 value > two periods, or upshift_late_events missed slots,
+ //             over the last upshift_window (0.75 s).
+ //
+ // Never within min_dwell of the previous switch, and samples within settle of
+@@ -182,10 +238,24 @@ enum class AdaptiveReason : std::uint32_t {
+     enabled = 5,      // adaptive turned on or off (caller's record)
+ };
+ 
++// Which cost bounds the application, by the p90s: 1 CPU, 2 GPU, 0 neither
++// measured.
++enum class AdaptiveLimiter : std::uint32_t { none = 0, cpu = 1, gpu = 2 };
++
+ struct AdaptiveStats {
++    // p90 of the judged value, max(cpu, gpu); -1 without judged frames.
+     Nanoseconds p90{-1};
++    // Judged frames.
+     std::uint32_t samples{};
+     std::uint32_t late{};
++    // Each component on its own, -1 without samples.
++    Nanoseconds cpu_p90{-1};
++    Nanoseconds gpu_p90{-1};
++    Nanoseconds latency_p90{-1};
++    // Frames seen, and those of them with a GPU figure.
++    std::uint32_t frames{};
++    std::uint32_t gpu_samples{};
++    AdaptiveLimiter limiter{AdaptiveLimiter::none};
+ };
+ 
+ struct AdaptiveDecision {
+@@ -201,7 +271,12 @@ public:
+ 
+     // Starts (or restarts) in `mode` at `now`; the dwell counts from here.
+     void start(std::uint32_t mode, Nanoseconds now) noexcept;
+-    void add_work(Nanoseconds at, Nanoseconds work) noexcept;
++    // One application frame: its CPU time and its GPU time (negative: not
++    // measured). A negative CPU time is ignored.
++    void add_frame(Nanoseconds at, Nanoseconds cpu, Nanoseconds gpu) noexcept;
++    // One frame's pipeline latency, release to first synthetic written.
++    // Diagnostic, and the fallback for frames without a GPU figure.
++    void add_latency(Nanoseconds at, Nanoseconds latency) noexcept;
+     void add_late(Nanoseconds at, std::uint32_t count = 1) noexcept;
+     [[nodiscard]] AdaptiveDecision evaluate(
+         Nanoseconds now, Nanoseconds period) const noexcept;
+@@ -224,10 +299,15 @@ private:
+     Nanoseconds last_switch_{};
+     Nanoseconds last_downshift_{-1};
+     Nanoseconds downshift_window_{};
+-    std::array<Nanoseconds, kWorkSamples> work_at_{};
+-    std::array<Nanoseconds, kWorkSamples> work_{};
+-    std::size_t work_count_{};
+-    std::size_t work_next_{};
++    std::array<Nanoseconds, kWorkSamples> frame_at_{};
++    std::array<Nanoseconds, kWorkSamples> cpu_{};
++    std::array<Nanoseconds, kWorkSamples> gpu_{};
++    std::size_t frame_count_{};
++    std::size_t frame_next_{};
++    std::array<Nanoseconds, kWorkSamples> latency_at_{};
++    std::array<Nanoseconds, kWorkSamples> latency_{};
++    std::size_t latency_count_{};
++    std::size_t latency_next_{};
+     std::array<Nanoseconds, kLateEvents> late_at_{};
+     std::size_t late_count_{};
+     std::size_t late_next_{};
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+index 94ad824..3c81a2b 100644
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -76,6 +76,77 @@ TripleReleaseWindow observe_triple_release(
+     return report;
+ }
+ 
++TripleReleaseWindow observe_triple_slack(
++    TripleReleaseTuner& tuner, Nanoseconds period, Nanoseconds slack) noexcept {
++    TripleReleaseWindow report{};
++    if (period <= 0) {
++        return report;
++    }
++    if (slack < 0) {
++        ++tuner.window_late;
++    }
++    tuner.slack[tuner.window_frames % TripleReleaseTuner::kWindowFrames] = slack;
++    if (++tuner.window_frames < TripleReleaseTuner::kWindowFrames) {
++        return report;
++    }
++    const std::uint32_t late_count = tuner.window_late;
++    const std::uint32_t unwritten = tuner.window_unwritten;
++    tuner.window_frames = 0;
++    tuner.window_late = 0;
++    tuner.window_unwritten = 0;
++    auto sorted = tuner.slack;
++    std::sort(sorted.begin(), sorted.end());
++    const Nanoseconds low = sorted[1];
++    auto& delay = tuner.delay;
++    auto& ceiling = tuner.ceiling;
++    if (ceiling < 0) {
++        ceiling = period * 2;
++    }
++    if (low < 0) {
++        // Two or more frames written after their hand-over. Only a delay
++        // can be given back; with none, the lateness is the title's own.
++        if (delay > 0) {
++            tuner.last_failure = delay;
++            const Nanoseconds back = std::max(
++                TripleReleaseTuner::kBackoffStep, kSlackMargin - low);
++            ceiling = std::max<Nanoseconds>(0, delay - back);
++            delay = ceiling;
++            tuner.hold = tuner.backoff;
++            tuner.backoff = std::min(
++                tuner.backoff * 2, TripleReleaseTuner::kMaxHoldWindows);
++        }
++    } else if (low >= kSlackMargin) {
++        if (tuner.last_failure >= 0 && delay >= tuner.last_failure) {
++            tuner.backoff = TripleReleaseTuner::kBaseHoldWindows;
++            tuner.last_failure = -1;
++        }
++        // Delaying the release moves the frame's readiness later by at most
++        // the same amount, so what is left above the margin is what can be
++        // taken - a step at a time.
++        const Nanoseconds raise = std::min(kMaxSlackRaise, low - kSlackMargin);
++        if (raise > 0) {
++            if (delay < ceiling) {
++                delay = std::min(ceiling, delay + raise);
++            } else if (tuner.hold > 0) {
++                --tuner.hold;
++            } else {
++                ceiling = std::min(period * 2, ceiling + raise);
++                delay = ceiling;
++            }
++        }
++    }
++    report.closed = true;
++    report.delay = delay;
++    report.ceiling = ceiling;
++    report.late = late_count;
++    report.unwritten = unwritten;
++    report.hold = tuner.hold;
++    report.slack_valid = true;
++    report.slack_low = low;
++    report.slack_median = sorted[sorted.size() / 2];
++    return report;
++}
++
+ std::size_t display_time_mode(
+     std::uint32_t frames_per_application_frame, bool deep_pipeline) noexcept {
+     if (frames_per_application_frame > 2) {
+@@ -177,20 +248,35 @@ void AdaptiveFrameGenController::start(std::uint32_t mode, Nanoseconds now) noex
+     last_switch_ = now;
+     last_downshift_ = -1;
+     downshift_window_ = config_.downshift_window;
+-    work_count_ = 0;
+-    work_next_ = 0;
++    frame_count_ = 0;
++    frame_next_ = 0;
++    latency_count_ = 0;
++    latency_next_ = 0;
+     late_count_ = 0;
+     late_next_ = 0;
+ }
+ 
+-void AdaptiveFrameGenController::add_work(Nanoseconds at, Nanoseconds work) noexcept {
+-    if (work < 0) {
++void AdaptiveFrameGenController::add_frame(
++    Nanoseconds at, Nanoseconds cpu, Nanoseconds gpu) noexcept {
++    if (cpu < 0) {
++        return;
++    }
++    frame_at_[frame_next_] = at;
++    cpu_[frame_next_] = cpu;
++    gpu_[frame_next_] = gpu < 0 ? -1 : gpu;
++    frame_next_ = (frame_next_ + 1) % kWorkSamples;
++    frame_count_ = std::min(frame_count_ + 1, kWorkSamples);
++}
++
++void AdaptiveFrameGenController::add_latency(
++    Nanoseconds at, Nanoseconds latency) noexcept {
++    if (latency < 0) {
+         return;
+     }
+-    work_at_[work_next_] = at;
+-    work_[work_next_] = work;
+-    work_next_ = (work_next_ + 1) % kWorkSamples;
+-    work_count_ = std::min(work_count_ + 1, kWorkSamples);
++    latency_at_[latency_next_] = at;
++    latency_[latency_next_] = latency;
++    latency_next_ = (latency_next_ + 1) % kWorkSamples;
++    latency_count_ = std::min(latency_count_ + 1, kWorkSamples);
+ }
+ 
+ void AdaptiveFrameGenController::add_late(Nanoseconds at, std::uint32_t count) noexcept {
+@@ -201,28 +287,68 @@ void AdaptiveFrameGenController::add_late(Nanoseconds at, std::uint32_t count) n
+     }
+ }
+ 
++namespace {
++
++// Nearest-rank p90 of the first n values (sorted in place); -1 for none.
++[[nodiscard]] Nanoseconds nearest_rank_p90(
++    std::array<Nanoseconds, 512>& values, std::size_t n) noexcept {
++    if (n == 0) {
++        return -1;
++    }
++    std::sort(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(n));
++    const std::size_t rank = (n * 9 + 9) / 10; // ceil(0.9 n)
++    return values[std::max<std::size_t>(rank, 1) - 1];
++}
++
++} // namespace
++
+ AdaptiveStats AdaptiveFrameGenController::stats(
+     Nanoseconds now, Nanoseconds span) const noexcept {
++    static_assert(kWorkSamples == 512);
+     AdaptiveStats result{};
+     const Nanoseconds from = std::max(now - span, last_switch_ + config_.settle);
++    const auto inside = [&](Nanoseconds at) { return at > from && at <= now; };
+     std::array<Nanoseconds, kWorkSamples> values{};
+     std::size_t n = 0;
+-    for (std::size_t index = 0; index < work_count_; ++index) {
+-        if (work_at_[index] > from && work_at_[index] <= now) {
+-            values[n++] = work_[index];
++    for (std::size_t index = 0; index < latency_count_; ++index) {
++        if (inside(latency_at_[index])) {
++            values[n++] = latency_[index];
+         }
+     }
+-    for (std::size_t index = 0; index < late_count_; ++index) {
+-        if (late_at_[index] > from && late_at_[index] <= now) {
+-            ++result.late;
++    result.latency_p90 = nearest_rank_p90(values, n);
++    std::array<Nanoseconds, kWorkSamples> cpu{};
++    std::array<Nanoseconds, kWorkSamples> gpu{};
++    std::size_t cpu_n = 0;
++    std::size_t gpu_n = 0;
++    n = 0;
++    for (std::size_t index = 0; index < frame_count_; ++index) {
++        if (!inside(frame_at_[index])) {
++            continue;
++        }
++        ++result.frames;
++        cpu[cpu_n++] = cpu_[index];
++        if (gpu_[index] >= 0) {
++            gpu[gpu_n++] = gpu_[index];
++            values[n++] = std::max(cpu_[index], gpu_[index]);
++        } else if (result.latency_p90 >= 0) {
++            // No GPU figure: the old evidence stands in for it.
++            values[n++] = std::max(cpu_[index], result.latency_p90);
+         }
+     }
++    result.gpu_samples = static_cast<std::uint32_t>(gpu_n);
++    result.cpu_p90 = nearest_rank_p90(cpu, cpu_n);
++    result.gpu_p90 = nearest_rank_p90(gpu, gpu_n);
+     result.samples = static_cast<std::uint32_t>(n);
+-    if (n > 0) {
+-        std::sort(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(n));
+-        // Nearest rank.
+-        const std::size_t rank = (n * 9 + 9) / 10; // ceil(0.9 n)
+-        result.p90 = values[std::max<std::size_t>(rank, 1) - 1];
++    result.p90 = nearest_rank_p90(values, n);
++    if (result.gpu_p90 >= 0 || result.cpu_p90 >= 0) {
++        result.limiter = result.gpu_p90 > result.cpu_p90
++            ? AdaptiveLimiter::gpu
++            : AdaptiveLimiter::cpu;
++    }
++    for (std::size_t index = 0; index < late_count_; ++index) {
++        if (inside(late_at_[index])) {
++            ++result.late;
++        }
+     }
+     return result;
+ }
+@@ -242,7 +368,10 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+             now - (last_switch_ + config_.settle) < downshift_window_) {
+             return decision;
+         }
++        // Nine frames in ten judged: frames with no evidence at all must not
++        // leave the decision to the few that have it.
+         if (decision.stats.samples >= config_.min_samples_down &&
++            decision.stats.samples * 10 >= decision.stats.frames * 9 &&
+             decision.stats.late == 0 &&
+             decision.stats.p90 <= decision.threshold) {
+             decision.target = 2;
+diff --git a/src/d3d11/d3d11_bridge.cpp b/src/d3d11/d3d11_bridge.cpp
+index a60589f..a9484fb 100644
+--- a/src/d3d11/d3d11_bridge.cpp
++++ b/src/d3d11/d3d11_bridge.cpp
+@@ -61,6 +61,9 @@ struct D3D11BridgeSwapchain::Impl {
+         ComPtr<ID3D12CommandAllocator> allocator;
+         ComPtr<ID3D12GraphicsCommandList> list;
+         std::uint64_t fence_value{};
++        // DCS VR Control (0004): the list carries two timestamps not yet
++        // read back.
++        bool timed{};
+     };
+ 
+     std::mutex mutex;
+@@ -91,6 +94,12 @@ struct D3D11BridgeSwapchain::Impl {
+     std::vector<std::uint64_t> last_read;
+     std::array<CopyList, kCopyListCount> copy_lists{};
+     std::size_t next_copy_list{};
++    // DCS VR Control (0004): copy timing; see consume_copy_gpu_nanoseconds.
++    // Null when the queue cannot time, and the copies then go untimed.
++    ComPtr<ID3D12QueryHeap> copy_timestamps;
++    ComPtr<ID3D12Resource> copy_readback;
++    std::uint64_t timestamp_frequency{};
++    std::int64_t copy_gpu_nanoseconds{};
+     bool enabled{};
+     // Release copies into the runtime's images are skipped while the
+     // swapchain goes unsubmitted (see D3D11BridgeSwapchain::release).
+@@ -425,10 +434,78 @@ struct D3D11BridgeSwapchain::Impl {
+                 return result;
+             }
+         }
++        create_copy_timing();
+         enabled = true;
+         return S_OK;
+     }
+ 
++    // Optional: the bridge works the same without it.
++    void create_copy_timing() noexcept {
++        UINT64 frequency = 0;
++        if (FAILED(d3d12_queue->GetTimestampFrequency(&frequency)) || frequency == 0) {
++            return;
++        }
++        D3D12_QUERY_HEAP_DESC heap_description{};
++        heap_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++        heap_description.Count = static_cast<UINT>(2 * kCopyListCount);
++        heap_description.NodeMask = d3d12_queue->GetDesc().NodeMask;
++        D3D12_HEAP_PROPERTIES heap{};
++        heap.Type = D3D12_HEAP_TYPE_READBACK;
++        D3D12_RESOURCE_DESC buffer{};
++        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        buffer.Width = 2 * kCopyListCount * sizeof(std::uint64_t);
++        buffer.Height = 1;
++        buffer.DepthOrArraySize = 1;
++        buffer.MipLevels = 1;
++        buffer.SampleDesc.Count = 1;
++        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        if (FAILED(d3d12_device->CreateQueryHeap(
++                &heap_description, IID_PPV_ARGS(copy_timestamps.GetAddressOf()))) ||
++            FAILED(d3d12_device->CreateCommittedResource(
++                &heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
++                nullptr, IID_PPV_ARGS(copy_readback.GetAddressOf())))) {
++            copy_timestamps.Reset();
++            copy_readback.Reset();
++            return;
++        }
++        timestamp_frequency = frequency;
++    }
++
++    // Reads back every timed list the queue has finished with.
++    void harvest_copy_timing() noexcept {
++        if (!copy_timestamps || !d3d12_fence) {
++            return;
++        }
++        const std::uint64_t completed = d3d12_fence->GetCompletedValue();
++        if (completed == std::numeric_limits<std::uint64_t>::max()) {
++            return;
++        }
++        for (std::size_t index = 0; index < copy_lists.size(); ++index) {
++            CopyList& copy = copy_lists[index];
++            if (!copy.timed || completed < copy.fence_value) {
++                continue;
++            }
++            copy.timed = false;
++            const SIZE_T first = 2 * index * sizeof(std::uint64_t);
++            const D3D12_RANGE range{first, first + 2 * sizeof(std::uint64_t)};
++            void* mapped = nullptr;
++            if (FAILED(copy_readback->Map(0, &range, &mapped)) || mapped == nullptr) {
++                continue;
++            }
++            const auto* ticks = reinterpret_cast<const std::uint64_t*>(
++                static_cast<const std::uint8_t*>(mapped) + first);
++            const std::uint64_t begin = ticks[0];
++            const std::uint64_t end = ticks[1];
++            const D3D12_RANGE none{0, 0};
++            copy_readback->Unmap(0, &none);
++            if (end >= begin) {
++                copy_gpu_nanoseconds += static_cast<std::int64_t>(
++                    static_cast<long double>(end - begin) * 1'000'000'000.0L /
++                    static_cast<long double>(timestamp_frequency));
++            }
++        }
++    }
++
+     // A copy list whose previous use the queue has finished with. Bounded
+     // by the ring: if every list is still in flight this waits on the
+     // oldest, which cannot happen while the application's own frame loop
+@@ -445,6 +522,9 @@ struct D3D11BridgeSwapchain::Impl {
+             }
+             WaitForSingleObject(fence_event, 2000);
+         }
++        // Its timestamps are about to be overwritten.
++        harvest_copy_timing();
++        copy.timed = false;
+         HRESULT result = copy.allocator->Reset();
+         if (FAILED(result)) {
+             return result;
+@@ -581,6 +661,12 @@ struct D3D11BridgeSwapchain::Impl {
+         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+         barrier.Transition.StateBefore = resting;
+         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++        const UINT timestamp_index = static_cast<UINT>(
++            2 * static_cast<std::size_t>(copy - copy_lists.data()));
++        if (copy_timestamps) {
++            copy->list->EndQuery(
++                copy_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_index);
++        }
+         copy->list->ResourceBarrier(1, &barrier);
+         const D3D12_RESOURCE_DESC runtime_description = runtime_image->GetDesc();
+         if (path == D3D11BridgePath::mip_copy) {
+@@ -604,6 +690,14 @@ struct D3D11BridgeSwapchain::Impl {
+         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+         barrier.Transition.StateAfter = resting;
+         copy->list->ResourceBarrier(1, &barrier);
++        if (copy_timestamps) {
++            copy->list->EndQuery(
++                copy_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_index + 1);
++            copy->list->ResolveQueryData(
++                copy_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_index, 2,
++                copy_readback.Get(),
++                static_cast<UINT64>(timestamp_index) * sizeof(std::uint64_t));
++        }
+         result = copy->list->Close();
+         if (FAILED(result)) {
+             return result;
+@@ -617,6 +711,7 @@ struct D3D11BridgeSwapchain::Impl {
+             return result;
+         }
+         copy->fence_value = copied;
++        copy->timed = static_cast<bool>(copy_timestamps);
+         last_signalled = copied;
+         last_read[index] = copied;
+         return S_OK;
+@@ -760,6 +855,18 @@ HRESULT D3D11BridgeSwapchain::mark_read(std::uint32_t index) noexcept {
+     }
+ }
+ 
++std::int64_t D3D11BridgeSwapchain::consume_copy_gpu_nanoseconds() noexcept {
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        impl_->harvest_copy_timing();
++        const std::int64_t total = impl_->copy_gpu_nanoseconds;
++        impl_->copy_gpu_nanoseconds = 0;
++        return total;
++    } catch (...) {
++        return 0;
++    }
++}
++
+ HRESULT D3D11BridgeSwapchain::wait_for_idle() noexcept {
+     try {
+         std::scoped_lock lock(impl_->mutex);
+diff --git a/src/d3d11/frame_gpu_timer.cpp b/src/d3d11/frame_gpu_timer.cpp
+new file mode 100644
+index 0000000..2ab275a
+--- /dev/null
++++ b/src/d3d11/frame_gpu_timer.cpp
+@@ -0,0 +1,303 @@
++#include "xrfg/frame_gpu_timer.hpp"
++
++#include <algorithm>
++
++namespace xrfg {
++
++namespace {
++
++[[nodiscard]] std::int64_t ticks_to_nanoseconds(
++    std::uint64_t begin, std::uint64_t end, std::uint64_t frequency) noexcept {
++    if (frequency == 0 || end < begin) {
++        return -1;
++    }
++    const long double ns = static_cast<long double>(end - begin) *
++        1'000'000'000.0L / static_cast<long double>(frequency);
++    return static_cast<std::int64_t>(ns + 0.5L);
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------
++// D3D11
++
++HRESULT D3D11FrameGpuTimer::initialize(
++    ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
++    if (device == nullptr || context == nullptr) {
++        return E_INVALIDARG;
++    }
++    for (Slot& slot : slots_) {
++        D3D11_QUERY_DESC description{};
++        description.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
++        HRESULT result = device->CreateQuery(&description, slot.disjoint.GetAddressOf());
++        if (FAILED(result)) {
++            return result;
++        }
++        description.Query = D3D11_QUERY_TIMESTAMP;
++        result = device->CreateQuery(&description, slot.begin.GetAddressOf());
++        if (FAILED(result)) {
++            return result;
++        }
++        result = device->CreateQuery(&description, slot.end.GetAddressOf());
++        if (FAILED(result)) {
++            return result;
++        }
++    }
++    context_ = context;
++    return S_OK;
++}
++
++void D3D11FrameGpuTimer::open() noexcept {
++    if (!context_) {
++        return;
++    }
++    if (open_) {
++        // Released again without the frame coming back: keep the bracket
++        // going rather than leave a disjoint query begun.
++        return;
++    }
++    if (pending_ >= kSlots) {
++        return; // The GPU is far behind; this frame goes unmeasured.
++    }
++    Slot& slot = slots_[next_];
++    context_->Begin(slot.disjoint.Get());
++    context_->End(slot.begin.Get());
++    // Submitted now, so the mark is taken when the GPU gets here rather
++    // than when the application's next commands happen to flush it.
++    context_->Flush();
++    open_ = true;
++}
++
++void D3D11FrameGpuTimer::close() noexcept {
++    if (!context_ || !open_) {
++        return;
++    }
++    Slot& slot = slots_[next_];
++    context_->End(slot.end.Get());
++    context_->End(slot.disjoint.Get());
++    // Same: an unflushed end mark would be taken late, when the next frame's
++    // commands flush, and the bracket would grow by the gap.
++    context_->Flush();
++    slot.pending = true;
++    next_ = (next_ + 1) % kSlots;
++    ++pending_;
++    open_ = false;
++}
++
++std::size_t D3D11FrameGpuTimer::collect(std::span<std::int64_t> output) noexcept {
++    std::size_t written = 0;
++    while (context_ && pending_ > 0 && written < output.size()) {
++        Slot& slot = slots_[oldest_];
++        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
++        UINT64 begin = 0;
++        UINT64 end = 0;
++        constexpr UINT kNoFlush = D3D11_ASYNC_GETDATA_DONOTFLUSH;
++        if (context_->GetData(slot.disjoint.Get(), &disjoint, sizeof(disjoint), kNoFlush) != S_OK ||
++            context_->GetData(slot.begin.Get(), &begin, sizeof(begin), kNoFlush) != S_OK ||
++            context_->GetData(slot.end.Get(), &end, sizeof(end), kNoFlush) != S_OK) {
++            break; // Not there yet; the queries complete in order.
++        }
++        slot.pending = false;
++        oldest_ = (oldest_ + 1) % kSlots;
++        --pending_;
++        if (!disjoint.Disjoint) {
++            const std::int64_t ns = ticks_to_nanoseconds(begin, end, disjoint.Frequency);
++            if (ns >= 0) {
++                output[written++] = ns;
++            }
++        }
++    }
++    return written;
++}
++
++// ---------------------------------------------------------------------------
++// D3D12
++
++HRESULT D3D12QueueFrameGpuTimer::initialize(
++    ID3D12Device* device, ID3D12CommandQueue* queue) noexcept {
++    if (device == nullptr || queue == nullptr) {
++        return E_INVALIDARG;
++    }
++    const D3D12_COMMAND_LIST_TYPE type = queue->GetDesc().Type;
++    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT &&
++        type != D3D12_COMMAND_LIST_TYPE_COMPUTE) {
++        return E_NOTIMPL;
++    }
++    UINT64 frequency = 0;
++    HRESULT result = queue->GetTimestampFrequency(&frequency);
++    if (FAILED(result) || frequency == 0) {
++        return FAILED(result) ? result : E_FAIL;
++    }
++    D3D12_QUERY_HEAP_DESC heap_description{};
++    heap_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++    heap_description.Count = static_cast<UINT>(2 * kSlots);
++    heap_description.NodeMask = queue->GetDesc().NodeMask;
++    result = device->CreateQueryHeap(&heap_description, IID_PPV_ARGS(heap_.GetAddressOf()));
++    if (FAILED(result)) {
++        return result;
++    }
++    D3D12_HEAP_PROPERTIES heap{};
++    heap.Type = D3D12_HEAP_TYPE_READBACK;
++    D3D12_RESOURCE_DESC buffer{};
++    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    buffer.Width = 2 * kSlots * sizeof(std::uint64_t);
++    buffer.Height = 1;
++    buffer.DepthOrArraySize = 1;
++    buffer.MipLevels = 1;
++    buffer.SampleDesc.Count = 1;
++    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    result = device->CreateCommittedResource(
++        &heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
++        nullptr, IID_PPV_ARGS(readback_.GetAddressOf()));
++    if (FAILED(result)) {
++        return result;
++    }
++    result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence_.GetAddressOf()));
++    if (FAILED(result)) {
++        return result;
++    }
++    for (Slot& slot : slots_) {
++        result = device->CreateCommandAllocator(type, IID_PPV_ARGS(slot.allocator.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>* lists[] = {
++            &slot.open_list, &slot.close_list};
++        for (auto* list : lists) {
++            result = device->CreateCommandList(
++                0, type, slot.allocator.Get(), nullptr,
++                IID_PPV_ARGS(list->ReleaseAndGetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            result = (*list)->Close();
++            if (FAILED(result)) {
++                return result;
++            }
++        }
++    }
++    LARGE_INTEGER qpc_frequency{};
++    if (QueryPerformanceFrequency(&qpc_frequency) && qpc_frequency.QuadPart > 0) {
++        qpc_frequency_ = static_cast<std::uint64_t>(qpc_frequency.QuadPart);
++    }
++    frequency_ = frequency;
++    queue_ = queue;
++    return S_OK;
++}
++
++std::int64_t D3D12QueueFrameGpuTimer::to_qpc(std::uint64_t ticks) const noexcept {
++    const long double delta =
++        (static_cast<long double>(ticks) - static_cast<long double>(calibration_ticks_)) *
++        static_cast<long double>(qpc_frequency_) / static_cast<long double>(frequency_);
++    return static_cast<std::int64_t>(static_cast<long double>(calibration_qpc_) + delta);
++}
++
++bool D3D12QueueFrameGpuTimer::record(Slot& slot, std::size_t index) noexcept {
++    const UINT first = static_cast<UINT>(2 * index);
++    if (FAILED(slot.allocator->Reset()) ||
++        FAILED(slot.open_list->Reset(slot.allocator.Get(), nullptr))) {
++        return false;
++    }
++    slot.open_list->EndQuery(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first);
++    if (FAILED(slot.open_list->Close()) ||
++        FAILED(slot.close_list->Reset(slot.allocator.Get(), nullptr))) {
++        return false;
++    }
++    slot.close_list->EndQuery(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
++    slot.close_list->ResolveQueryData(
++        heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first, 2, readback_.Get(),
++        static_cast<UINT64>(first) * sizeof(std::uint64_t));
++    return SUCCEEDED(slot.close_list->Close());
++}
++
++void D3D12QueueFrameGpuTimer::open() noexcept {
++    if (!queue_ || open_ || pending_ >= kSlots) {
++        return;
++    }
++    Slot& slot = slots_[next_];
++    if (!record(slot, next_)) {
++        return;
++    }
++    LARGE_INTEGER now{};
++    QueryPerformanceCounter(&now);
++    slot.open_submitted_qpc = now.QuadPart;
++    ID3D12CommandList* lists[] = {slot.open_list.Get()};
++    queue_->ExecuteCommandLists(1, lists);
++    open_ = true;
++}
++
++void D3D12QueueFrameGpuTimer::close() noexcept {
++    if (!queue_ || !open_) {
++        return;
++    }
++    Slot& slot = slots_[next_];
++    ID3D12CommandList* lists[] = {slot.close_list.Get()};
++    queue_->ExecuteCommandLists(1, lists);
++    slot.fence_value = next_fence_value_++;
++    if (FAILED(queue_->Signal(fence_.Get(), slot.fence_value))) {
++        // Nothing will tell this slot completed; the timer stops.
++        queue_.Reset();
++        return;
++    }
++    slot.pending = true;
++    next_ = (next_ + 1) % kSlots;
++    ++pending_;
++    open_ = false;
++}
++
++std::size_t D3D12QueueFrameGpuTimer::collect(std::span<std::int64_t> output) noexcept {
++    std::size_t written = 0;
++    if (!fence_) {
++        return 0;
++    }
++    const std::uint64_t completed = fence_->GetCompletedValue();
++    // Taken again on every collection, so the gap test below never runs on a
++    // calibration that has drifted.
++    const bool calibrated = qpc_frequency_ != 0 && pending_ > 0 &&
++        SUCCEEDED(queue_ ? queue_->GetClockCalibration(&calibration_ticks_, &calibration_qpc_)
++                         : E_FAIL);
++    while (pending_ > 0 && written < output.size()) {
++        Slot& slot = slots_[oldest_];
++        if (completed == UINT64_MAX || completed < slot.fence_value) {
++            break;
++        }
++        const SIZE_T first = 2 * oldest_ * sizeof(std::uint64_t);
++        const D3D12_RANGE range{first, first + 2 * sizeof(std::uint64_t)};
++        void* mapped = nullptr;
++        std::uint64_t ticks[2]{};
++        if (SUCCEEDED(readback_->Map(0, &range, &mapped)) && mapped != nullptr) {
++            const auto* values = reinterpret_cast<const std::uint64_t*>(
++                static_cast<const std::uint8_t*>(mapped) + first);
++            ticks[0] = values[0];
++            ticks[1] = values[1];
++            const D3D12_RANGE none{0, 0};
++            readback_->Unmap(0, &none);
++            std::int64_t ns = ticks_to_nanoseconds(ticks[0], ticks[1], frequency_);
++            if (calibrated) {
++                // Work that ran between the previous close and this open.
++                const std::int64_t open_qpc = to_qpc(ticks[0]);
++                const std::int64_t busy_from =
++                    std::max(previous_close_qpc_, slot.open_submitted_qpc);
++                if (ns >= 0 && previous_close_qpc_ >= 0 && open_qpc > busy_from) {
++                    const long double gap =
++                        static_cast<long double>(open_qpc - busy_from) * 1'000'000'000.0L /
++                        static_cast<long double>(qpc_frequency_);
++                    // A gap of more than a second is a stall, not a frame.
++                    if (gap < 1'000'000'000.0L) {
++                        ns += static_cast<std::int64_t>(gap);
++                    }
++                }
++                previous_close_qpc_ = to_qpc(ticks[1]);
++            }
++            if (ns >= 0) {
++                output[written++] = ns;
++            }
++        }
++        slot.pending = false;
++        oldest_ = (oldest_ + 1) % kSlots;
++        --pending_;
++    }
++    return written;
++}
++
++} // namespace xrfg
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 7ea8e4b..932747c 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -756,6 +756,16 @@ struct D3D12FrameSynthesizer::Impl {
+     // it is a moment that can be compared to when the frame was submitted.
+     std::uint64_t calibration_gpu_ticks{};
+     std::uint64_t calibration_qpc_ticks{};
++    // DCS VR Control (0004): when the calibration above was last taken, on
++    // the QPC timeline. It was taken once, at creation, and the GPU's
++    // timestamp clock and QPC can drift apart: six and a half minutes into a
++    // live DCS flight the synthesis spans placed on the log's timeline ended
++    // ~25 ms before the readiness fence reported the same output written,
++    // and never later than 14 ms before they were harvested. The durations,
++    // differences of GPU ticks, cannot be affected. Taken again at most once
++    // a second while timings are harvested, so a span's place on the
++    // timeline is never more than a second's drift out.
++    std::uint64_t calibration_refreshed_qpc{};
+     std::uint64_t qpc_frequency{};
+     ComPtr<ID3D12Resource> nvidia_timestamp_readback;
+     HANDLE fence_event{};
+@@ -1591,6 +1601,7 @@ struct D3D12FrameSynthesizer::Impl {
+             calibration_gpu_ticks = 0;
+             calibration_qpc_ticks = 0;
+         }
++        calibration_refreshed_qpc = calibration_qpc_ticks;
+         result = device->CreateQueryHeap(
+             &query_description,
+             IID_PPV_ARGS(nvidia_timestamp_heap.GetAddressOf()));
+@@ -2193,6 +2204,23 @@ struct D3D12FrameSynthesizer::Impl {
+             : static_cast<std::uint64_t>(microseconds + 0.5L);
+     }
+ 
++    void refresh_clock_calibration() noexcept {
++        LARGE_INTEGER now{};
++        if (qpc_frequency == 0 || !QueryPerformanceCounter(&now) ||
++            static_cast<std::uint64_t>(now.QuadPart) <
++                calibration_refreshed_qpc + qpc_frequency) {
++            return;
++        }
++        std::uint64_t gpu_ticks = 0;
++        std::uint64_t qpc_ticks = 0;
++        if (SUCCEEDED(queue->GetClockCalibration(&gpu_ticks, &qpc_ticks)) &&
++            gpu_ticks != 0) {
++            calibration_gpu_ticks = gpu_ticks;
++            calibration_qpc_ticks = qpc_ticks;
++        }
++        calibration_refreshed_qpc = static_cast<std::uint64_t>(now.QuadPart);
++    }
++
+     [[nodiscard]] HRESULT harvest_nvidia_gpu_timing(
+         WorkSlot& slot) noexcept {
+         if (!nvidia_gpu_timing_enabled || !slot.timing_pending) {
+@@ -2226,6 +2254,7 @@ struct D3D12FrameSynthesizer::Impl {
+         // The span marks are written by both backends; the stage marks only
+         // by NVIDIA, so their ordering is checked only where they exist.
+         slot.cached_timing = slot.timing_metadata;
++        refresh_clock_calibration();
+         slot.cached_timing.gpu_begin_qpc = timestamp_qpc(values[kSpanBegin]);
+         slot.cached_timing.gpu_end_qpc = timestamp_qpc(values[kSpanEnd]);
+         slot.cached_timing.total_microseconds = timestamp_microseconds(
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index e774d08..48f6526 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -100,6 +100,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "latency_status";
+     case BridgeFlightOperation::display_time_correction:
+         return "display_time_correction";
++    case BridgeFlightOperation::adaptive_throughput:
++        return "adaptive_throughput";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+@@ -492,6 +494,32 @@ void BridgeFlightLogger::event(
+         c);
+ }
+ 
++void BridgeFlightLogger::timed_event(
++    BridgeFlightOperation operation,
++    std::int64_t result,
++    std::uint64_t duration_us,
++    std::uint64_t a,
++    std::uint64_t b,
++    std::uint64_t c) noexcept {
++    if (!enabled()) {
++        return;
++    }
++    LARGE_INTEGER now{};
++    if (!QueryPerformanceCounter(&now)) {
++        return;
++    }
++    impl_->write(
++        impl_->next_sequence.fetch_add(1, std::memory_order_relaxed),
++        now.QuadPart,
++        'I',
++        operation,
++        result,
++        duration_us,
++        a,
++        b,
++        c);
++}
++
+ BridgeFlightLogger& bridge_flight_logger() noexcept {
+     static BridgeFlightLogger logger;
+     return logger;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 369c51c..73750aa 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -3,6 +3,7 @@
+ #include "xrfg/dlss_motion_vectors.hpp"
+ #include "xrfg/d3d11_bridge.hpp"
+ #include "xrfg/d3d11_d3d12_interop.hpp"
++#include "xrfg/frame_gpu_timer.hpp"
+ #include "xrfg/vulkan_d3d12_interop.hpp"
+ #include "xrfg/bridge_flight_logger.hpp"
+ #include "xrfg/generation_backpressure.hpp"
+@@ -733,26 +734,66 @@ struct JoinProbe {
+         at.time_since_epoch()).count();
+ }
+ 
++// DCS VR Control (0004): one application frame's first synthetic in 3X off
++// SteamVR - when it was written (the readiness probe) and when it was handed
++// to the runtime (the presenter) - for the release delay's slack test; see
++// xrfg::latency::observe_triple_slack. Whichever side comes second reports
++// handed minus written, once, into the session's TripleSlackSink, tagged
++// with the tuner epoch it was made under so that a sample from before a
++// reset is not judged after it.
++struct LeadReadiness {
++    std::uint32_t epoch{};
++    std::atomic<std::int64_t> ready_ns{-1};
++    std::atomic<std::int64_t> handed_ns{-1};
++    std::atomic<bool> reported{false};
++};
++
++struct TripleSlackSink {
++    std::mutex mutex;
++    std::vector<std::pair<std::uint32_t, std::int64_t>> samples;
++};
++
++void report_lead_slack(LeadReadiness& lead, TripleSlackSink& sink) noexcept {
++    const std::int64_t ready = lead.ready_ns.load();
++    const std::int64_t handed = lead.handed_ns.load();
++    if (ready < 0 || handed < 0 || lead.reported.exchange(true)) {
++        return;
++    }
++    try {
++        std::scoped_lock lock(sink.mutex);
++        // Drained every presenter cycle; a bound only against a presenter
++        // that has stopped.
++        if (sink.samples.size() < 256) {
++            sink.samples.emplace_back(lead.epoch, handed - ready);
++        }
++    } catch (...) {
++    }
++}
++
+ // DCS VR Control: when each application frame's first synthetic was actually
+-// written, for adaptive 2X/3X. The layer has the fence that says so (the one
+-// the presenter polls), but nothing waits on it: the presenter only looks at
+-// the moment it hands a frame over. This thread waits on it, frame by frame,
+-// and reports the application's work - from its release by the once-per-pair
+-// hold to that moment, so its CPU time, its GPU time and the synthesis behind
+-// it - to the adaptive controller. One event, one wait at a time; a frame
+-// whose fence does not complete within a second is dropped, and a device
+-// removed ends nothing but that frame's sample.
++// written. The layer has the fence that says so (the one the presenter
++// polls), but nothing waits on it: the presenter only looks at the moment it
++// hands a frame over. This thread waits on it, frame by frame, and reports
++// (0004) the moment to the frame's LeadReadiness for the 3X release delay,
++// and under adaptive 2X/3X the frame's pipeline latency - from its release by
++// the once-per-pair hold to that moment - to the controller, where it is
++// diagnostic and the fallback for frames with no GPU figure. One event, one
++// wait at a time; a frame whose fence does not complete within a second is
++// dropped, and a device removed ends nothing but that frame's sample.
+ struct ReadinessProbe {
+     struct Item {
+         std::vector<Microsoft::WRL::ComPtr<ID3D12Fence>> fences;
+         std::vector<std::uint64_t> values;
+         std::chrono::steady_clock::time_point released_at{};
++        bool report_latency{};
++        std::shared_ptr<LeadReadiness> lead;
+     };
+ 
+     ReadinessProbe(
+         std::mutex& sink_mutex,
+-        xrfg::latency::AdaptiveFrameGenController& sink)
+-        : sink_mutex_(&sink_mutex), sink_(&sink) {
++        xrfg::latency::AdaptiveFrameGenController& sink,
++        TripleSlackSink& slack_sink)
++        : sink_mutex_(&sink_mutex), sink_(&sink), slack_sink_(&slack_sink) {
+         event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+         if (event_ != nullptr) {
+             try {
+@@ -850,10 +891,16 @@ private:
+                     continue;
+                 }
+                 const auto ready = std::chrono::steady_clock::now();
+-                const auto work = std::chrono::duration_cast<
+-                    std::chrono::nanoseconds>(ready - item.released_at).count();
+-                std::scoped_lock lock(*sink_mutex_);
+-                sink_->add_work(steady_nanoseconds(ready), work);
++                if (item.lead) {
++                    item.lead->ready_ns = steady_nanoseconds(ready);
++                    report_lead_slack(*item.lead, *slack_sink_);
++                }
++                if (item.report_latency) {
++                    const auto latency = std::chrono::duration_cast<
++                        std::chrono::nanoseconds>(ready - item.released_at).count();
++                    std::scoped_lock lock(*sink_mutex_);
++                    sink_->add_latency(steady_nanoseconds(ready), latency);
++                }
+             }
+         } catch (...) {
+         }
+@@ -861,6 +908,7 @@ private:
+ 
+     std::mutex* sink_mutex_{};
+     xrfg::latency::AdaptiveFrameGenController* sink_{};
++    TripleSlackSink* slack_sink_{};
+     HANDLE event_{};
+     std::thread thread_;
+     std::mutex mutex_;
+@@ -869,6 +917,87 @@ private:
+     bool stop_{};
+ };
+ 
++// DCS VR Control (0004): how long the calling thread has spent blocked in
++// the layer - its xrWaitFrame, xrBeginFrame and swapchain acquire/wait calls
++// whole, and inside xrEndFrame the presenter's capacity bound, the
++// once-per-frame hold with its release delay, and the waits for a submission
++// or for the queue to drain. Adaptive 2X/3X takes it from the thread that
++// calls xrEndFrame, once a frame, to tell the application's own CPU time from
++// the time the layer's pacing held it. Waits on any other thread are not
++// counted: DCS World waits for its frames on a second thread while the render
++// thread works, so that wait overlaps the application's work rather than
++// adding to its interval (where it does hold the render thread back, it
++// shows as CPU time - an overestimate, which keeps 3X).
++thread_local std::int64_t t_application_blocked_ns = 0;
++
++struct ApplicationBlockedScope {
++    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
++    ApplicationBlockedScope() = default;
++    ApplicationBlockedScope(const ApplicationBlockedScope&) = delete;
++    ApplicationBlockedScope& operator=(const ApplicationBlockedScope&) = delete;
++    ~ApplicationBlockedScope() {
++        t_application_blocked_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - started).count();
++    }
++};
++
++// DCS VR Control (0004): adaptive 2X/3X's throughput evidence per
++// application frame; see sample_application_throughput. The application's
++// xrEndFrame thread only.
++struct ApplicationThroughput {
++    std::chrono::steady_clock::time_point last_entry{};
++    std::unique_ptr<xrfg::FrameGpuTimer> gpu_timer;
++    bool gpu_timer_tried{};
++    // 1: D3D11 context bracket, 2: D3D12 queue bracket, 0: none.
++    std::uint32_t gpu_source{};
++    std::int64_t last_gpu_app_ns{-1};
++    std::chrono::steady_clock::time_point last_gpu_at{};
++    // The layer's own GPU time per frame, averaged over the last frames:
++    // synthesis and copy timings are harvested in bursts.
++    std::array<std::int64_t, 8> layer_ring{};
++    std::size_t layer_next{};
++    std::size_t layer_filled{};
++    // For adaptive_throughput result=2: the two GPU parts per frame.
++    struct Part {
++        std::int64_t at{};
++        std::int64_t app{-1};
++        std::int64_t layer{-1};
++    };
++    std::array<Part, 128> parts{};
++    std::size_t parts_next{};
++};
++
++// p90s of the two GPU parts over (now - span, now], for adaptive_throughput.
++[[nodiscard]] std::pair<std::int64_t, std::int64_t> throughput_part_p90s(
++    const ApplicationThroughput& throughput,
++    std::int64_t now,
++    std::int64_t span) noexcept {
++    std::array<std::int64_t, 128> app{};
++    std::array<std::int64_t, 128> layer{};
++    std::size_t app_n = 0;
++    std::size_t layer_n = 0;
++    for (const auto& part : throughput.parts) {
++        if (part.at <= now - span || part.at > now) {
++            continue;
++        }
++        if (part.app >= 0) {
++            app[app_n++] = part.app;
++        }
++        if (part.layer >= 0) {
++            layer[layer_n++] = part.layer;
++        }
++    }
++    const auto p90 = [](std::array<std::int64_t, 128>& values, std::size_t n) {
++        if (n == 0) {
++            return std::int64_t{-1};
++        }
++        std::sort(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(n));
++        const std::size_t rank = (n * 9 + 9) / 10;
++        return values[std::max<std::size_t>(rank, 1) - 1];
++    };
++    return {p90(app, app_n), p90(layer, layer_n)};
++}
++
+ struct SessionState {
+     explicit SessionState(std::shared_ptr<Dispatch> next_dispatch)
+         : dispatch(std::move(next_dispatch)), manual_control(current_layer_directory()) {}
+@@ -1347,6 +1476,18 @@ struct SessionState {
+     // its compositor runs to see the pixels (it waits on the binding queue),
+     // which is the margin that test keeps. (DCS VR Control.)
+     //
++    // DCS VR Control (0004): off SteamVR that yes/no test is replaced by how
++    // much earlier or later than its hand-over the first synthetic was
++    // written (LeadReadiness, xrfg::latency::observe_triple_slack). The first
++    // live DCS flight with the yes/no test logged "delay 0, 30 of 30 late, 30
++    // handed over unwritten, ceiling 22.2 ms" every second: its frames were
++    // queued ~1.5 ms before their first synthetic's slot and that synthetic
++    // was written ~30 ms after it, so no delay was ever possible - but the
++    // test could not say so, nor tell it from a title with plenty of room
++    // and two slow frames a second, which it never raised for either. The
++    // slack test raises by the room it measures and backs off by the
++    // shortfall it measures; 802 records each window's slack.
++    //
+     // It is judged over thirty frames, a second of them, because a frame
+     // that runs long is late whatever the delay, and stepping back for each
+     // one held the delay far below what the title could take. See
+@@ -1383,6 +1524,18 @@ struct SessionState {
+     // of its work. The application's xrEndFrame thread only.
+     std::chrono::steady_clock::time_point application_released_at{};
+     std::chrono::steady_clock::time_point latency_status_at{};
++    // DCS VR Control (0004): throughput evidence (the xrEndFrame thread), and
++    // the layer's own GPU time - synthesis, where it is harvested, and the
++    // D3D11 bridge's copies - added up until that thread takes it.
++    ApplicationThroughput throughput;
++    std::atomic<std::int64_t> layer_gpu_ns{0};
++    // DCS VR Control (0004): the 3X release delay's slack samples off
++    // SteamVR (LeadReadiness), and the tuner epoch they are tagged with,
++    // advanced whenever the tuner is reset.
++    TripleSlackSink triple_slack_sink;
++    std::atomic<std::uint32_t> triple_release_epoch{0};
++    // Declared after everything its thread reports into, so it is destroyed
++    // (and its thread joined) before them.
+     std::unique_ptr<ReadinessProbe> readiness_probe;
+     // The application's thread only.
+     HANDLE application_release_timer{};
+@@ -1842,9 +1995,16 @@ struct FrameGenerationSwapchainState {
+     std::shared_ptr<xrfg::SwapchainInterop> interop;
+ };
+ 
++// DCS VR Control (0004): harvested whenever the synthesizer times (with
++// logging, or under adaptive 2X/3X - see synthesis_gpu_timing_wanted), and
++// each total added to the session's layer_gpu_ns, the layer's own GPU cost
++// that adaptive control adds to the application's. nvidia_gpu_total now
++// carries the total in its dur_us column as well as in b: it read 0 there,
++// which made a log look as if synthesis was never timed.
+ void log_completed_nvidia_gpu_timings(
++    std::atomic<std::int64_t>* layer_gpu_ns,
+     const std::shared_ptr<xrfg::D3D12FrameSynthesizer>& synthesizer) noexcept {
+-    if (!synthesizer || !xrfg::bridge_flight_logger().enabled()) {
++    if (!synthesizer) {
+         return;
+     }
+     for (;;) {
+@@ -1866,9 +2026,14 @@ void log_completed_nvidia_gpu_timings(
+             timing.pack_microseconds,
+             timing.eye0_microseconds,
+             timing.eye1_microseconds);
+-        xrfg::bridge_flight_logger().event(
++        if (layer_gpu_ns != nullptr) {
++            layer_gpu_ns->fetch_add(
++                static_cast<std::int64_t>(timing.total_microseconds) * 1000);
++        }
++        xrfg::bridge_flight_logger().timed_event(
+             xrfg::BridgeFlightOperation::nvidia_gpu_total,
+             0,
++            timing.total_microseconds,
+             timing.composition_microseconds,
+             timing.total_microseconds,
+             timing.current_serial);
+@@ -1890,6 +2055,15 @@ void log_completed_nvidia_gpu_timings(
+     }
+ }
+ 
++// DCS VR Control (0004): synthesis is timed on the GPU for the log, and under
++// adaptive 2X/3X, whose GPU evidence includes it. Read when a swapchain's
++// synthesizer is made: adaptive turned on later, live, goes without the
++// synthesis part until the swapchains are made again.
++[[nodiscard]] bool synthesis_gpu_timing_wanted() noexcept {
++    return xrfg::bridge_flight_logger().enabled() ||
++        xrfg::implicit_layer::read_adaptive_frame_gen(current_layer_directory());
++}
++
+ struct SwapchainState;
+ 
+ enum class SwapchainEligibilityReason : std::int64_t {
+@@ -2746,7 +2920,7 @@ create_d3d12_frame_generation_swapchains(
+                 : D3D12_RESOURCE_STATE_RENDER_TARGET,
+             backend,
+             state->session->nvidia_options,
+-            xrfg::bridge_flight_logger().enabled());
++            synthesis_gpu_timing_wanted());
+             });
+         if (FAILED(gpu_result)) {
+             if (failure_reason != nullptr) {
+@@ -2945,7 +3119,7 @@ create_d3d11_frame_generation_swapchains(
+                     D3D12_RESOURCE_STATE_COMMON,
+                     backend,
+                     session->nvidia_options,
+-                    xrfg::bridge_flight_logger().enabled());
++                    synthesis_gpu_timing_wanted());
+             });
+         if (FAILED(gpu_result)) {
+             if (failure_reason != nullptr) {
+@@ -3216,7 +3390,7 @@ create_vulkan_frame_generation_swapchains(
+                     D3D12_RESOURCE_STATE_COMMON,
+                     backend,
+                     session->nvidia_options,
+-                    xrfg::bridge_flight_logger().enabled());
++                    synthesis_gpu_timing_wanted());
+             });
+         if (FAILED(gpu_result)) {
+             if (failure_reason != nullptr) {
+@@ -4574,7 +4748,8 @@ XrResult layer_create_session_impl(
+             state->frames_per_application_frame,
+             steady_nanoseconds(std::chrono::steady_clock::now()));
+         state->readiness_probe = std::make_unique<ReadinessProbe>(
+-            state->adaptive_mutex, state->adaptive_controller);
++            state->adaptive_mutex, state->adaptive_controller,
++            state->triple_slack_sink);
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::adaptive_switch,
+             static_cast<std::int64_t>(xrfg::latency::AdaptiveReason::enabled),
+@@ -6279,6 +6454,9 @@ struct GeneratedFrameEndInfo {
+         std::uint64_t value{};
+     };
+     std::vector<ReadyFence> synthetic_ready;
++    // DCS VR Control (0004): a first synthetic in 3X off SteamVR; when it was
++    // written and handed over, for the release delay's slack test.
++    std::shared_ptr<LeadReadiness> lead_readiness;
+     // As on PresenterSubmission, kept here as well so a repeat of this frame
+     // can make the same join.
+     std::uint64_t app_release_value{};
+@@ -6643,8 +6821,71 @@ struct TripleReleaseReport {
+     std::int64_t ceiling_us{};
+     std::uint32_t late{};
+     std::uint32_t unwritten{};
++    // The slack test's window (off SteamVR); see 802 below.
++    bool slack_valid{};
++    std::int64_t slack_low_us{};
++    std::int64_t slack_median_us{};
+ };
+ 
++void fill_triple_release_report(
++    const xrfg::latency::TripleReleaseWindow& window,
++    TripleReleaseReport* report) noexcept {
++    if (!window.closed || report == nullptr) {
++        return;
++    }
++    report->delay_us = window.delay / 1000;
++    report->ceiling_us = window.ceiling / 1000;
++    report->late = window.late;
++    report->unwritten = window.unwritten;
++    report->slack_valid = window.slack_valid;
++    report->slack_low_us = window.slack_low / 1000;
++    report->slack_median_us = window.slack_median / 1000;
++}
++
++// DCS VR Control (0004): the slack samples reported since the last cycle,
++// judged by the release delay off SteamVR (see LeadReadiness and
++// xrfg::latency::observe_triple_slack). A sample made under an earlier
++// tuner epoch - before a switch reset the tuner - is dropped.
++// presenter_mutex held; the sink's own mutex is taken inside it and never
++// the other way round.
++void drain_triple_slack(
++    SessionState& state, TripleReleaseReport* report) noexcept {
++    std::vector<std::pair<std::uint32_t, std::int64_t>> samples;
++    try {
++        std::scoped_lock lock(state.triple_slack_sink.mutex);
++        samples.swap(state.triple_slack_sink.samples);
++    } catch (...) {
++        return;
++    }
++    const std::uint32_t epoch = state.triple_release_epoch.load();
++    for (const auto& [sample_epoch, slack] : samples) {
++        if (sample_epoch != epoch) {
++            continue;
++        }
++        fill_triple_release_report(
++            xrfg::latency::observe_triple_slack(
++                state.triple_release,
++                static_cast<xrfg::latency::Nanoseconds>(
++                    state.presenter_display_period),
++                slack),
++            report);
++    }
++}
++
++// A slot due a first synthetic came with nothing queued: as late as a slot
++// can be.
++void report_triple_slot_missed(SessionState& state) noexcept {
++    try {
++        std::scoped_lock lock(state.triple_slack_sink.mutex);
++        if (state.triple_slack_sink.samples.size() < 256) {
++            state.triple_slack_sink.samples.emplace_back(
++                state.triple_release_epoch.load(),
++                -static_cast<std::int64_t>(state.presenter_display_period));
++        }
++    } catch (...) {
++    }
++}
++
+ // Whether the next submission is a frame's first synthetic, queued and
+ // written. presenter_mutex held.
+ [[nodiscard]] bool triple_leader_ready(const SessionState& state) noexcept {
+@@ -6663,16 +6904,13 @@ void observe_triple_release(
+     SessionState& state,
+     bool leader_ready,
+     TripleReleaseReport* report) noexcept {
+-    const auto window = xrfg::latency::observe_triple_release(
+-        state.triple_release,
+-        static_cast<xrfg::latency::Nanoseconds>(state.presenter_display_period),
+-        !leader_ready);
+-    if (window.closed && report != nullptr) {
+-        report->delay_us = window.delay / 1000;
+-        report->ceiling_us = window.ceiling / 1000;
+-        report->late = window.late;
+-        report->unwritten = window.unwritten;
+-    }
++    fill_triple_release_report(
++        xrfg::latency::observe_triple_release(
++            state.triple_release,
++            static_cast<xrfg::latency::Nanoseconds>(
++                state.presenter_display_period),
++            !leader_ready),
++        report);
+ }
+ 
+ // 801: the 3X release delay, once a window. a the delay in microseconds; b
+@@ -6681,6 +6919,13 @@ void observe_triple_release(
+ // ceiling in microseconds. Off SteamVR the test in force is the hand-over
+ // itself, so there the two counts agree except for slots that found nothing
+ // queued.
++//
++// DCS VR Control (0004): off SteamVR the window is the slack test's, and
++// "late" counts first synthetics written after their hand-over (or slots
++// that came with nothing queued). It is followed by 802: a the window's
++// second-lowest slack (the one judged) and b its median, both in
++// microseconds biased by 1,000,000 (below 1,000,000 is written after the
++// hand-over), c the delay now in force in microseconds.
+ void log_triple_release(const TripleReleaseReport& report) noexcept {
+     if (report.delay_us < 0) {
+         return;
+@@ -6691,6 +6936,16 @@ void log_triple_release(const TripleReleaseReport& report) noexcept {
+         static_cast<std::uint64_t>(report.delay_us),
+         report.late | (static_cast<std::uint64_t>(report.unwritten) << 16),
+         static_cast<std::uint64_t>(report.ceiling_us));
++    if (report.slack_valid) {
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::presenter_transition,
++            802,
++            static_cast<std::uint64_t>(std::max<std::int64_t>(
++                0, report.slack_low_us + 1'000'000)),
++            static_cast<std::uint64_t>(std::max<std::int64_t>(
++                0, report.slack_median_us + 1'000'000)),
++            static_cast<std::uint64_t>(report.delay_us));
++    }
+ }
+ 
+ void pace_presenter_submission(
+@@ -7436,10 +7691,17 @@ void continuous_presenter_main(
+                                 if (!leader_written) {
+                                     ++state->triple_release.window_unwritten;
+                                 }
+-                                if (judge_leader) {
+-                                    observe_triple_release(
+-                                        *state, leader_written,
+-                                        &release_report);
++                                // DCS VR Control (0004): off SteamVR the
++                                // hand-over is stamped and the frame's slack
++                                // reported once its writing is known too;
++                                // see LeadReadiness.
++                                const auto& lead =
++                                    request->owned_frame->lead_readiness;
++                                if (judge_leader && lead) {
++                                    lead->handed_ns =
++                                        steady_nanoseconds(pop_now);
++                                    report_lead_slack(
++                                        *lead, state->triple_slack_sink);
+                                 }
+                             } else if (!request->owned_frame->synthetic) {
+                                 // A real frame is going out, so the next
+@@ -7489,9 +7751,15 @@ void continuous_presenter_main(
+                         ++missed_slots;
+                     }
+                     if (judge_leader) {
+-                        observe_triple_release(*state, false, &release_report);
++                        report_triple_slot_missed(*state);
+                     }
+                 }
++                // DCS VR Control (0004): whatever slack has been reported,
++                // judged now. Off SteamVR, 3X only.
++                if (state->frames_per_application_frame > 2 &&
++                    !state->dispatch->steamvr_runtime) {
++                    drain_triple_slack(*state, &release_report);
++                }
+             }
+             // Fed to adaptive control in 2X only. In 3X a missed slot is the
+             // release delay probing its ceiling (see triple_release) far more
+@@ -8676,6 +8944,7 @@ void stop_continuous_presenter(
+ void wait_for_presenter_pair(
+     const std::shared_ptr<SessionState>& state) noexcept {
+     try {
++        ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         // The pair rate does not follow this number: the application enqueues
+         // one pair per release and the presenter spends two frames on it -
+         // three with 3X - so all it sets is the phase at which the
+@@ -8843,6 +9112,7 @@ void wait_for_presenter_pair(
+     const std::shared_ptr<SessionState>& state,
+     std::size_t maximum_outstanding) noexcept {
+     try {
++        ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+         state->presenter_condition.wait(lock, [&] {
+             return state->outstanding_presenter_submissions <=
+@@ -8864,6 +9134,7 @@ void wait_for_presenter_pair(
+ [[nodiscard]] XrResult wait_for_presenter_idle(
+     const std::shared_ptr<SessionState>& state) noexcept {
+     try {
++        ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+         state->presenter_condition.wait(lock, [&] {
+             return state->outstanding_presenter_submissions == 0 ||
+@@ -8930,6 +9201,7 @@ enqueue_presenter_submission(
+     const std::shared_ptr<SessionState>& state,
+     const std::shared_ptr<PresenterSubmission>& request) noexcept {
+     try {
++        ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+         state->presenter_condition.wait(lock, [&] {
+             return request->completed || XR_FAILED(state->presenter_failure) ||
+@@ -9870,7 +10142,8 @@ struct PreparedProjectionFrame {
+                 current_destination_index);
+         {
+             std::scoped_lock gpu_lock(state->session->gpu_mutex);
+-            log_completed_nvidia_gpu_timings(generation->synthesizer);
++            log_completed_nvidia_gpu_timings(
++                &state->session->layer_gpu_ns, generation->synthesizer);
+             if (generation->interop) {
+                 submit_result =
+                     generation->interop->prepare_synthesis();
+@@ -10988,6 +11261,9 @@ void note_bridged_submissions(
+             }
+             const bool submitted = !complete ||
+                 std::find(named.begin(), named.end(), swapchain_state->handle) != named.end();
++            // DCS VR Control (0004): the bridge's copies are the layer's GPU
++            // cost too; see layer_gpu_ns.
++            state->layer_gpu_ns.fetch_add(bridge->consume_copy_gpu_nanoseconds());
+             const bool copied_before = bridge->copies_on_release();
+             const HRESULT result = bridge->frame_ended(submitted);
+             const bool copies_now = bridge->copies_on_release();
+@@ -11093,7 +11369,8 @@ void apply_live_frame_multiplier(
+                     state->adaptive_missed_slots = 0;
+                     if (!state->readiness_probe) {
+                         state->readiness_probe = std::make_unique<ReadinessProbe>(
+-                            state->adaptive_mutex, state->adaptive_controller);
++                            state->adaptive_mutex, state->adaptive_controller,
++                            state->triple_slack_sink);
+                     }
+                 } else {
+                     target = ini_target;
+@@ -11157,6 +11434,27 @@ void apply_live_frame_multiplier(
+                 std::min<std::uint64_t>(stats.samples, 0xFFFFU) |
+                     (std::min<std::uint64_t>(stats.late, 0xFFFFU) << 16),
+                 static_cast<std::uint64_t>(correction / 1000));
++            // DCS VR Control (0004): what the judged value is made of.
++            if (adaptive) {
++                const auto us = [](std::int64_t ns) {
++                    return ns > 0 ? static_cast<std::uint64_t>(ns / 1000) : 0U;
++                };
++                const auto [app_p90, layer_p90] = throughput_part_p90s(
++                    state->throughput, now_ns, xrfg::latency::kSecond);
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_throughput,
++                    1,
++                    us(stats.cpu_p90),
++                    us(stats.gpu_p90),
++                    static_cast<std::uint64_t>(stats.limiter) +
++                        10U * state->throughput.gpu_source);
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_throughput,
++                    2,
++                    us(app_p90),
++                    us(layer_p90),
++                    us(stats.latency_p90));
++            }
+         }
+         if (target == 0 || target == current) {
+             if (reason == AdaptiveReason::manual) {
+@@ -11191,6 +11489,9 @@ void apply_live_frame_multiplier(
+             deep = state->deep_pipeline;
+             // The release delay belongs to the shape it was found in.
+             state->triple_release.reset();
++            // DCS VR Control (0004): slack measured in the old shape is not
++            // judged in the new one.
++            ++state->triple_release_epoch;
+             state->triple_release_probe_due = false;
+             state->triple_leader_due = false;
+             // The display time correction too, scaled to the new period or
+@@ -11249,6 +11550,124 @@ void apply_live_frame_multiplier(
+     }
+ }
+ 
++// DCS VR Control (0004): the GPU timer for adaptive 2X/3X's evidence, made
++// on the xrEndFrame thread the first time it is wanted: on the application's
++// D3D11 immediate context (bridged sessions), or on its D3D12 queue. A
++// D3D11 interop or Vulkan session has none; its frames are judged on the
++// latency fallback.
++void create_application_gpu_timer(SessionState& state) noexcept {
++    auto& throughput = state.throughput;
++    throughput.gpu_timer_tried = true;
++    try {
++        // Bridged D3D11 only. On the D3D11 interop the runtime works the
++        // application's device from the presenter thread as well, and two
++        // more users of the immediate context there is not a risk worth a
++        // measurement.
++        ID3D11Device* d3d11_device = nullptr;
++        ID3D11DeviceContext* d3d11_context = nullptr;
++        if (state.d3d11_bridge) {
++            d3d11_device = state.d3d11_bridge->device.Get();
++            d3d11_context = state.d3d11_bridge->context.Get();
++        }
++        if (d3d11_device != nullptr && d3d11_context != nullptr) {
++            auto timer = std::make_unique<xrfg::D3D11FrameGpuTimer>();
++            if (SUCCEEDED(timer->initialize(d3d11_device, d3d11_context))) {
++                throughput.gpu_timer = std::move(timer);
++                throughput.gpu_source = 1;
++            }
++        } else if (state.graphics_binding == SessionGraphicsBinding::d3d12 &&
++                   !state.d3d11_bridge && state.d3d12_device && state.d3d12_queue) {
++            auto timer = std::make_unique<xrfg::D3D12QueueFrameGpuTimer>();
++            if (SUCCEEDED(timer->initialize(
++                    state.d3d12_device.Get(), state.d3d12_queue.Get()))) {
++                throughput.gpu_timer = std::move(timer);
++                throughput.gpu_source = 2;
++            }
++        }
++    } catch (...) {
++    }
++}
++
++// DCS VR Control (0004): one application frame's throughput evidence, taken
++// as its xrEndFrame is entered: the CPU time since the previous one less what
++// this thread spent blocked in the layer (ApplicationBlockedScope), and the
++// GPU time - the newest completed bracket of the application's own frame
++// (xrfg::FrameGpuTimer, closed here) plus the layer's own synthesis and copy
++// time averaged per frame. A bracket completes a frame or two after its
++// frame; one older than a quarter second is not used, and the frame then has
++// no GPU figure. Under adaptive control only; otherwise the bookkeeping is
++// just reset.
++void sample_application_throughput(
++    SessionState& state, std::chrono::steady_clock::time_point entered) noexcept {
++    auto& throughput = state.throughput;
++    if (throughput.gpu_timer) {
++        throughput.gpu_timer->close();
++    }
++    const std::int64_t blocked = std::exchange(t_application_blocked_ns, 0);
++    if (!state.adaptive_active.load()) {
++        throughput.last_entry = {};
++        return;
++    }
++    if (!throughput.gpu_timer_tried) {
++        create_application_gpu_timer(state);
++    }
++    if (throughput.gpu_timer) {
++        std::array<std::int64_t, 8> brackets{};
++        const std::size_t count = throughput.gpu_timer->collect(brackets);
++        if (count != 0) {
++            throughput.last_gpu_app_ns = brackets[count - 1];
++            throughput.last_gpu_at = entered;
++        }
++    }
++    throughput.layer_ring[throughput.layer_next] = state.layer_gpu_ns.exchange(0);
++    throughput.layer_next = (throughput.layer_next + 1) % throughput.layer_ring.size();
++    throughput.layer_filled =
++        std::min(throughput.layer_filled + 1, throughput.layer_ring.size());
++    std::int64_t layer_sum = 0;
++    for (std::size_t index = 0; index < throughput.layer_filled; ++index) {
++        layer_sum += throughput.layer_ring[index];
++    }
++    const std::int64_t layer_per_frame =
++        layer_sum / static_cast<std::int64_t>(throughput.layer_filled);
++    if (throughput.last_entry != std::chrono::steady_clock::time_point{}) {
++        const std::int64_t interval = std::chrono::duration_cast<
++            std::chrono::nanoseconds>(entered - throughput.last_entry).count();
++        const std::int64_t cpu = std::max<std::int64_t>(0, interval - blocked);
++        const bool gpu_fresh =
++            throughput.last_gpu_app_ns >= 0 &&
++            entered - throughput.last_gpu_at < std::chrono::milliseconds(250);
++        const std::int64_t gpu_app = gpu_fresh ? throughput.last_gpu_app_ns : -1;
++        const std::int64_t gpu = gpu_app >= 0 ? gpu_app + layer_per_frame : -1;
++        const auto at = steady_nanoseconds(entered);
++        try {
++            std::scoped_lock adaptive_lock(state.adaptive_mutex);
++            state.adaptive_controller.add_frame(at, cpu, gpu);
++        } catch (...) {
++        }
++        auto& part = throughput.parts[throughput.parts_next];
++        part.at = at;
++        part.app = gpu_app;
++        part.layer = layer_per_frame;
++        throughput.parts_next = (throughput.parts_next + 1) % throughput.parts.size();
++    }
++    throughput.last_entry = entered;
++}
++
++// Opens the next bracket when the application is released, whichever way
++// its xrEndFrame returns.
++struct ApplicationReleaseMark {
++    SessionState* state{};
++    ApplicationReleaseMark(const ApplicationReleaseMark&) = delete;
++    ApplicationReleaseMark& operator=(const ApplicationReleaseMark&) = delete;
++    explicit ApplicationReleaseMark(SessionState* input) : state(input) {}
++    ~ApplicationReleaseMark() {
++        if (state != nullptr && state->throughput.gpu_timer &&
++            state->adaptive_active.load()) {
++            state->throughput.gpu_timer->open();
++        }
++    }
++};
++
+ XrResult layer_end_frame_impl(
+     XrSession session,
+     const XrFrameEndInfo* end_info) {
+@@ -11256,6 +11675,11 @@ XrResult layer_end_frame_impl(
+     if (!state || state->dispatch->end_frame == nullptr) {
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS VR Control (0004): the frame's throughput evidence, before the
++    // layer queues anything of its own on the application's context; and
++    // the next frame's GPU bracket opened when this call returns.
++    sample_application_throughput(*state, std::chrono::steady_clock::now());
++    const ApplicationReleaseMark release_mark(state.get());
+     PrivateDepthStrip private_depth_strip;
+     end_info = strip_private_depth(*state, end_info, private_depth_strip);
+ 
+@@ -11931,16 +12355,36 @@ XrResult layer_end_frame_impl(
+             // synthetic; see ReadinessProbe. Taken before the presenter can
+             // see the frame.
+             ReadinessProbe::Item readiness{};
+-            if (state->adaptive_active.load() && state->readiness_probe &&
+-                state->application_released_at !=
+-                    std::chrono::steady_clock::time_point{}) {
++            // DCS VR Control (0004): 3X off SteamVR steers its release delay
++            // on when this frame's first synthetic is written, so it needs
++            // the probe whether or not adaptive control is on.
++            const bool triple_slack = state->frames_per_application_frame > 2 &&
++                !state->dispatch->steamvr_runtime;
++            if (triple_slack && !state->readiness_probe) {
++                state->readiness_probe = std::make_unique<ReadinessProbe>(
++                    state->adaptive_mutex, state->adaptive_controller,
++                    state->triple_slack_sink);
++            }
++            if (state->readiness_probe) {
+                 for (const auto& ready : presenter_first_frame->synthetic_ready) {
+                     if (ready.fence && ready.value != 0) {
+                         readiness.fences.push_back(ready.fence);
+                         readiness.values.push_back(ready.value);
+                     }
+                 }
++                readiness.report_latency = state->adaptive_active.load() &&
++                    state->application_released_at !=
++                        std::chrono::steady_clock::time_point{};
+                 readiness.released_at = state->application_released_at;
++                if (triple_slack && !readiness.fences.empty()) {
++                    auto lead = std::make_shared<LeadReadiness>();
++                    lead->epoch = state->triple_release_epoch.load();
++                    presenter_first_frame->lead_readiness = lead;
++                    readiness.lead = std::move(lead);
++                }
++                if (!readiness.report_latency && !readiness.lead) {
++                    readiness.fences.clear();
++                }
+             }
+             result = enqueue_presenter_pair(
+                 state,
+@@ -12356,6 +12800,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_wait_frame(
+     const auto token = xrfg::bridge_flight_logger().begin(
+         xrfg::BridgeFlightOperation::application_wait_frame,
+         handle_value(session));
++    ApplicationBlockedScope blocked; // DCS VR Control (0004)
+     const XrResult result = guard_c_api_boundary([&] {
+         return layer_wait_frame_impl(session, wait_info, frame_state);
+     });
+@@ -12379,6 +12824,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_begin_frame(
+     const auto token = xrfg::bridge_flight_logger().begin(
+         xrfg::BridgeFlightOperation::application_begin_frame,
+         handle_value(session));
++    ApplicationBlockedScope blocked; // DCS VR Control (0004)
+     const XrResult result = guard_c_api_boundary([&] {
+         return layer_begin_frame_impl(session, begin_info);
+     });
+@@ -12517,6 +12963,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_acquire_swapchain_image(
+     const auto token = xrfg::bridge_flight_logger().begin(
+         xrfg::BridgeFlightOperation::application_swapchain_acquire,
+         handle_value(swapchain));
++    ApplicationBlockedScope blocked; // DCS VR Control (0004)
+     const XrResult result = guard_c_api_boundary([&] {
+         return layer_acquire_swapchain_image_impl(swapchain, acquire_info, index);
+     });
+@@ -12536,6 +12983,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_wait_swapchain_image(
+         xrfg::BridgeFlightOperation::application_swapchain_wait,
+         handle_value(swapchain),
+         wait_info ? static_cast<std::uint64_t>(wait_info->timeout) : 0);
++    ApplicationBlockedScope blocked; // DCS VR Control (0004)
+     const XrResult result = guard_c_api_boundary([&] {
+         return layer_wait_swapchain_image_impl(swapchain, wait_info);
+     });
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index 6605794..7e8b8d2 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -151,6 +151,20 @@ int main(int argc, char** argv) {
+             404,
+             1010,
+             77);
++        // DCS VR Control (0004): the synthesis total in dur_us as well.
++        enabled.timed_event(
++            xrfg::BridgeFlightOperation::nvidia_gpu_total,
++            0,
++            3737,
++            850,
++            3737,
++            78);
++        enabled.event(
++            xrfg::BridgeFlightOperation::adaptive_throughput,
++            1,
++            15000,
++            18000,
++            12);
+         enabled.event(
+             xrfg::BridgeFlightOperation::adaptive_switch,
+             1,
+@@ -204,6 +218,12 @@ int main(int argc, char** argv) {
+                 log.find("op=display_time_correction result=-11111 dur_us=0 a=55555 b=44444 c=2") !=
+                     std::string::npos,
+             "bridge log is missing the DCS VR Control latency records");
++        require(
++            log.find("phase=I op=nvidia_gpu_total result=0 dur_us=3737 a=850 b=3737 c=78") !=
++                    std::string::npos &&
++                log.find("op=adaptive_throughput result=1 dur_us=0 a=15000 b=18000 c=12") !=
++                    std::string::npos,
++            "bridge log is missing the 0004 GPU timing records");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/d3d11_bridge_tests.cpp b/tests/d3d11_bridge_tests.cpp
+index 82d858d..d1c7bab 100644
+--- a/tests/d3d11_bridge_tests.cpp
++++ b/tests/d3d11_bridge_tests.cpp
+@@ -5,9 +5,12 @@
+ // is what that texture holds after a release.
+ 
+ #include "xrfg/d3d11_bridge.hpp"
++#include "xrfg/frame_gpu_timer.hpp"
+ 
+ #include <array>
++#include <chrono>
+ #include <cstdint>
++#include <thread>
+ #include <cstring>
+ #include <iostream>
+ #include <vector>
+@@ -582,6 +585,97 @@ void test_submitted_never_skips(const Devices& devices) {
+ 
+ } // namespace
+ 
++// DCS VR Control (0004): adaptive 2X/3X's GPU evidence. The bridge's copies
++// are timed, and a frame bracketed on either API comes back from collect()
++// without anyone waiting on the GPU, once and in order.
++void test_gpu_timing(const Devices& devices) {
++    {
++        std::array<ComPtr<ID3D12Resource>, 2> runtime;
++        for (auto& image : runtime) {
++            image = create_runtime_image(devices.d3d12.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, false, 2);
++        }
++        std::vector<ID3D12Resource*> images{runtime[0].Get(), runtime[1].Get()};
++        xrfg::D3D11BridgeSwapchain bridge;
++        xrfg::D3D11BridgeSwapchainDescription requested{};
++        requested.requested_format = DXGI_FORMAT_R8G8B8A8_UNORM;
++        requested.requested_sample_count = 1;
++        std::uint32_t stage = 0;
++        expect(SUCCEEDED(bridge.initialize(
++                   devices.d3d11.Get(), devices.context.Get(), devices.d3d12.Get(),
++                   devices.queue.Get(), images, requested, &stage)),
++            "timing: bridge initialised");
++        expect(bridge.consume_copy_gpu_nanoseconds() == 0, "timing: nothing copied, nothing timed");
++        for (std::uint32_t index = 0; index < 6; ++index) {
++            expect(SUCCEEDED(bridge.before_write(index % 2)), "timing: before_write");
++            expect(SUCCEEDED(bridge.release(index % 2)), "timing: release");
++            expect(SUCCEEDED(bridge.mark_read(index % 2)), "timing: mark_read");
++        }
++        expect(SUCCEEDED(bridge.wait_for_idle()), "timing: idle");
++        const std::int64_t copies = bridge.consume_copy_gpu_nanoseconds();
++        expect(copies >= 0 && copies < 1'000'000'000, "timing: copy time is a plausible total");
++        expect(bridge.consume_copy_gpu_nanoseconds() == 0, "timing: consumed once");
++    }
++    const auto drain = [](xrfg::FrameGpuTimer& timer, std::size_t expected) {
++        std::array<std::int64_t, 16> values{};
++        std::size_t total = 0;
++        bool sane = true;
++        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++        while (total < expected && std::chrono::steady_clock::now() < deadline) {
++            const std::size_t got = timer.collect(values);
++            for (std::size_t index = 0; index < got; ++index) {
++                sane = sane && values[index] >= 0 && values[index] < 1'000'000'000;
++            }
++            total += got;
++            if (total < expected) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(1));
++            }
++        }
++        return sane && total == expected && timer.collect(values) == 0;
++    };
++    {
++        xrfg::D3D11FrameGpuTimer timer;
++        expect(SUCCEEDED(timer.initialize(devices.d3d11.Get(), devices.context.Get())),
++            "timing: D3D11 timer initialised");
++        ComPtr<ID3D11Texture2D> texture;
++        D3D11_TEXTURE2D_DESC description{};
++        description.Width = 256;
++        description.Height = 256;
++        description.MipLevels = 1;
++        description.ArraySize = 1;
++        description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++        description.SampleDesc.Count = 1;
++        description.BindFlags = D3D11_BIND_RENDER_TARGET;
++        expect(SUCCEEDED(devices.d3d11->CreateTexture2D(&description, nullptr, texture.GetAddressOf())),
++            "timing: D3D11 work texture");
++        ComPtr<ID3D11RenderTargetView> view;
++        expect(SUCCEEDED(devices.d3d11->CreateRenderTargetView(texture.Get(), nullptr, view.GetAddressOf())),
++            "timing: D3D11 work view");
++        timer.close(); // nothing open: nothing recorded
++        for (int frame = 0; frame < 3; ++frame) {
++            timer.open();
++            const float colour[4] = {0.1F * static_cast<float>(frame), 0, 0, 1};
++            devices.context->ClearRenderTargetView(view.Get(), colour);
++            timer.close();
++        }
++        expect(drain(timer, 3), "timing: three D3D11 brackets collected, once each");
++    }
++    {
++        xrfg::D3D12QueueFrameGpuTimer timer;
++        expect(SUCCEEDED(timer.initialize(devices.d3d12.Get(), devices.queue.Get())),
++            "timing: D3D12 timer initialised");
++        // More brackets than the ring holds: the overflow goes unmeasured
++        // rather than overwriting what the GPU has not reported.
++        for (int frame = 0; frame < 12; ++frame) {
++            timer.open();
++            timer.close();
++        }
++        expect(drain(timer, 8), "timing: a full ring of D3D12 brackets, the rest dropped");
++        timer.open();
++        timer.close();
++        expect(drain(timer, 1), "timing: the ring is reusable once collected");
++    }
++}
++
+ int main() {
+     Devices devices;
+     if (!create_devices(&devices)) {
+@@ -595,6 +689,7 @@ int main() {
+     test_resolve(devices);
+     test_unsubmitted_skip(devices);
+     test_submitted_never_skips(devices);
++    test_gpu_timing(devices);
+     if (g_failures != 0) {
+         std::cerr << g_failures << " D3D11 bridge check(s) failed\n";
+         return 1;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index 1bddd30..6406bcb 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -191,10 +191,126 @@ struct TellSimulation {
+     }
+ };
+ 
++
++// DCS VR Control (0004): the slack-steered release delay.
++void triple_slack_tests() {
++    {
++        // The live flight: every first synthetic written ~28 ms after its
++        // hand-over. Nothing to give back at zero delay; the window reports
++        // the shortfall.
++        TripleReleaseTuner tuner;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < 10 * TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_slack(tuner, kPeriod, -28 * kMillisecond);
++        }
++        require(window.closed && window.slack_valid, "slack window closes");
++        require(tuner.delay == 0 && window.late == 30, "no delay, all late");
++        require(window.slack_low == -28 * kMillisecond, "shortfall reported");
++    }
++    {
++        // Room: written 12 ms before the hand-over at zero delay, and the
++        // delay eats into it one for one. Ramps up to the room less the
++        // margin, without late windows, and holds there.
++        TripleReleaseTuner tuner;
++        const Nanoseconds room = 12 * kMillisecond;
++        std::uint32_t late_windows = 0;
++        Nanoseconds first_raise = -1;
++        for (std::uint32_t i = 0; i < 60 * TripleReleaseTuner::kWindowFrames; ++i) {
++            const Nanoseconds jitter = (i % 7) * 100'000;
++            const auto window = observe_triple_slack(tuner, kPeriod, room - tuner.delay - jitter);
++            if (window.closed) {
++                late_windows += window.late >= 2 ? 1U : 0U;
++                if (first_raise < 0) first_raise = window.delay;
++            }
++        }
++        require(first_raise == kMaxSlackRaise, "first window raises by the capped step");
++        require(late_windows == 0, "ramp never late");
++        require(tuner.delay >= room - kSlackMargin - kMillisecond && tuner.delay <= room - kSlackMargin,
++            "settles at the room less the margin: " + std::to_string(tuner.delay));
++    }
++    {
++        // A title with two slow frames a second and 15 ms of room on the
++        // rest: the binary test never raised here; the second-lowest sample
++        // is the judge, so this one does.
++        TripleReleaseTuner tuner;
++        for (std::uint32_t i = 0; i < 20 * TripleReleaseTuner::kWindowFrames; ++i) {
++            const bool slow = i % TripleReleaseTuner::kWindowFrames == 0;
++            observe_triple_slack(tuner, kPeriod, slow ? -5 * kMillisecond : 15 * kMillisecond - tuner.delay);
++        }
++        TripleReleaseTuner binary;
++        for (std::uint32_t i = 0; i < 20 * TripleReleaseTuner::kWindowFrames; ++i) {
++            observe_triple_release(binary, kPeriod, i % 15 == 0);
++        }
++        require(binary.delay == 0, "binary test frozen by two late frames a window");
++        require(tuner.delay >= 10 * kMillisecond, "slack test ramps past one outlier: " + std::to_string(tuner.delay));
++    }
++    {
++        // The room shrinks (the title got heavier): a late window backs off
++        // by the shortfall, holds, and the delay ends back inside the room.
++        TripleReleaseTuner tuner;
++        Nanoseconds room = 14 * kMillisecond;
++        for (std::uint32_t i = 0; i < 20 * TripleReleaseTuner::kWindowFrames; ++i) {
++            observe_triple_slack(tuner, kPeriod, room - tuner.delay);
++        }
++        const Nanoseconds before = tuner.delay;
++        require(before >= 10 * kMillisecond, "ramped first");
++        room = 5 * kMillisecond;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_slack(tuner, kPeriod, room - tuner.delay);
++        }
++        require(window.late == 30 && tuner.delay <= room - kSlackMargin && tuner.hold > 0,
++            "one failed window backs off by the whole shortfall: " + std::to_string(tuner.delay));
++        require(tuner.last_failure == before, "failure remembered");
++        for (std::uint32_t i = 0; i < 40 * TripleReleaseTuner::kWindowFrames; ++i) {
++            const auto w = observe_triple_slack(tuner, kPeriod, room - tuner.delay);
++            require(!w.closed || w.late < 2, "no further late windows");
++        }
++        require(tuner.delay <= room && tuner.delay >= room - kSlackMargin - kMaxSlackRaise, "held inside the room");
++    }
++    {
++        // Slots that came with nothing queued arrive as minus one period.
++        TripleReleaseTuner tuner;
++        tuner.delay = 6 * kMillisecond;
++        tuner.ceiling = 6 * kMillisecond;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_slack(tuner, kPeriod, i < 3 ? -kPeriod : 3 * kMillisecond);
++        }
++        require(window.closed && tuner.delay == 0, "missed slots back off fully");
++        require(observe_triple_slack(tuner, 0, -1).closed == false, "no period, no observation");
++    }
++}
++
+ void display_time_tests() {
+     require(display_time_mode(3, true) == 2 && display_time_mode(3, false) == 2 &&
+             display_time_mode(2, true) == 1 && display_time_mode(2, false) == 0,
+         "mode keys");
++    {
++        // DCS VR Control (0004): the first live 3X flight with release
++        // anchoring held 33.3 ms (one virtual period, not the 55.6 ms the
++        // presenter-anchored version had learned). Its real frames against
++        // the told times, matched frame by frame in the log: 119 of 150
++        // exact, 26 one period late (frames that missed their slot), 4 later
++        // still. The median says the correction is right, and a window that
++        // mixed cannot move it either way.
++        DisplayTimeCorrector corrector;
++        corrector.mode = 2;
++        corrector.correction = 3 * kPeriod;
++        bool moved = false;
++        for (int i = 0; i < 150 * 4; ++i) {
++            const int slot = i % 150;
++            const Nanoseconds residual = slot < 119 ? 0 : slot < 145 ? kPeriod : 2 * kPeriod;
++            moved = observe_presented(corrector, residual, kPeriod).changed || moved;
++        }
++        require(!moved && corrector.correction == 3 * kPeriod,
++            "live 3X residuals keep the release-anchored correction");
++        // All exact: learned for the shape, so a switch back restores it.
++        for (std::size_t i = 0; i < DisplayTimeCorrector::kWindowSamples; ++i) {
++            observe_presented(corrector, 0, kPeriod);
++        }
++        require(corrector.learned[2] == 3 * kPeriod, "learned in 3X");
++    }
+     const Pipeline triple{3, false, 5};      // measured on DCS/Pimax: +55.56 ms at 90 Hz
+     const Pipeline deep_pair{2, true, 3};    // +33.3 ms
+     const Pipeline shallow_pair{2, false, 2};
+@@ -299,7 +415,7 @@ AdaptiveRun drive(AdaptiveFrameGenController& controller, Nanoseconds& now, Nano
+     std::uint32_t index = 0;
+     while (now < end) {
+         now += frame;
+-        controller.add_work(now, work);
++        controller.add_frame(now, work, work);
+         if (late_every != 0 && ++index % late_every == 0) {
+             controller.add_late(now);
+         }
+@@ -348,12 +464,12 @@ void adaptive_tests() {
+         // A p90 is a p90: one slow frame in ten does not block it.
+         AdaptiveFrameGenController controller;
+         controller.start(3, start);
+-        for (int i = 0; i < 9; ++i) controller.add_work(start + 2 * kSecond + i, 10 * kMillisecond);
+-        controller.add_work(start + 2 * kSecond + 9, 30 * kMillisecond);
++        for (int i = 0; i < 9; ++i) controller.add_frame(start + 2 * kSecond + i, 10 * kMillisecond, 10 * kMillisecond);
++        controller.add_frame(start + 2 * kSecond + 9, 30 * kMillisecond, 30 * kMillisecond);
+         const auto stats = controller.stats(start + 3 * kSecond, 3 * kSecond);
+         require(stats.samples == 10 && stats.p90 == 10 * kMillisecond, "nearest-rank p90");
+         // Samples inside the settle after a start are not counted.
+-        controller.add_work(start + kSecond / 2, 50 * kMillisecond);
++        controller.add_frame(start + kSecond / 2, 50 * kMillisecond, 50 * kMillisecond);
+         require(controller.stats(start + 3 * kSecond, 3 * kSecond).samples == 10, "settle ignored");
+     }
+     {
+@@ -395,6 +511,105 @@ void adaptive_tests() {
+         require(up.target == 3, "upshift");
+         require(controller.downshift_window() == 3 * kSecond, "no flap, base window");
+     }
++    {
++        // DCS VR Control (0004), the live flight's shape at 90 Hz: pipeline
++        // latency 40 ms (what the first version judged, and never left 3X
++        // on), but 15 ms of CPU and 18 ms of GPU per frame. Downshifts.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        AdaptiveRun run{};
++        while (now < start + 20 * kSecond && run.target == 0) {
++            now += 3 * kPeriod;
++            controller.add_latency(now, 40 * kMillisecond);
++            controller.add_frame(now, 15 * kMillisecond, 18 * kMillisecond);
++            const auto decision = controller.evaluate(now, kPeriod);
++            if (decision.target != 0) { run.target = decision.target; run.decision = decision; }
++        }
++        require(run.target == 2 && run.decision.reason == AdaptiveReason::headroom, "throughput downshift");
++        require(run.decision.stats.cpu_p90 == 15 * kMillisecond && run.decision.stats.gpu_p90 == 18 * kMillisecond &&
++            run.decision.stats.latency_p90 == 40 * kMillisecond && run.decision.stats.p90 == 18 * kMillisecond,
++            "components reported");
++        require(run.decision.stats.limiter == AdaptiveLimiter::gpu, "GPU is the limiter");
++    }
++    {
++        // Same, with 25 ms of GPU: two periods cannot hold it. Stays 3X.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        bool moved = false;
++        while (now < start + 60 * kSecond) {
++            now += 3 * kPeriod;
++            controller.add_latency(now, 40 * kMillisecond);
++            controller.add_frame(now, 15 * kMillisecond, 25 * kMillisecond);
++            moved = moved || controller.evaluate(now, kPeriod).target != 0;
++        }
++        require(!moved, "GPU-bound stays 3X");
++    }
++    {
++        // No GPU figure: the latency stands in, so the live flight's 50 ms
++        // keeps 3X ...
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        bool moved = false;
++        while (now < start + 30 * kSecond) {
++            now += 3 * kPeriod;
++            controller.add_latency(now, 50 * kMillisecond);
++            controller.add_frame(now, 15 * kMillisecond, -1);
++            moved = moved || controller.evaluate(now, kPeriod).target != 0;
++        }
++        require(!moved, "latency fallback is conservative");
++        const auto stats = controller.stats(now, kSecond);
++        require(stats.gpu_samples == 0 && stats.p90 == 50 * kMillisecond, "fallback value");
++    }
++    {
++        // ... and with no evidence at all for the GPU, nothing is judged.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        bool moved = false;
++        while (now < start + 30 * kSecond) {
++            now += 3 * kPeriod;
++            controller.add_frame(now, 10 * kMillisecond, -1);
++            moved = moved || controller.evaluate(now, kPeriod).target != 0;
++        }
++        const auto stats = controller.stats(now, kSecond);
++        require(!moved && stats.samples == 0 && stats.frames > 0 && stats.cpu_p90 == 10 * kMillisecond,
++            "CPU alone never downshifts");
++    }
++    {
++        // Mostly measured, a few frames without: still judged while nine in
++        // ten have evidence; with fewer, not.
++        for (int unmeasured_every : {20, 5}) {
++            AdaptiveFrameGenController controller;
++            controller.start(3, start);
++            Nanoseconds now = start;
++            bool moved = false;
++            int index = 0;
++            while (now < start + 20 * kSecond && !moved) {
++                now += 3 * kPeriod;
++                const bool unmeasured = ++index % unmeasured_every == 0;
++                controller.add_frame(now, 12 * kMillisecond, unmeasured ? -1 : 14 * kMillisecond);
++                moved = controller.evaluate(now, kPeriod).target != 0;
++            }
++            require(moved == (unmeasured_every == 20), "nine in ten judged");
++        }
++    }
++    {
++        // 2X: CPU over two periods goes back to 3X on its own.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        AdaptiveDecision decision{};
++        while (now < start + 10 * kSecond && decision.target == 0) {
++            now += 2 * kPeriod;
++            controller.add_frame(now, 24 * kMillisecond, 10 * kMillisecond);
++            decision = controller.evaluate(now, kPeriod);
++        }
++        require(decision.target == 3 && decision.reason == AdaptiveReason::slow &&
++            decision.stats.limiter == AdaptiveLimiter::cpu, "CPU-bound upshift");
++    }
+     {
+         // Steady 2X with margin stays there.
+         AdaptiveFrameGenController controller;
+@@ -410,6 +625,7 @@ void adaptive_tests() {
+ int main() {
+     try {
+         triple_release_tests();
++        triple_slack_tests();
+         display_time_tests();
+         adaptive_tests();
+         std::cout << "Latency control tests passed\n";
+diff --git a/tests/layer_adaptive_throughput.cmake b/tests/layer_adaptive_throughput.cmake
+new file mode 100644
+index 0000000..80c35f3
+--- /dev/null
++++ b/tests/layer_adaptive_throughput.cmake
+@@ -0,0 +1,82 @@
++# DCS VR Control (0004): runs dcs-throughput-down or dcs-throughput-gpu with
++# `adaptive_frame_gen=1` (ADAPTIVE_INI beside the layer DLL) and checks, from
++# the flight log, that adaptive control judged the application's throughput:
++#   down  CPU 5 ms and GPU 6 ms per frame at the fake's 10 ms period (with
++#         the test's and the layer's overhead, ~10-13 and ~11-15 ms judged),
++#         under 85% of two periods: 3X -> 2X on headroom.
++#   gpu   CPU 5 ms and GPU 23 ms per frame, GPU over two periods: no downshift.
++# Both: the CPU and GPU components are logged (adaptive_throughput), the GPU
++# one from the D3D12 queue bracket; synthesis GPU time carries its total in
++# dur_us; and 3X off SteamVR steers its release delay on slack (802).
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN ADAPTIVE_INI WORK_DIR CASE)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${ADAPTIVE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(adaptive_ini_name "${ADAPTIVE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${adaptive_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        "dcs-throughput-${CASE}"
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain 'dcs-throughput-${CASE}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++# Both components, with the GPU measured on the application's D3D12 queue
++# (source 2 in the tens of c).
++string(REGEX MATCH "op=adaptive_throughput result=1 dur_us=0 a=[1-9][0-9]* b=[1-9][0-9]* c=2[12]" components "${contents}")
++if(components STREQUAL "")
++    message(FATAL_ERROR "No adaptive_throughput record with CPU and GPU measured on the D3D12 queue")
++endif()
++string(REGEX MATCH "op=adaptive_throughput result=2 dur_us=0 a=[1-9][0-9]* b=[0-9]+ c=[1-9][0-9]*" parts "${contents}")
++if(parts STREQUAL "")
++    message(FATAL_ERROR "No adaptive_throughput record with the GPU parts and the pipeline latency")
++endif()
++# Synthesis GPU time in dur_us as well as in b.
++string(REGEX MATCH "op=nvidia_gpu_total result=0 dur_us=([0-9]+) a=[0-9]+ b=([0-9]+) " gpu_total "${contents}")
++if(gpu_total STREQUAL "" OR NOT CMAKE_MATCH_1 STREQUAL CMAKE_MATCH_2)
++    message(FATAL_ERROR "nvidia_gpu_total does not carry the synthesis total in dur_us: '${gpu_total}'")
++endif()
++# The release delay judged on slack while in 3X.
++string(FIND "${contents}" "op=presenter_transition result=802 " slack_found)
++if(slack_found EQUAL -1)
++    message(FATAL_ERROR "No 3X release delay slack window (802)")
++endif()
++
++string(FIND "${contents}" "op=adaptive_switch result=1 dur_us=0 a=3 b=2 " downshift_found)
++if(CASE STREQUAL "down")
++    if(downshift_found EQUAL -1)
++        message(FATAL_ERROR "No 3X -> 2X downshift for an application with throughput headroom")
++    endif()
++    # What the first version judged: the pipeline latency in 3X. Reported, so
++    # a run shows how far it was from the throughput that decided.
++    string(REGEX MATCHALL "op=latency_status result=13 [^\n]*\n[^\n]*op=adaptive_throughput result=1 [^\n]*\n[^\n]*op=adaptive_throughput result=2 dur_us=0 a=[0-9]+ b=[0-9]+ c=[0-9]+" triple_status "${contents}")
++    message(STATUS "3X status before the switch: ${triple_status}")
++else()
++    if(NOT downshift_found EQUAL -1)
++        message(FATAL_ERROR "Downshifted to 2X with a GPU that cannot hold two periods")
++    endif()
++endif()
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index e4e117d..be0062d 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -19,7 +19,9 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <cstring>
++#include <condition_variable>
+ #include <deque>
++#include <functional>
+ #include <filesystem>
+ #include <fstream>
+ #include <iostream>
+@@ -171,6 +173,30 @@ bool g_display_latency_mode = false;
+ // time it is told must again be its real frame's.
+ bool g_adaptive_latency_mode = false;
+ int g_simulated_render_ms = 0;
++// dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
++// dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
++// time per frame set apart - CPU by a sleep from the frame's start, GPU by a
++// wait on its own queue that a simulated GPU signals g_throughput_gpu_ms
++// after the previous frame's GPU work or the submission, whichever is later
++// (an application that submits as it records). Neither waits for its queue,
++// so the two overlap as they do in a real title. -down: CPU 5 and GPU 6 ms;
++// measured with the test's and the layer's own overhead on WARP that is
++// 10-13 ms of CPU and 11-15 ms of GPU (the layer's synthesis included),
++// under 85% of two of the fake's 10 ms periods (17 ms) - the live case was
++// CPU 15, GPU 18 at 90 Hz, where the margin is the same 85%: adaptive
++// control must move it to 2X. -gpu: GPU 23 ms, over two periods (the live
++// case's 25 ms at 90 Hz): it must stay in 3X. The fake cannot make a
++// pipeline latency far beyond the frame's GPU time - the layer's own part of
++// it is a few milliseconds on WARP - so the latency-40 case itself is the
++// controller's unit test (xrfg_latency_control_tests).
++bool g_throughput_mode = false;
++// Where each throughput frame's time went on the test's side, in ms: before
++// begin, begin, the wait thread's join, the CPU sleep, the swapchain calls,
++// xrEndFrame. Printed with the result: a loaded machine shows here.
++std::vector<std::array<double, 7>> g_throughput_phases;
++bool g_throughput_expect_downshift = false;
++int g_throughput_cpu_ms = 0;
++int g_throughput_gpu_ms = 0;
+ std::mutex g_told_mutex;
+ std::vector<std::pair<float, XrTime>> g_told_by_pose;
+ bool g_flight_simulator_mode = false;
+@@ -547,6 +573,154 @@ void pace_like_a_display() {
+     }
+ }
+ 
++void precise_sleep(std::chrono::nanoseconds duration);
++
++// DCS VR Control (0004): the dcs-throughput scenarios' wait thread, made
++// once. Run behaves as a std::thread running the job (join() included): on
++// this thread when one is given, on a thread of its own otherwise.
++class PersistentWaitThread {
++public:
++    PersistentWaitThread() : thread_([this] { loop(); }) {}
++    PersistentWaitThread(const PersistentWaitThread&) = delete;
++    PersistentWaitThread& operator=(const PersistentWaitThread&) = delete;
++    ~PersistentWaitThread() {
++        {
++            std::scoped_lock lock(mutex_);
++            stop_ = true;
++        }
++        condition_.notify_all();
++        thread_.join();
++    }
++    class Run {
++    public:
++        Run(PersistentWaitThread* owner, std::function<void()> job) : owner_(owner) {
++            if (owner_ != nullptr) {
++                std::scoped_lock lock(owner_->mutex_);
++                owner_->job_ = std::move(job);
++                owner_->done_ = false;
++                owner_->condition_.notify_all();
++            } else {
++                thread_ = std::thread(std::move(job));
++            }
++        }
++        Run(const Run&) = delete;
++        Run& operator=(const Run&) = delete;
++        void join() {
++            if (owner_ != nullptr) {
++                std::unique_lock lock(owner_->mutex_);
++                owner_->condition_.wait(lock, [&] { return owner_->done_; });
++            } else if (thread_.joinable()) {
++                thread_.join();
++            }
++        }
++
++    private:
++        PersistentWaitThread* owner_{};
++        std::thread thread_;
++    };
++
++private:
++    void loop() {
++        std::unique_lock lock(mutex_);
++        for (;;) {
++            condition_.wait(lock, [&] { return stop_ || static_cast<bool>(job_); });
++            if (stop_) {
++                return;
++            }
++            auto job = std::move(job_);
++            job_ = nullptr;
++            lock.unlock();
++            job();
++            lock.lock();
++            done_ = true;
++            condition_.notify_all();
++        }
++    }
++    std::mutex mutex_;
++    std::condition_variable condition_;
++    std::function<void()> job_;
++    bool done_{true};
++    bool stop_{};
++    std::thread thread_;
++};
++std::unique_ptr<PersistentWaitThread> g_persistent_wait_thread;
++
++// DCS VR Control (0004): a GPU that takes a set time per frame, for the
++// dcs-throughput scenarios. submit() puts a wait on the application's queue
++// for a fence value this thread signals once the work would be done: a set
++// time after the later of the submission and the previous frame's work.
++class GpuWorkSimulator {
++public:
++    bool initialize() {
++        if (!g_device || !g_queue ||
++            FAILED(g_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence_.GetAddressOf())))) {
++            return false;
++        }
++        thread_ = std::thread([this] { run(); });
++        return true;
++    }
++    GpuWorkSimulator() = default;
++    GpuWorkSimulator(const GpuWorkSimulator&) = delete;
++    GpuWorkSimulator& operator=(const GpuWorkSimulator&) = delete;
++    ~GpuWorkSimulator() {
++        {
++            std::scoped_lock lock(mutex_);
++            stop_ = true;
++        }
++        condition_.notify_all();
++        if (thread_.joinable()) {
++            thread_.join();
++        }
++        // Nothing may stay blocked on the queue behind a value never signalled.
++        if (fence_) {
++            fence_->Signal(next_value_);
++        }
++    }
++    bool submit(std::chrono::nanoseconds work) {
++        const auto now = std::chrono::steady_clock::now();
++        std::uint64_t value = 0;
++        {
++            std::scoped_lock lock(mutex_);
++            const auto start = std::max(now, last_done_);
++            last_done_ = start + work;
++            value = next_value_++;
++            pending_.emplace_back(value, last_done_);
++        }
++        condition_.notify_one();
++        return SUCCEEDED(g_queue->Wait(fence_.Get(), value));
++    }
++
++private:
++    void run() {
++        for (;;) {
++            std::unique_lock lock(mutex_);
++            condition_.wait(lock, [&] { return stop_ || !pending_.empty(); });
++            if (stop_) {
++                return;
++            }
++            const auto [value, done] = pending_.front();
++            const auto now = std::chrono::steady_clock::now();
++            if (now < done) {
++                lock.unlock();
++                precise_sleep(done - now);
++                continue;
++            }
++            pending_.pop_front();
++            lock.unlock();
++            fence_->Signal(value);
++        }
++    }
++    ComPtr<ID3D12Fence> fence_;
++    std::thread thread_;
++    std::mutex mutex_;
++    std::condition_variable condition_;
++    std::deque<std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> pending_;
++    std::chrono::steady_clock::time_point last_done_{};
++    std::uint64_t next_value_{1};
++    bool stop_{};
++};
++std::unique_ptr<GpuWorkSimulator> g_gpu_simulator;
++
+ // A sleep that is not rounded up to the system tick.
+ void precise_sleep(std::chrono::nanoseconds duration) {
+     static thread_local HANDLE timer = [] {
+@@ -2168,7 +2342,8 @@ int main(int argc, char** argv) {
+             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
+             "flight-simulator|uevr-pipelined-time|inverted-fov|"
+             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
+-            "dcs|dcs-d3d11|dcs-latency|dcs-adaptive|d3d11-bridge|"
++            "dcs|dcs-d3d11|dcs-latency|dcs-adaptive|dcs-throughput-down|"
++            "dcs-throughput-gpu|d3d11-bridge|"
+             "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted]\n";
+         return EXIT_FAILURE;
+     }
+@@ -2181,6 +2356,17 @@ int main(int argc, char** argv) {
+         (argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0);
+     g_adaptive_latency_mode =
+         argc == 4 && std::strcmp(argv[3], "dcs-adaptive") == 0;
++    {
++        const bool throughput_down =
++            argc == 4 && std::strcmp(argv[3], "dcs-throughput-down") == 0;
++        const bool throughput_gpu =
++            argc == 4 && std::strcmp(argv[3], "dcs-throughput-gpu") == 0;
++        g_throughput_mode = throughput_down || throughput_gpu;
++        g_throughput_expect_downshift = throughput_down;
++        g_throughput_cpu_ms = 5;
++        g_throughput_gpu_ms = throughput_down ? 6 : 23;
++        g_adaptive_latency_mode = g_adaptive_latency_mode || g_throughput_mode;
++    }
+     g_display_latency_mode = g_adaptive_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+@@ -3470,6 +3656,9 @@ int main(int argc, char** argv) {
+         // has to begin that frame instead of waiting for its own.
+         bool sequence_succeeded = true;
+         bool presenter_seen = false;
++        if (g_throughput_mode) {
++            g_persistent_wait_thread = std::make_unique<PersistentWaitThread>();
++        }
+         XrFrameState pending{XR_TYPE_FRAME_STATE};
+         sequence_succeeded =
+             XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &pending));
+@@ -3488,7 +3677,22 @@ int main(int argc, char** argv) {
+             };
+             bool ok = true;
+             if (overlapping) {
+-                std::thread wait_thread(wait_next);
++                // dcs-throughput: the frame's GPU work goes in as it starts.
++                const auto frame_started = std::chrono::steady_clock::now();
++                if (g_throughput_mode && g_gpu_simulator) {
++                    ok = g_gpu_simulator->submit(
++                        std::chrono::milliseconds(g_throughput_gpu_ms));
++                }
++                const double submit_ms = std::chrono::duration<double, std::milli>(
++                    std::chrono::steady_clock::now() - frame_started).count();
++                // dcs-throughput: a thread made once, not one per frame. A new
++                // thread waits for the loader lock to attach to every DLL in
++                // the process, and with WARP busy that wait alone ran to a p90
++                // of 20-100 ms a frame - the test application's own
++                // throughput, which these scenarios set.
++                PersistentWaitThread::Run wait_thread(
++                    g_throughput_mode ? g_persistent_wait_thread.get() : nullptr,
++                    wait_next);
+                 while (!wait_started.load(std::memory_order_acquire)) {
+                     std::this_thread::yield();
+                 }
+@@ -3497,15 +3701,48 @@ int main(int argc, char** argv) {
+                 } else {
+                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                 }
+-                ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info));
++                const auto ms_since = [](std::chrono::steady_clock::time_point& mark) {
++                    const auto now = std::chrono::steady_clock::now();
++                    const double value =
++                        std::chrono::duration<double, std::milli>(now - mark).count();
++                    mark = now;
++                    return value;
++                };
++                auto mark = frame_started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++                    std::chrono::duration<double, std::milli>(submit_ms));
++                std::array<double, 7> phases{};
++                phases[0] = submit_ms;
++                phases[1] = ms_since(mark);
++                ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) && ok;
++                phases[2] = ms_since(mark);
+                 wait_thread.join();
++                phases[3] = ms_since(mark);
+                 if (g_simulated_render_ms > 0) {
+                     precise_sleep(std::chrono::milliseconds(g_simulated_render_ms));
+                 }
+-                ok = ok && XR_SUCCEEDED(next_wait_result) &&
+-                    capture_fresh_application_image() &&
+-                    submit_frame(pending.predictedDisplayTime) &&
+-                    wait_for_queue_idle();
++                if (g_throughput_mode) {
++                    // The CPU's share, from the frame's start; the queue is
++                    // never waited for, so the GPU's runs beside it.
++                    precise_sleep(frame_started +
++                        std::chrono::milliseconds(g_throughput_cpu_ms) -
++                        std::chrono::steady_clock::now());
++                    phases[4] = ms_since(mark);
++                    ok = ok && XR_SUCCEEDED(next_wait_result) &&
++                        XR_SUCCEEDED(acquire_image(swapchain, &acquire_info, &acquired_index)) &&
++                        XR_SUCCEEDED(wait_image(swapchain, &image_wait_info)) &&
++                        XR_SUCCEEDED(release_image(swapchain, &release_info));
++                    phases[5] = ms_since(mark);
++                    ok = ok && submit_frame(pending.predictedDisplayTime);
++                    phases[6] = ms_since(mark);
++                    if (g_gpu_simulator) {
++                        g_throughput_phases.push_back(phases);
++                    }
++                } else {
++                    ok = ok && XR_SUCCEEDED(next_wait_result) &&
++                        capture_fresh_application_image() &&
++                        submit_frame(pending.predictedDisplayTime) &&
++                        wait_for_queue_idle();
++                }
+             } else {
+                 ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                     capture_fresh_application_image() &&
+@@ -3614,7 +3851,30 @@ int main(int argc, char** argv) {
+         bool adaptive_downshift_seen = false;
+         bool adaptive_upshift_seen = false;
+         bool adaptive_moved_after = false;
+-        if (g_adaptive_latency_mode) {
++        // dcs-throughput: 3X until adaptive control moves it, or for long
++        // enough that it would have (dwell 5 s, a 3 s window after a 1 s
++        // settle, and room for a loaded machine).
++        int throughput_frames = 0;
++        if (g_throughput_mode) {
++            g_gpu_simulator = std::make_unique<GpuWorkSimulator>();
++            sequence_succeeded = sequence_succeeded && g_gpu_simulator->initialize();
++            const auto until = std::chrono::steady_clock::now() +
++                std::chrono::seconds(g_throughput_expect_downshift ? 30 : 15);
++            while (sequence_succeeded && !adaptive_downshift_seen &&
++                   std::chrono::steady_clock::now() < until) {
++                sequence_succeeded = run_frame(true);
++                ++throughput_frames;
++                adaptive_downshift_seen =
++                    pending.predictedDisplayPeriod == kFakeDisplayPeriod * 2;
++            }
++            // A few frames in the new shape, then the queue is let go.
++            for (int index = 0; sequence_succeeded && index < 10; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            g_gpu_simulator.reset();
++            sequence_succeeded = sequence_succeeded && wait_for_queue_idle();
++            g_persistent_wait_thread.reset();
++        } else if (g_adaptive_latency_mode) {
+             int phase = 0;
+             for (int index = 0; sequence_succeeded && phase < 2 && index < 1500;
+                  ++index) {
+@@ -3684,6 +3944,49 @@ int main(int argc, char** argv) {
+         const std::uint32_t off_thread =
+             g_off_thread_frame_calls.load(std::memory_order_relaxed);
+         bool valid = false;
++        if (g_throughput_mode) {
++            valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                violations == 0 &&
++                adaptive_downshift_seen == g_throughput_expect_downshift;
++            if (!valid) {
++                std::cerr << "DCS throughput validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen << " violations=" << violations
++                          << " downshift=" << adaptive_downshift_seen << " expected="
++                          << g_throughput_expect_downshift << " frames=" << throughput_frames
++                          << " cpu=" << g_throughput_cpu_ms << " gpu=" << g_throughput_gpu_ms
++                          << "\n  test-side p50/p90 ms (gpu submit, pre-begin, begin, join, cpu, swapchain, end):";
++                for (std::size_t phase = 0; phase < 7; ++phase) {
++                    std::vector<double> values;
++                    for (const auto& frame : g_throughput_phases) values.push_back(frame[phase]);
++                    std::sort(values.begin(), values.end());
++                    if (!values.empty()) {
++                        std::cerr << ' ' << values[values.size() / 2] << '/'
++                               << values[values.size() * 9 / 10];
++                    }
++                }
++                std::cerr << '\n';
++                return EXIT_FAILURE;
++            }
++            {
++                std::cout << "  test-side p50/p90 ms (gpu submit, pre-begin, begin, join, cpu, swapchain, end):";
++                for (std::size_t phase = 0; phase < 7; ++phase) {
++                    std::vector<double> values;
++                    for (const auto& frame : g_throughput_phases) values.push_back(frame[phase]);
++                    std::sort(values.begin(), values.end());
++                    if (!values.empty()) {
++                        std::cout << ' ' << values[values.size() / 2] << '/'
++                               << values[values.size() * 9 / 10];
++                    }
++                }
++                std::cout << '\n';
++            }
++            std::cout << "OpenXR DCS throughput test passed: CPU " << g_throughput_cpu_ms
++                      << " ms, GPU " << g_throughput_gpu_ms << " ms per frame, "
++                      << (adaptive_downshift_seen ? "3X -> 2X" : "held 3X") << " after "
++                      << throughput_frames << " frames\n";
++            return EXIT_SUCCESS;
++        }
+         if (g_display_latency_mode) {
+             // Every real frame of the settled stretch went to the runtime
+             // for exactly the display time the application was told when it

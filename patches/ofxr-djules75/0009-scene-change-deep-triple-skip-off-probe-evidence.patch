@@ -1,0 +1,1661 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cba205a..c62a37a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -988,6 +988,24 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_deep.cmake")
+             set_tests_properties(xrfg_layer_triple_deep_${deep_case} PROPERTIES TIMEOUT 120)
+         endforeach()
++        # DCS VR Control (0009): light -> heavy -> a mission load -> light, as
++        # the live flight of 2026-10-05 23:22: in 3X with the deeper pipeline
++        # (every slot fresh in each phase, a third slot for the heavy one,
++        # the depth re-armed by the scene change, the late-frame skip off by
++        # default), and under adaptive 2X/3X (no switch on the new scene's
++        # first frames).
++        foreach(scene_case triple adaptive)
++            add_test(
++                NAME xrfg_layer_scene_change_${scene_case}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DSCENES_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_scenes_${scene_case}.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/scene-change-${scene_case}"
++                    "-DCASE=${scene_case}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_scene_change.cmake")
++            set_tests_properties(xrfg_layer_scene_change_${scene_case} PROPERTIES TIMEOUT 150)
++        endforeach()
+ 
+         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
+         # device, so an ini asking for it exercises the layer's fallback to
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 2bafb0a..871282d 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -267,6 +267,13 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // is drawn), c= its area as a share of its bounding rectangle, in
+     // permille. result=3: the runtime said the mask changed (a= the view).
+     visibility_mask,
++    // DCS VR Control (0009). A scene change: the application's xrEndFrame
++    // calls were result milliseconds apart (a mission load), and every
++    // adaptive state started over (xrfg::latency::SceneChange). a= the frame
++    // multiplier; b= 3X deeper-pipeline slots given back (bits 0-15), the
++    // late-frame skip was on (bit 16), a probe of 2X was under way (bit 17);
++    // c= the display time correction in force, in microseconds.
++    scene_change,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index addc964..de72222 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -115,7 +115,17 @@ struct ConfiguredNvidiaOptions {
+ // DCS VR Control (0006). `[ofxr] late_frame_skip`: in 3X, on a runtime other
+ // than SteamVR, a first synthetic that keeps reaching the runtime late is not
+ // made while that lasts, and its slot re-presents the previous real frame on
+-// time instead. On unless set to 0. Read once per session.
++// time instead. Read once per session.
++//
++// DCS VR Control (0009): off unless set to 1. A skipped first synthetic turns
++// 3X's 90 fresh frames a second into 60 (two of every three slots), and on a
++// live DCS flight the skip, once on, held for minutes: its exit test needed
++// the first synthetic ready three periods after release, which a pipelined
++// application whose frame took 36-40 ms from release to synthesis never
++// was. The deeper pipeline now takes as many slots as that latency needs
++// (xrfg::latency::TripleDepth), and the skip, where it is turned on, engages
++// only once that depth is exhausted - a last resort for an application that
++// has fallen below a third of the refresh rate.
+ [[nodiscard]] bool read_late_frame_skip(
+     const std::filesystem::path& module_directory) noexcept;
+ 
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index d49019f..4fefb68 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -20,6 +20,8 @@
+ //   GpuBusyMeter               (0007) GPU busy time per application frame
+ //                              from the scheduler's running-time counters
+ //   TripleDepth                (0007) the 3X deeper pipeline's one-slot shift
++//   SceneChange                (0009) a stall of the application (a mission
++//                              load) that starts every adaptive state over
+ //
+ // All times are nanoseconds on one monotonic timeline the caller chooses.
+ 
+@@ -207,11 +209,19 @@ struct SubmissionTally {
+ //              and never sooner than the dwell after entering
+ // The dwell starts at min_dwell and doubles, up to max_dwell, when the skip
+ // comes back within flap_window of leaving; a full flap_window off resets it.
++//
++// DCS VR Control (0009): off unless `[ofxr] late_frame_skip=1`, and then the
++// last resort: under 3X's deeper pipeline the layer feeds it only once
++// TripleDepth has taken all its slots (more depth fixes lateness without
++// losing a frame; the skip loses one in three). And it lets go sooner: one
++// window with 24 of 30 skipped slots that would have been ready (0006: two
++// windows of 28). A live flight's skip held for 60 s with the application
++// at 30 frames a second because the stricter test was never met.
+ struct LateSkipConfig {
+     std::uint32_t window_frames{30};
+     std::uint32_t enter_late{6};
+-    std::uint32_t exit_ready{28};
+-    std::uint32_t exit_windows{2};
++    std::uint32_t exit_ready{24};
++    std::uint32_t exit_windows{1};
+     Nanoseconds min_dwell{3 * kSecond};
+     Nanoseconds max_dwell{24 * kSecond};
+     Nanoseconds flap_window{15 * kSecond};
+@@ -308,14 +318,16 @@ struct DisplayTimeCorrector {
+     // pipeline. DCS VR Control (0008): five - 3X's deeper pipeline is keyed
+     // by the slots it has actually taken (one or two), and 3X with the
+     // deeper pipeline armed but no slot taken yet is 3X's own shape.
+-    static constexpr std::size_t kModes = 5;
++    // DCS VR Control (0009): seven, the deeper pipeline taking up to four
++    // slots (TripleDepth::kMaxSlots).
++    static constexpr std::size_t kModes = 7;
+ 
+     Nanoseconds correction{0};
+     std::array<Nanoseconds, kWindowSamples> window{};
+     std::size_t count{};
+     std::uint32_t skip{};
+     Nanoseconds pending_step{};
+-    std::array<Nanoseconds, kModes> learned{-1, -1, -1, -1, -1};
++    std::array<Nanoseconds, kModes> learned{-1, -1, -1, -1, -1, -1, -1};
+     std::size_t mode{};
+     // DCS VR Control (0008): the display period of the last observation,
+     // for a rebase made where the presenter's period is not known (a new
+@@ -327,7 +339,8 @@ struct DisplayTimeCorrector {
+ 
+ // 0: 2X shallow, 1: 2X with the deeper pipeline, 2: 3X, 3 (0007): 3X with
+ // the deeper pipeline. DCS VR Control (0008): 3X's deeper pipeline by the
+-// slots it has taken (TripleDepth::slots): 3 with one, 4 with two, and 2 -
++// slots it has taken (TripleDepth::slots): 3 with one, 4 with two (0009: 5
++// with three, 6 with four), and 2 -
+ // 3X's own shape, which it is - while none is taken. 0007 keyed it on the
+ // configuration alone, so a session in which no slot could be taken (every
+ // real frame carrying a quad layer, say) learned and kept "deep" figures for
+@@ -361,6 +374,13 @@ Nanoseconds rebase_display_time_correction(
+     Nanoseconds new_virtual_period,
+     Nanoseconds period) noexcept;
+ 
++// DCS VR Control (0009): a scene change (see SceneChange). The correction in
++// force stays - it is the pipeline's shape, which the scene does not change -
++// but it is measured again from the next real frame, and nothing learned in
++// another shape is restored by a later switch: what a heavy mission's frames
++// taught is not what the next mission's will.
++void restart_display_time_learning(DisplayTimeCorrector& corrector) noexcept;
++
+ // DCS VR Control (0008): 3X's deeper pipeline took (`slots_added` > 0) or
+ // lost (< 0, a new presenter) slots: every real frame from here lands that
+ // many periods later (earlier). Starts from what was learned in the new
+@@ -480,15 +500,32 @@ struct AdaptiveConfig {
+     // starts again from probe_interval once 2X has held past flap_window. A
+     // probe leaves the headroom rule's own flap record (the doubling of
+     // downshift_window) as it was.
++    //
++    // DCS VR Control (0009): the probe's settle is a second and its window
++    // three (0007: half a second of two and a half). And the evidence it is
++    // judged on changed: a synthetic handed over before it was written was
++    // a missed slot at once, but the runtime waits for it on the layer's own
++    // queue and shows it if it is written in time - on the live flight both
++    // probes failed within 0.7 s on 2 such "episodes" while the headset
++    // reported no missed frame at all in either window. Now only one still
++    // unwritten at the next slot counts (see the layer's missed slots).
+     bool probe{false};
+     Nanoseconds probe_interval{20 * kSecond};
+     Nanoseconds probe_max_interval{120 * kSecond};
+-    Nanoseconds probe_window{2500 * kMillisecond};
+-    Nanoseconds probe_settle{500 * kMillisecond};
++    Nanoseconds probe_window{3 * kSecond};
++    Nanoseconds probe_settle{1 * kSecond};
+     std::uint32_t probe_fail_episodes{2};
+     Nanoseconds probe_lookback{3 * kSecond};
+     double probe_impossible_fraction{1.4};
+     double probe_impossible_gpu_load{1.0};
++
++    // DCS VR Control (0009): after a scene change (scene_changed()), nothing
++    // is judged or counted for scene_settle - the new scene's first frames
++    // stream textures and compile shaders, and on a live flight they sent
++    // every mission start to 3X within half a second (p90s of 46-215 ms) -
++    // and the first probe comes scene_probe_delay after that.
++    Nanoseconds scene_settle{2 * kSecond};
++    Nanoseconds scene_probe_delay{4 * kSecond};
+ };
+ 
+ enum class AdaptiveReason : std::uint32_t {
+@@ -581,6 +618,16 @@ public:
+         std::uint32_t to,
+         Nanoseconds now,
+         AdaptiveReason reason = AdaptiveReason::none) noexcept;
++    // DCS VR Control (0009): the application stalled long enough to be a
++    // new scene (see SceneChange). Starts over in the mode it is in, as if
++    // the session had just begun there, except that the dwell is behind it:
++    // every sample, missed slot and late first synthetic is forgotten, the
++    // probe's backoff and the headroom rule's flap record are cleared, and
++    // after scene_settle the ordinary rules decide at once (3X -> 2X as soon
++    // as a full downshift_window has been seen, the first probe
++    // scene_probe_delay later).
++    void scene_changed(Nanoseconds now) noexcept;
++    [[nodiscard]] Nanoseconds quiet_until() const noexcept { return quiet_until_; }
+     // DCS VR Control (0007): the caller acted on a probe event that moves
+     // nothing (AdaptiveProbeEvent::kept and ::skipped).
+     void probe_kept(Nanoseconds now) noexcept;
+@@ -640,6 +687,9 @@ private:
+     Nanoseconds next_probe_at_{};
+     double projected_gpu_load_{-1.0};
+     Nanoseconds projected_gpu_load_at_{};
++    // DCS VR Control (0009): nothing is decided before this, and nothing
++    // before it is counted (scene_changed()).
++    Nanoseconds quiet_until_{-1};
+     // Missed-slot episodes after `from`, up to `now`.
+     [[nodiscard]] std::uint32_t late_episodes_since(
+         Nanoseconds from, Nanoseconds now) const noexcept;
+@@ -805,11 +855,26 @@ private:
+ // kGrowLate or more of a window of kWindow of them, in kGrowWindows windows
+ // in a row, so that one hitch (a frame of 90 ms late three first synthetics
+ // at once) does not add a period of latency for good - one more slot is
+-// taken the same way, up to kMaxSlots: with two, the first synthetic has the whole
+-// three-period cycle, which is all an application that holds 3X at all can
+-// need. Slack beyond what the frames use is not given back by removing a
+-// slot but by the release delay, which keeps one period of it in hand
+-// (triple_slack_for_tuner).
++// taken the same way, up to kMaxSlots. Slack beyond what the frames use is
++// not given back by removing a slot but by the release delay, which keeps one
++// period of it in hand (triple_slack_for_tuner).
++//
++// DCS VR Control (0009): up to four slots, not two. 0007 reasoned that with
++// two the first synthetic has the whole three-period cycle, "all an
++// application that holds 3X at all can need" - true of its rate, not of its
++// latency. A pipelined application starts a frame before the previous one's
++// GPU work is done: on a live DCS flight at 30 frames a second (33.5 ms
++// apart) a frame took 33 ms from release to its first synthetic in a light
++// mission and 36-40 ms in a heavy one and right after a reload. With two
++// slots (33.3 ms) the light mission just made it and the others never did:
++// every first synthetic went out late, the late-frame skip took over and
++// the headset saw 60 distinct frames a second at 30 real ones. Four slots
++// give the first synthetic five periods (55.6 ms at 90 Hz). A window with
++// kGrowLateFast or more late takes the next slot at once (a sustained
++// shortfall shows in every first synthetic); otherwise kGrowLate in
++// kGrowWindows windows in a row, so one hitch does not add a period.
++// Slots are given back only by a new shape: a switch, a new presenter, or a
++// scene change (the application stalling drains the queue).
+ //
+ // It is not done by holding every first synthetic until it is a period old
+ // (2X's deeper pipeline): under a pipelined application there is no frame to
+@@ -822,10 +887,11 @@ private:
+ // late-frame skip's one synthetic) is waiting or not yet there, when there
+ // is a frame to re-present.
+ struct TripleDepth {
+-    static constexpr std::uint32_t kMaxSlots = 2;
++    static constexpr std::uint32_t kMaxSlots = 4;
+     static constexpr std::uint32_t kWindow = 30;
+     static constexpr std::uint32_t kGrowLate = 3;
+     static constexpr std::uint32_t kGrowWindows = 2;
++    static constexpr std::uint32_t kGrowLateFast = 10;
+ 
+     bool active{};               // 3X with the deeper pipeline in force
+     bool pending{};              // a slot is wanted
+@@ -855,9 +921,10 @@ struct TripleDepth {
+             return false;
+         }
+         late_windows = window_late >= kGrowLate ? late_windows + 1 : 0;
++        const bool fast = window_late >= kGrowLateFast; // 0009
+         window = 0;
+         window_late = 0;
+-        const bool grow = late_windows >= kGrowWindows;
++        const bool grow = fast || late_windows >= kGrowWindows;
+         if (grow) {
+             late_windows = 0;
+         }
+@@ -880,8 +947,48 @@ struct TripleDepth {
+         late_windows = 0;
+         return true;
+     }
++    // DCS VR Control (0009): every slot it can take is taken and none is
++    // wanted - only then may the late-frame skip judge lateness.
++    [[nodiscard]] bool exhausted() const noexcept {
++        return !active || (!pending && slots >= kMaxSlots);
++    }
+ };
+ 
++// ---------------------------------------------------------------------------
++// DCS VR Control (0009): a scene change.
++//
++// DCS World loads a mission with its render loop stopped: on a live flight the
++// application's xrEndFrame calls were 22-34 s apart at each load (and 1.8-
++// 2.2 s apart at a mission's end), and the frames after it streamed and
++// compiled for seconds. Everything the latency controls had learned belonged
++// to the scene before: adaptive control switched to 3X on the first frames'
++// p90 (46-215 ms) within half a second of every mission start, the probe was
++// backed off to 80 s by the previous mission's failures, the late-frame skip
++// stayed on, and 3X's deeper pipeline counted slots the drained queue no
++// longer had. A gap between two of the application's xrEndFrame calls of
++// kSceneChangeGap or more starts all of them over.
++inline constexpr Nanoseconds kSceneChangeGap = 1 * kSecond;
++
++[[nodiscard]] constexpr bool scene_change_gap(Nanoseconds gap) noexcept {
++    return gap >= kSceneChangeGap;
++}
++
++// DCS VR Control (0009): whether a first synthetic was late for the deeper
++// pipeline's purposes, off SteamVR: handed over late (`handed_late`, as 0007
++// judged it - a slot that came with nothing queued is that too), or written
++// too long after its hand-over, by its slack sample (written before its
++// hand-over, negative after; see lead_slack_with_lateness). 0007 judged the
++// hand-over alone, so a first synthetic handed over on time and written long
++// after - what the runtime then waits for, and misses its slot on - never
++// asked for depth. Late past half a period: on the live flight first synthetics
++// written up to 2 ms after their hand-over were shown (the headset missed
++// 0-4 frames a second), and ones written 10-13 ms after missed (29 a
++// second).
++[[nodiscard]] constexpr bool triple_depth_leader_late(
++    Nanoseconds slack, Nanoseconds period, bool handed_late = false) noexcept {
++    return handed_late || (period > 0 && slack < -(period / 2));
++}
++
+ // The release delay's slack sample in 3X with the deeper pipeline: a period
+ // of the measured slack is the depth itself and is not given back as delay,
+ // so the tuner keeps that period in hand (it raises only past a period plus
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+index 73a08b4..555ef9a 100644
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -20,7 +20,13 @@ deep_pipeline=1
+ triple_frame_gen=0
+ ; Under adaptive_frame_gen=1: a steady 3X tries 2X every 20 s (backing off to
+ ; 2 min after a failed try) and keeps it when it holds. 1 on (default), 0 off.
++; A stall of a second or more (a mission load) starts it over.
+ adaptive_probe=1
++; 3X: while first synthetics keep missing their slot even with the deepest
++; pipeline, show the previous real frame in their slot instead (two fresh
++; frames in three). A last resort for a game below a third of the refresh
++; rate. 0 off (default), 1 on.
++late_frame_skip=0
+ ; A bridged D3D11 game hands every runtime a GPU queue of the layer's own, so
+ ; a submission waits only for what it shows. 1 on (default), 0 off.
+ own_binding_queue=1
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index 4caca23..6d0d987 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -259,15 +259,16 @@ bool read_adaptive_frame_gen(
+ 
+ bool read_late_frame_skip(
+     const std::filesystem::path& module_directory) noexcept {
++    // DCS VR Control (0009): off unless set to 1.
+     try {
+         if (module_directory.empty()) {
+-            return true;
++            return false;
+         }
+         const auto ini_path = module_directory / L"ofxr_bridge.ini";
+         return GetPrivateProfileIntW(
+-                   L"ofxr", L"late_frame_skip", 1, ini_path.c_str()) != 0;
++                   L"ofxr", L"late_frame_skip", 0, ini_path.c_str()) != 0;
+     } catch (...) {
+-        return true;
++        return false;
+     }
+ }
+ 
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+index 6115bc2..5901bac 100644
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -284,7 +284,8 @@ std::size_t display_time_mode(
+         if (!deep_pipeline || triple_depth_slots == 0) {
+             return 2;
+         }
+-        return triple_depth_slots >= 2 ? 4 : 3;
++        // DCS VR Control (0009): up to four slots, modes 3 to 6.
++        return 2U + std::min(triple_depth_slots, TripleDepth::kMaxSlots);
+     }
+     return deep_pipeline ? 1 : 0;
+ }
+@@ -375,6 +376,13 @@ Nanoseconds rebase_display_time_correction(
+     return corrector.correction;
+ }
+ 
++void restart_display_time_learning(DisplayTimeCorrector& corrector) noexcept {
++    corrector.learned.fill(-1);
++    corrector.count = 0;
++    corrector.pending_step = 0;
++    corrector.skip = DisplayTimeCorrector::kSettleSamples;
++}
++
+ Nanoseconds rebase_display_time_for_depth(
+     DisplayTimeCorrector& corrector,
+     std::size_t new_mode,
+@@ -422,6 +430,17 @@ void AdaptiveFrameGenController::start(std::uint32_t mode, Nanoseconds now) noex
+     probe_started_ = -1;
+     probe_interval_ = config_.probe_interval;
+     next_probe_at_ = now + probe_interval_;
++    quiet_until_ = -1; // 0009
++}
++
++void AdaptiveFrameGenController::scene_changed(Nanoseconds now) noexcept {
++    // DCS VR Control (0009): see the declaration.
++    const std::uint32_t mode = mode_;
++    start(mode, now);
++    quiet_until_ = now + config_.scene_settle;
++    // The dwell is behind it: the ordinary rules decide from quiet_until_.
++    last_switch_ = quiet_until_ - std::max(config_.min_dwell, config_.settle);
++    next_probe_at_ = quiet_until_ + config_.scene_probe_delay;
+ }
+ 
+ void AdaptiveFrameGenController::add_late_leaders(
+@@ -512,6 +531,8 @@ AdaptiveStats AdaptiveFrameGenController::stats(
+ AdaptiveStats AdaptiveFrameGenController::stats_between(
+     Nanoseconds from, Nanoseconds now) const noexcept {
+     static_assert(kWorkSamples == 512);
++    // DCS VR Control (0009): nothing from a scene's settle.
++    from = std::max(from, quiet_until_);
+     AdaptiveStats result{};
+     const auto inside = [&](Nanoseconds at) { return at > from && at <= now; };
+     std::array<Nanoseconds, kWorkSamples> values{};
+@@ -572,12 +593,15 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+         return decision;
+     }
+     const Nanoseconds two_periods = period * 2;
++    // DCS VR Control (0009): a new scene settles first.
++    const bool quiet = now < quiet_until_;
+     if (mode_ > 2) {
+         decision.threshold = static_cast<Nanoseconds>(
+             config_.downshift_fraction * static_cast<double>(two_periods));
+         decision.stats = stats(now, downshift_window_);
+-        if (now - last_switch_ < config_.min_dwell ||
+-            now - (last_switch_ + config_.settle) < downshift_window_) {
++        if (quiet || now - last_switch_ < config_.min_dwell ||
++            now - (last_switch_ + config_.settle) < downshift_window_ ||
++            (quiet_until_ >= 0 && now - quiet_until_ < downshift_window_)) {
+             return decision;
+         }
+         // Nine frames in ten judged: frames with no evidence at all must not
+@@ -646,7 +670,7 @@ AdaptiveDecision AdaptiveFrameGenController::evaluate(
+         }
+         return decision;
+     }
+-    if (now - last_switch_ < config_.min_dwell) {
++    if (quiet || now - last_switch_ < config_.min_dwell) {
+         return decision;
+     }
+     if (decision.stats.late >= config_.upshift_late_episodes) {
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index 739a2dc..9c53c9f 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -108,6 +108,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "adaptive_probe";
+     case BridgeFlightOperation::visibility_mask:
+         return "visibility_mask";
++    case BridgeFlightOperation::scene_change: // DCS VR Control (0009)
++        return "scene_change";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index e0afd93..825c22f 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -764,8 +764,15 @@ struct LeadReadiness {
+ };
+ 
+ struct TripleSlackSink {
++    // DCS VR Control (0009): with whether the first synthetic was handed
++    // over late (xrfg::latency::submission_late), for the deeper pipeline.
++    struct Sample {
++        std::uint32_t epoch{};
++        std::int64_t slack{};
++        bool handed_late{};
++    };
+     std::mutex mutex;
+-    std::vector<std::pair<std::uint32_t, std::int64_t>> samples;
++    std::vector<Sample> samples;
+ };
+ 
+ void report_lead_slack(LeadReadiness& lead, TripleSlackSink& sink) noexcept {
+@@ -779,10 +786,11 @@ void report_lead_slack(LeadReadiness& lead, TripleSlackSink& sink) noexcept {
+         // Drained every presenter cycle; a bound only against a presenter
+         // that has stopped.
+         if (sink.samples.size() < 256) {
+-            sink.samples.emplace_back(
++            sink.samples.push_back(TripleSlackSink::Sample{
+                 lead.epoch,
+                 xrfg::latency::lead_slack_with_lateness(
+-                    handed - ready, lead.wait_to_handed_ns.load()));
++                    handed - ready, lead.wait_to_handed_ns.load()),
++                xrfg::latency::submission_late(lead.wait_to_handed_ns.load())});
+         }
+     } catch (...) {
+     }
+@@ -1671,7 +1679,7 @@ struct SessionState {
+     std::uint32_t skip_unavailable_second{};
+     std::uint32_t skip_ready_second{};
+     // `[ofxr] late_frame_skip`. Fixed for the session.
+-    bool late_frame_skip_enabled{true};
++    bool late_frame_skip_enabled{false};
+     // DCS VR Control (0007): 3X can take the deeper pipeline on this binding
+     // (D3D12, the D3D11 bridge's included): deep_pipeline=1 then applies to
+     // 3X as well. Fixed for the session.
+@@ -1695,6 +1703,17 @@ struct SessionState {
+     // late_skip_active is what the xrEndFrame thread reads.
+     xrfg::latency::LateFrameSkipController late_skip;
+     std::atomic<bool> late_skip_active{false};
++    // DCS VR Control (0009): the synthesis fences of a first synthetic handed
++    // over before it was written, judged at the next slot (a missed slot
++    // only if still unwritten then). presenter_mutex.
++    std::vector<std::pair<Microsoft::WRL::ComPtr<ID3D12Fence>, std::uint64_t>>
++        unwritten_leader_ready;
++    // DCS VR Control (0009): scene changes (xrfg::latency::SceneChange). The
++    // xrEndFrame thread's last entry, and the gap it saw, handled at the
++    // next apply_scene_change.
++    std::chrono::steady_clock::time_point scene_last_end_entry{};
++    std::int64_t scene_change_gap_ns{-1};
++    std::uint32_t scene_changes{};
+     // The last submission was a fresh real frame, so this slot is the one a
+     // first synthetic takes in 3X.
+     bool presenter_previous_real{};
+@@ -8071,7 +8090,7 @@ void fill_triple_release_report(
+ // the other way round.
+ void drain_triple_slack(
+     SessionState& state, TripleReleaseReport* report) noexcept {
+-    std::vector<std::pair<std::uint32_t, std::int64_t>> samples;
++    std::vector<TripleSlackSink::Sample> samples;
+     try {
+         std::scoped_lock lock(state.triple_slack_sink.mutex);
+         samples.swap(state.triple_slack_sink.samples);
+@@ -8079,10 +8098,22 @@ void drain_triple_slack(
+         return;
+     }
+     const std::uint32_t epoch = state.triple_release_epoch.load();
+-    for (const auto& [sample_epoch, slack] : samples) {
++    for (const auto& [sample_epoch, slack, handed_late] : samples) {
+         if (sample_epoch != epoch) {
+             continue;
+         }
++        // DCS VR Control (0009): off SteamVR the deeper pipeline judges
++        // each first synthetic here, by when it was written against its
++        // hand-over (see xrfg::latency::triple_depth_leader_late).
++        if (state.triple_depth.active && !state.dispatch->steamvr_runtime &&
++            state.frames_per_application_frame > 2) {
++            static_cast<void>(state.triple_depth.observe_leader(
++                xrfg::latency::triple_depth_leader_late(
++                    slack,
++                    static_cast<xrfg::latency::Nanoseconds>(
++                        state.presenter_display_period),
++                    handed_late)));
++        }
+         // DCS VR Control (0007): with the deeper pipeline a period of it is
+         // the depth, kept in hand. DCS VR Control (0008): once a slot has
+         // been taken; until then there is no such period.
+@@ -8104,9 +8135,10 @@ void report_triple_slot_missed(SessionState& state) noexcept {
+     try {
+         std::scoped_lock lock(state.triple_slack_sink.mutex);
+         if (state.triple_slack_sink.samples.size() < 256) {
+-            state.triple_slack_sink.samples.emplace_back(
++            state.triple_slack_sink.samples.push_back(TripleSlackSink::Sample{
+                 state.triple_release_epoch.load(),
+-                -static_cast<std::int64_t>(state.presenter_display_period));
++                -static_cast<std::int64_t>(state.presenter_display_period),
++                true});
+         }
+     } catch (...) {
+     }
+@@ -9052,6 +9084,25 @@ void continuous_presenter_main(
+                     }
+                 }
+                 state->presenter_skip_slot_consumed = false;
++                // DCS VR Control (0009): the first synthetic handed over
++                // unwritten at the previous slot, judged now.
++                if (!state->unwritten_leader_ready.empty()) {
++                    bool written = true;
++                    for (const auto& [fence, value] : state->unwritten_leader_ready) {
++                        if (fence == nullptr || value == 0) {
++                            continue;
++                        }
++                        const std::uint64_t completed = fence->GetCompletedValue();
++                        if (completed != std::numeric_limits<std::uint64_t>::max() &&
++                            completed < value) {
++                            written = false;
++                        }
++                    }
++                    state->unwritten_leader_ready.clear();
++                    if (!written) {
++                        ++missed_slots;
++                    }
++                }
+                 if (depth_slot) {
+                     // DCS VR Control (0007): re-presented on time, nothing
+                     // popped; the first synthetic waiting takes the next slot.
+@@ -9136,8 +9187,21 @@ void continuous_presenter_main(
+                         // runtime may still see it in time, but it is the
+                         // application's frame arriving late all the same.
+                         // Only where its readiness is known at all.
++                        // DCS VR Control (0009): judged at the next slot,
++                        // not here. The runtime waits for it on the
++                        // layer's queue and shows it if it is written in
++                        // time: a live flight's 2X probes counted every
++                        // such hand-over (written 5-10 ms after it) as a
++                        // missed slot and failed in 0.7 s while the
++                        // headset missed no frame. One still unwritten a
++                        // slot later did miss its own.
+                         if (leader && !leader_written) {
+-                            ++missed_slots;
++                            state->unwritten_leader_ready.clear();
++                            for (const auto& ready :
++                                 request->owned_frame->synthetic_ready) {
++                                state->unwritten_leader_ready.emplace_back(
++                                    ready.fence, ready.value);
++                            }
+                         }
+                         // 3X release delay; see triple_release.
+                         if (state->frames_per_application_frame > 2 &&
+@@ -10357,9 +10421,14 @@ void continuous_presenter_main(
+                 state->presenter_skip_slot_consumed = skip_slot;
+             }
+             // The skip's evidence: one observation per first synthetic's
+-            // slot, 3X off SteamVR only.
++            // slot, 3X off SteamVR only. DCS VR Control (0009): and, under
++            // the deeper pipeline, only once it has no slot left to take -
++            // a slot more fixes lateness without losing a frame. A skip
++            // already on is always judged, so it can let go.
+             if (skip_controlled && slot_timed && gen1_slot && !depth_slot &&
+-                state->frames_per_application_frame > 2) {
++                state->frames_per_application_frame > 2 &&
++                (skip_slot || state->late_skip.active() ||
++                 state->triple_depth.exhausted())) {
+                 const auto now_ns = steady_nanoseconds(downstream_end_started);
+                 if (skip_slot) {
+                     skip_step = state->late_skip.observe_skipped(
+@@ -10379,11 +10448,17 @@ void continuous_presenter_main(
+             }
+             // DCS VR Control (0007): and the deeper pipeline's, which takes
+             // one more slot while first synthetics keep going out late.
++            // DCS VR Control (0009): off SteamVR, first synthetics are
++            // judged by their slack instead (drain_triple_slack): one handed
++            // over on time but written long after went unseen here, and one
++            // written a moment late is shown all the same.
+             if (slot_timed && gen1_slot && !depth_slot &&
+                 state->triple_depth.active &&
+                 state->frames_per_application_frame > 2) {
+                 if (skip_slot) {
+                     state->triple_depth.observe_leader(!skip_would_be_ready);
++                } else if (!state->dispatch->steamvr_runtime) {
++                    // Judged by drain_triple_slack.
+                 } else if (submission_kind == SubmissionKind::gen1) {
+                     state->triple_depth.observe_leader(submitted_late);
+                 } else if (submission_kind == SubmissionKind::repeat) {
+@@ -13336,6 +13411,84 @@ void reclaim_lazy_runtimes(const std::shared_ptr<SessionState>& state) noexcept
+ // adaptive off live puts the session in the mode the ini names; turning it on
+ // live starts the controller in the mode the session is in. A switch resets
+ // the 3X release delay and rebases the display time correction.
++// DCS VR Control (0009): a scene change (see xrfg::latency::SceneChange),
++// seen by layer_end_frame_impl as a gap of a second or more between the
++// application's xrEndFrame calls - a mission load - and handled here, on the
++// xrEndFrame thread, before this frame is queued. Every adaptive state starts
++// over in the shape the session is in:
++//   - 3X's deeper pipeline is armed again: the stall drained the queue, so
++//     the slots it had taken are gone, and the display time correction goes
++//     back to the shape without them;
++//   - the release delay and the late-frame skip start over off;
++//   - the display time correction keeps its value but measures again and
++//     forgets what other shapes taught it;
++//   - adaptive control forgets its samples, missed slots, probe backoff and
++//     flap record, decides nothing for the scene's settle, and then decides
++//     at once (AdaptiveFrameGenController::scene_changed).
++// The mode itself is left as it is: the new scene's own evidence moves it.
++void apply_scene_change(const std::shared_ptr<SessionState>& state) noexcept {
++    try {
++        const std::int64_t gap = std::exchange(state->scene_change_gap_ns, -1);
++        if (gap < 0) {
++            return;
++        }
++        ++state->scene_changes;
++        const auto now_ns = steady_nanoseconds(std::chrono::steady_clock::now());
++        std::uint32_t multiplier = 0;
++        std::uint32_t slots_before = 0;
++        bool skip_was_on = false;
++        bool was_probing = false;
++        xrfg::latency::Nanoseconds correction = 0;
++        {
++            std::scoped_lock content_lock(state->presenter_content_mutex);
++            std::scoped_lock lock(state->presenter_mutex);
++            multiplier = state->frames_per_application_frame;
++            slots_before = state->triple_depth.slots;
++            skip_was_on = state->late_skip.active();
++            state->triple_depth.arm(state->deep_pipeline, multiplier);
++            state->triple_release.reset();
++            ++state->triple_release_epoch;
++            state->triple_release_probe_due = false;
++            state->triple_leader_due = false;
++            state->late_skip.reset();
++            state->late_skip_active = false;
++            state->presenter_skip_slot_consumed = false;
++            state->unwritten_leader_ready.clear();
++            const std::size_t shallow_mode = xrfg::latency::display_time_mode(
++                multiplier, state->deep_pipeline, 0);
++            if (slots_before > 0 &&
++                state->display_time_corrector.mode != shallow_mode) {
++                static_cast<void>(xrfg::latency::rebase_display_time_for_depth(
++                    state->display_time_corrector,
++                    shallow_mode,
++                    -static_cast<std::int32_t>(slots_before),
++                    static_cast<xrfg::latency::Nanoseconds>(
++                        state->presenter_display_period)));
++            }
++            xrfg::latency::restart_display_time_learning(
++                state->display_time_corrector);
++            correction = state->display_time_corrector.correction;
++        }
++        if (state->adaptive_active.load()) {
++            std::scoped_lock adaptive_lock(state->adaptive_mutex);
++            was_probing = state->adaptive_controller.probing();
++            state->adaptive_controller.scene_changed(now_ns);
++            state->adaptive_missed_slots = 0;
++            state->adaptive_late_leaders = 0;
++        }
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::scene_change,
++            gap / 1'000'000,
++            multiplier,
++            std::min<std::uint64_t>(slots_before, 0xFFFFU) |
++                (skip_was_on ? 1ULL << 16 : 0ULL) |
++                (was_probing ? 1ULL << 17 : 0ULL),
++            static_cast<std::uint64_t>(std::max<xrfg::latency::Nanoseconds>(
++                0, correction / 1000)));
++    } catch (...) {
++    }
++}
++
+ void apply_live_frame_multiplier(
+     const std::shared_ptr<SessionState>& state,
+     bool use_continuous_presenter) noexcept {
+@@ -13609,6 +13762,7 @@ void apply_live_frame_multiplier(
+             state->late_skip_active = false;
+             state->presenter_previous_real = false;
+             state->presenter_skip_slot_consumed = false;
++            state->unwritten_leader_ready.clear(); // 0009
+             // The display time correction too, scaled to the new period or
+             // taken from what was learned in this shape before.
+             const auto display_period = static_cast<xrfg::latency::Nanoseconds>(
+@@ -13887,6 +14041,19 @@ XrResult layer_end_frame_impl(
+     if (!state || state->dispatch->end_frame == nullptr) {
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS VR Control (0009): a gap since the previous xrEndFrame long enough
++    // to be a scene change; handled below, before this frame is queued.
++    {
++        const auto entered = std::chrono::steady_clock::now();
++        if (state->scene_last_end_entry != std::chrono::steady_clock::time_point{}) {
++            const std::int64_t gap = std::chrono::duration_cast<
++                std::chrono::nanoseconds>(entered - state->scene_last_end_entry).count();
++            if (xrfg::latency::scene_change_gap(gap)) {
++                state->scene_change_gap_ns = gap;
++            }
++        }
++        state->scene_last_end_entry = entered;
++    }
+     // DCS VR Control (0004): the frame's throughput evidence, before the
+     // layer queues anything of its own on the application's context; and
+     // the next frame's GPU bracket opened when this call returns.
+@@ -13980,6 +14147,7 @@ XrResult layer_end_frame_impl(
+         return XR_SUCCESS;
+     };
+ 
++    apply_scene_change(state); // DCS VR Control (0009)
+     apply_live_frame_multiplier(state, use_continuous_presenter);
+     apply_embedded_control(state);
+     const bool manually_disarmed = state->manual_control.stop_requested();
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index 2f401ee..d64ca16 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -216,6 +216,13 @@ int main(int argc, char** argv) {
+             520,
+             640,
+             900);
++        // DCS VR Control (0009): a scene change.
++        enabled.event(
++            xrfg::BridgeFlightOperation::scene_change,
++            33640,
++            3,
++            2ULL | (1ULL << 16),
++            44444);
+         enabled.shutdown();
+ 
+         const std::string log = read(log_path);
+@@ -271,6 +278,10 @@ int main(int argc, char** argv) {
+                 log.find("op=adaptive_throughput result=5 dur_us=0 a=520 b=640 c=900") !=
+                     std::string::npos,
+             "bridge log is missing the 0007 probe and throughput records");
++        require(
++            log.find("op=scene_change result=33640 dur_us=0 a=3 b=65538 c=44444") !=
++                std::string::npos,
++            "bridge log is missing the 0009 scene change record");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index 04f53aa..598714d 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -862,8 +862,9 @@ void probe_tests() {
+         require(run.started[0] - start >= 20 * kSecond && run.started[0] - start < 20 * kSecond + 4 * kPeriod,
+             "after the probe interval in a stable 3X");
+         require(run.kept.size() == 1 && run.failed.empty(), "the window held");
+-        require(run.kept[0] - run.started[0] >= 2500 * kMillisecond &&
+-                run.kept[0] - run.started[0] < 2500 * kMillisecond + 3 * kPeriod,
++        // DCS VR Control (0009): a three-second window.
++        require(run.kept[0] - run.started[0] >= 3000 * kMillisecond &&
++                run.kept[0] - run.started[0] < 3000 * kMillisecond + 3 * kPeriod,
+             "kept at the end of the window");
+         require(run.other_switch < 0 && controller.mode() == 2, "and 2X stays");
+         require(!controller.probing() && controller.probe_interval() == 20 * kSecond, "the interval is the base one");
+@@ -880,9 +881,10 @@ void probe_tests() {
+             std::to_string(run.started.size()) + "/" + std::to_string(run.failed.size()));
+         require(run.kept.empty() && run.other_switch < 0, "never kept, never another switch");
+         for (std::size_t i = 0; i < run.failed.size(); ++i) {
+-            require(run.failed[i] - run.started[i] < kSecond,
++            // DCS VR Control (0009): a settle of a second.
++            require(run.failed[i] - run.started[i] < 1500 * kMillisecond,
+                 "back to 3X quickly: " + std::to_string(run.failed[i] - run.started[i]));
+-            require(run.failed[i] - run.started[i] >= 500 * kMillisecond, "not before the probe's settle");
++            require(run.failed[i] - run.started[i] >= 1000 * kMillisecond, "not before the probe's settle");
+         }
+         const Nanoseconds expected[] = {40 * kSecond, 80 * kSecond, 120 * kSecond, 120 * kSecond};
+         for (std::size_t i = 0; i < 4; ++i) {
+@@ -1135,6 +1137,150 @@ void gpu_busy_tests() {
+ // ---------------------------------------------------------------------------
+ // DCS VR Control (0007): 3X's deeper pipeline.
+ 
++// DCS VR Control (0009): the live flight of 2026-10-05 23:22, light mission
++// -> heavy mission -> the light one reloaded, at the controller's level.
++void scene_change_tests() {
++    const Nanoseconds start = 70 * kSecond;
++    AdaptiveConfig config;
++    config.probe = true;
++    {
++        require(!scene_change_gap(999 * kMillisecond), "under a second is a hitch");
++        require(scene_change_gap(kSecond) && scene_change_gap(25 * kSecond), "a second or more is a scene");
++    }
++    {
++        // Light mission: 3X reads 20 ms of work a frame (the headroom rule's
++        // 18.9 ms keeps it there), and two probes fail on missed slots - the
++        // interval backs off to 80 s, as it had at the heavy mission's load.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        auto light = drive_probes(controller, now, 70 * kSecond, 20 * kMillisecond, 19 * kMillisecond, 3);
++        require(light.failed.size() == 2 && controller.probe_interval() == 80 * kSecond,
++            "two failures: 80 s: " + std::to_string(controller.probe_interval()));
++        require(controller.mode() == 3, "3X");
++        // The mission load: 25 s without a frame, then the scene change.
++        now += 25 * kSecond;
++        const Nanoseconds changed = now;
++        controller.scene_changed(now);
++        require(controller.probe_interval() == 20 * kSecond, "the backoff is gone");
++        require(controller.downshift_window() == AdaptiveConfig{}.downshift_window, "and the flap record");
++        require(controller.next_probe_at() == changed + config.scene_settle + config.scene_probe_delay,
++            "first probe a settle and a delay later");
++        require(controller.mode() == 3, "the mode stays");
++        // The first two seconds: frames of 46-215 ms and missed slots - none
++        // of it judged or counted.
++        while (now < changed + config.scene_settle - kPeriod) {
++            now += 3 * kPeriod;
++            controller.add_frame(now, 180 * kMillisecond, 46 * kMillisecond);
++            controller.add_late(now);
++            const auto decision = controller.evaluate(now, kPeriod);
++            require(decision.target == 0, "nothing decided while the scene settles");
++        }
++        // The reloaded light mission holds 2X (the probe keeps it) at most
++        // a few seconds past the settle, instead of 80 s later.
++        auto after = drive_probes(controller, now, 20 * kSecond, 20 * kMillisecond, 19 * kMillisecond, 0);
++        require(after.started.size() == 1, "one probe after the scene change");
++        require(after.started[0] - changed <= config.scene_settle + config.scene_probe_delay + 4 * kPeriod,
++            "within six seconds of the load: " + std::to_string(after.started[0] - changed));
++        require(after.kept.size() == 1 && controller.mode() == 2, "kept: 2X at 45");
++    }
++    {
++        // Without the scene change the same reload waits out the 80 s
++        // backoff (what the flight did: no probe in the 31 s it lasted).
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start;
++        drive_probes(controller, now, 70 * kSecond, 20 * kMillisecond, 19 * kMillisecond, 3);
++        now += 25 * kSecond;
++        auto after = drive_probes(controller, now, 31 * kSecond, 20 * kMillisecond, 19 * kMillisecond, 0);
++        require(after.started.empty(), "0008: no probe in the reloaded mission's 31 s");
++    }
++    {
++        // A mission start in 2X: the load's first frames (p90 46-215 ms,
++        // missed slots) sent 2X to 3X within half a second every time. Now
++        // they are not counted, and a scene 2X holds stays in 2X.
++        AdaptiveFrameGenController controller(config);
++        controller.start(2, start);
++        Nanoseconds now = start + 30 * kSecond;
++        controller.scene_changed(now);
++        const Nanoseconds changed = now;
++        for (int i = 0; i < 20; ++i) {
++            now += 2 * kPeriod;
++            controller.add_frame(now, 46 * kMillisecond + i * kMillisecond, 30 * kMillisecond);
++            controller.add_late(now);
++            require(controller.evaluate(now, kPeriod).target == 0, "the transient decides nothing");
++        }
++        Nanoseconds first_switch = -1;
++        while (now < changed + 15 * kSecond) {
++            now += 2 * kPeriod;
++            controller.add_frame(now, 15 * kMillisecond, 19 * kMillisecond);
++            const auto decision = controller.evaluate(now, kPeriod);
++            if (decision.target != 0 && first_switch < 0) {
++                first_switch = now;
++            }
++        }
++        require(first_switch < 0 && controller.mode() == 2, "2X holds after the transient");
++        // And a scene that really is too heavy for 2X goes to 3X as soon as
++        // the settle is over.
++        controller.scene_changed(now);
++        const Nanoseconds again = now;
++        Nanoseconds upshift = -1;
++        while (now < again + 5 * kSecond && upshift < 0) {
++            now += 2 * kPeriod;
++            controller.add_frame(now, 28 * kMillisecond, 26 * kMillisecond);
++            const auto decision = controller.evaluate(now, kPeriod);
++            if (decision.target == 3) {
++                upshift = now;
++                controller.switched(3, now, decision.reason);
++            }
++        }
++        require(upshift >= again + config.scene_settle &&
++                upshift < again + config.scene_settle + kSecond,
++            "too heavy: 3X right after the settle: " + std::to_string(upshift - again));
++    }
++    {
++        // In 3X with headroom (2X's 45 at 13 ms of work): 2X a full
++        // downshift window after the settle - quickly, not after a dwell.
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        Nanoseconds now = start + 3 * kSecond;
++        controller.add_frame(now, 13 * kMillisecond, 13 * kMillisecond);
++        controller.switched(3, now); // a switch just before the load
++        controller.scene_changed(now);
++        const Nanoseconds changed = now;
++        Nanoseconds downshift = -1;
++        while (now < changed + 10 * kSecond && downshift < 0) {
++            now += 3 * kPeriod;
++            controller.add_frame(now, 13 * kMillisecond, 13 * kMillisecond);
++            const auto decision = controller.evaluate(now, kPeriod);
++            if (decision.target == 2) {
++                downshift = now;
++                require(decision.reason == AdaptiveReason::headroom, "on the headroom rule");
++            }
++        }
++        const Nanoseconds expected = changed + config.scene_settle + AdaptiveConfig{}.downshift_window;
++        require(downshift >= expected && downshift < expected + 4 * kPeriod,
++            "2X a settle and a window after the load: " + std::to_string(downshift - changed));
++    }
++    {
++        // The display time correction keeps its value and measures again,
++        // forgetting what the heavy mission's shapes taught.
++        DisplayTimeCorrector corrector;
++        corrector.correction = 4 * kPeriod;
++        corrector.learned[4] = 4 * kPeriod;
++        corrector.learned[2] = 5 * kPeriod;
++        corrector.count = 12;
++        corrector.pending_step = -1;
++        restart_display_time_learning(corrector);
++        require(corrector.correction == 4 * kPeriod, "the correction in force stays");
++        require(corrector.count == 0 && corrector.pending_step == 0 &&
++                corrector.skip == DisplayTimeCorrector::kSettleSamples, "measured again");
++        for (const auto value : corrector.learned) {
++            require(value < 0, "nothing learned is kept");
++        }
++    }
++}
++
+ void triple_depth_tests() {
+     {
+         TripleDepth depth;
+@@ -1168,15 +1314,96 @@ void triple_depth_tests() {
+         require(asked && depth.pending && seen == 2 * TripleDepth::kWindow,
+             "three late in thirty, twice, asks for a second slot");
+         require(!depth.observe_leader(true), "nothing counted while one is pending");
++        require(!depth.exhausted(), "a pending slot is depth still to come");
+         require(depth.take(true, true, true) && depth.slots == 2 && depth.inserted == 2, "second slot");
++        // DCS VR Control (0009): a window with every first synthetic late
++        // (the live heavy mission at two slots) asks for the next at once,
++        // up to four.
++        for (std::uint32_t slot = 3; slot <= TripleDepth::kMaxSlots; ++slot) {
++            require(!depth.exhausted(), "slots left: not exhausted");
++            seen = 0;
++            asked = false;
++            for (std::uint32_t i = 0; i < TripleDepth::kWindow && !asked; ++i, ++seen) {
++                asked = depth.observe_leader(true);
++            }
++            require(asked && seen == TripleDepth::kWindow,
++                "one window of late first synthetics asks for slot " + std::to_string(slot));
++            require(depth.take(true, true, true) && depth.slots == slot, "slot taken");
++        }
++        require(TripleDepth::kMaxSlots == 4, "four slots: five periods for a first synthetic");
++        require(depth.exhausted(), "every slot taken: exhausted");
+         for (std::uint32_t i = 0; i < 3 * TripleDepth::kWindow; ++i) {
+-            require(!depth.observe_leader(true), "two is the most");
++            require(!depth.observe_leader(true), "four is the most");
+         }
+         depth.arm(true, 3);
+-        require(depth.pending && depth.slots == 0, "a new shape starts over");
+-        require(depth.take(true, true, true) && depth.inserted == 3 && depth.slots == 1, "re-armed by a new shape");
++        require(depth.pending && depth.slots == 0 && !depth.exhausted(), "a new shape starts over");
++        require(depth.take(true, true, true) && depth.inserted == 5 && depth.slots == 1, "re-armed by a new shape");
+         depth.arm(true, 2);
+         require(!depth.active && !depth.observe_leader(true), "inactive outside 3X");
++        require(depth.exhausted(), "no depth to take outside 3X: the skip may judge");
++        depth.arm(false, 3);
++        require(depth.exhausted(), "nor in shallow 3X");
++    }
++    {
++        // DCS VR Control (0009): nine late of thirty, then on time - a burst
++        // under the fast threshold - asks for nothing on its own.
++        TripleDepth depth;
++        depth.arm(true, 3);
++        require(depth.take(true, true, true), "first slot");
++        bool asked = false;
++        for (std::uint32_t i = 0; i < TripleDepth::kWindow; ++i) {
++            asked = depth.observe_leader(i < TripleDepth::kGrowLateFast - 1) || asked;
++        }
++        for (std::uint32_t i = 0; i < 3 * TripleDepth::kWindow; ++i) {
++            asked = depth.observe_leader(false) || asked;
++        }
++        require(!asked && depth.slots == 1, "a burst under the fast threshold is a hitch");
++    }
++    {
++        // DCS VR Control (0009): off SteamVR a first synthetic is late for
++        // the depth by its slack, past half a period. The live flight's
++        // light mission at two slots: written ~2 ms after its hand-over,
++        // shown (0-4 missed a second) - on time. At one slot 10-13 ms after,
++        // 29 missed a second - late. Light2 / heavy at two slots: the frame
++        // took 36-40 ms against 33.3, written 3-7 ms after - late from 5.6.
++        require(!triple_depth_leader_late(4 * kMillisecond, kPeriod), "written before: on time");
++        require(!triple_depth_leader_late(-2 * kMillisecond, kPeriod), "2 ms after: shown");
++        require(!triple_depth_leader_late(-kPeriod / 2, kPeriod), "half a period: still on time");
++        require(triple_depth_leader_late(-kPeriod / 2 - 1, kPeriod), "past half a period: late");
++        require(triple_depth_leader_late(-7 * kMillisecond, kPeriod), "7 ms after: late");
++        require(triple_depth_leader_late(-12 * kMillisecond, kPeriod), "12 ms after: late");
++        require(triple_depth_leader_late(-kPeriod, kPeriod), "a slot with nothing queued: late");
++        require(!triple_depth_leader_late(-21 * kMillisecond, 0), "no period: nothing judged");
++        require(triple_depth_leader_late(4 * kMillisecond, kPeriod, true), "handed over late: late");
++        // Fed a heavy mission's samples, the depth grows from two slots to
++        // three within a window, and stays once they are on time.
++        TripleDepth depth;
++        depth.arm(true, 3);
++        require(depth.take(true, true, true), "first slot");
++        const auto feed = [&](Nanoseconds slack, std::uint32_t frames) {
++            bool asked = false;
++            for (std::uint32_t i = 0; i < frames; ++i) {
++                asked = depth.observe_leader(triple_depth_leader_late(slack, kPeriod)) || asked;
++                if (depth.pending) {
++                    require(depth.take(true, true, true), "taken");
++                }
++            }
++            return asked;
++        };
++        require(feed(-12 * kMillisecond, TripleDepth::kWindow) && depth.slots == 2, "one slot short: a second");
++        require(feed(-7 * kMillisecond, TripleDepth::kWindow) && depth.slots == 3, "heavy: a third");
++        require(!feed(4 * kMillisecond, 10 * TripleDepth::kWindow) && depth.slots == 3, "on time: holds");
++    }
++    {
++        // The display time modes follow the slots: 3X's own shape without
++        // one, then one mode per slot, up to four.
++        require(display_time_mode(3, true, 0) == 2, "no slot: 3X's own");
++        require(display_time_mode(3, true, 1) == 3 && display_time_mode(3, true, 2) == 4,
++            "one and two slots as before");
++        require(display_time_mode(3, true, 3) == 5 && display_time_mode(3, true, 4) == 6,
++            "three and four");
++        require(display_time_mode(3, true, 9) == DisplayTimeCorrector::kModes - 1, "capped");
++        require(display_time_mode(3, false, 4) == 2, "shallow 3X has no depth");
+     }
+     {
+         // The release delay keeps the depth's period in hand.
+@@ -1306,7 +1533,7 @@ void late_skip_tests() {
+         // While on, a frame that was prepared before it engaged is not judged.
+         require(skip.observe_leader(now, true).transition == LateSkipTransition::none,
+             "first synthetics while on are ignored");
+-        // Ready every time: leaves after two good windows, not before the dwell.
++        // Ready every time: leaves at the first good window past the dwell.
+         const Nanoseconds entered = now;
+         int ready_frames = 0;
+         while (skip.active() && ready_frames < 2000) {
+@@ -1316,7 +1543,7 @@ void late_skip_tests() {
+         }
+         require(!skip.active() && step.transition == LateSkipTransition::left, "leaves once there is room");
+         require(now - entered >= LateSkipConfig{}.min_dwell, "not before the dwell");
+-        require(ready_frames >= 60, "two good windows at least: " + std::to_string(ready_frames));
++        require(ready_frames >= 30, "a good window at least: " + std::to_string(ready_frames));
+         require(ready_frames <= 120, "and soon after the dwell: " + std::to_string(ready_frames));
+     }
+     {
+@@ -1338,10 +1565,40 @@ void late_skip_tests() {
+             }
+             return last;
+         };
+-        require(window(30).transition == LateSkipTransition::none, "one good window is not enough");
+-        require(window(20).transition == LateSkipTransition::none && skip.active(), "a bad one resets");
+-        require(window(28).transition == LateSkipTransition::none, "good again: one");
+-        require(window(29).transition == LateSkipTransition::left && !skip.active(), "two in a row: leaves");
++        // DCS VR Control (0009): one window with 24 of 30 that would have
++        // been ready is enough (0006: two windows of 28).
++        require(window(20).transition == LateSkipTransition::none && skip.active(), "20 of 30 holds it");
++        require(window(23).transition == LateSkipTransition::none && skip.active(), "23 of 30 holds it");
++        require(window(24).transition == LateSkipTransition::left && !skip.active(), "24 of 30: leaves");
++    }
++    {
++        // DCS VR Control (0009): the live heavy mission - the skip on, three
++        // to eleven of thirty skipped slots that would have been ready, for a
++        // minute - stays on (it cannot help); once the deeper pipeline makes
++        // them ready (26-30 of 30), it lets go within a window of the dwell.
++        LateFrameSkipController skip;
++        Nanoseconds now = start;
++        for (int i = 0; i < 30; ++i) {
++            now += frame;
++            skip.observe_leader(now, true);
++        }
++        require(skip.active(), "engaged");
++        const std::uint32_t heavy_ready[] = {0, 0, 1, 11, 0, 3, 2, 0, 3, 0};
++        for (const std::uint32_t ready : heavy_ready) {
++            for (std::uint32_t i = 0; i < 30; ++i) {
++                now += frame;
++                skip.observe_skipped(now, i < ready);
++            }
++        }
++        require(skip.active(), "never ready: stays on");
++        int frames = 0;
++        while (skip.active() && frames < 300) {
++            now += frame;
++            skip.observe_skipped(now, frames % 15 != 0); // 28 of 30
++            ++frames;
++        }
++        require(!skip.active() && frames == 30, "ready again: off after one window, " +
++            std::to_string(frames));
+     }
+     {
+         // Flapping: back within the flap window doubles the dwell, up to the
+@@ -1422,6 +1679,7 @@ int main() {
+         blocked_interval_tests();
+         gpu_busy_tests();
+         triple_depth_tests();
++        scene_change_tests(); // 0009
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index 264a679..c820b93 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -232,6 +232,25 @@ int g_triple_deep_jitter_us = 0;
+ // 2), never as the deeper one (3 or 4) - checked by layer_triple_deep.cmake.
+ bool g_triple_deep_quad_mode = false;
+ int g_simulated_render_us = 0;
++// dcs-triple-scenes (DCS VR Control, 0009): the live flight of 2026-10-05
++// 23:22 in 3X with the deeper pipeline and the late-frame skip at its
++// default (off): a light mission (13 ms of render a frame, as
++// dcs-triple-deep), a heavy one whose frame takes longer from release to its
++// GPU's end than three periods while the application still holds a third of
++// the rate - 10 ms of render, then 18 ms of GPU work the CPU does not wait
++// for (g_late_gpu_ms), about 30 ms plus synthesis against the 30 ms two
++// slots give the first synthetic - then a 1.5 s stall (a mission load: a
++// scene change) and the light mission again. Every phase's steady tail must
++// show every slot fresh: no slot re-presented, no first synthetic late. With
++// 0008's two-slot cap the heavy phase could not be (every first synthetic
++// late, the skip on: 60 fresh frames of 90 on the headset).
++// dcs-adaptive-scenes (0009): adaptive 2X/3X starting in 2X, light (4 ms),
++// the stall, three frames of 120 ms (the new scene's first frames), light
++// again. The transient must not send 2X to 3X (0008 did, within half a
++// second of every mission start): no switch in the scene's settle.
++bool g_scenes_mode = false;
++bool g_scenes_adaptive = false;
++int g_late_gpu_ms = 0;
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+ // dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
+ // time per frame set apart - CPU by a sleep from the frame's start, GPU by a
+@@ -2504,7 +2523,8 @@ int main(int argc, char** argv) {
+             "dcs-throughput-gpu|d3d11-bridge|"
+             "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted|"
+             "d3d11-bridge-fallback|dcs-late-skip|dcs-triple-deep|"
+-            "dcs-triple-deep-jitter|dcs-triple-deep-quad]\n";
++            "dcs-triple-deep-jitter|dcs-triple-deep-quad|dcs-triple-scenes|"
++            "dcs-adaptive-scenes]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2527,6 +2547,11 @@ int main(int argc, char** argv) {
+             argc == 4 && std::strcmp(argv[3], "dcs-triple-deep-quad") == 0;
+         g_triple_deep_mode = steady || jitter || g_triple_deep_quad_mode;
+         g_triple_deep_jitter_us = jitter ? 3000 : 0;
++        // DCS VR Control (0009).
++        g_scenes_adaptive =
++            argc == 4 && std::strcmp(argv[3], "dcs-adaptive-scenes") == 0;
++        g_scenes_mode = g_scenes_adaptive ||
++            (argc == 4 && std::strcmp(argv[3], "dcs-triple-scenes") == 0);
+     }
+     {
+         const bool throughput_down =
+@@ -2540,7 +2565,7 @@ int main(int argc, char** argv) {
+         g_adaptive_latency_mode = g_adaptive_latency_mode || g_throughput_mode;
+     }
+     g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
+-        g_triple_deep_mode ||
++        g_triple_deep_mode || g_scenes_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -2597,8 +2622,9 @@ int main(int argc, char** argv) {
+             g_frames_per_application_frame = 3;
+             g_deep_pipeline = true;
+         }
++        // DCS VR Control (0009): off unless the ini says 1, as the layer.
+         g_late_skip_expected = GetPrivateProfileIntW(
+-            L"ofxr", L"late_frame_skip", 1, ini.wstring().c_str()) != 0;
++            L"ofxr", L"late_frame_skip", 0, ini.wstring().c_str()) != 0;
+         // Adaptive 2X/3X reserves 3X's ring from the start, on a binding 3X
+         // covers - any but a D3D11 session left on the interop.
+         if (GetPrivateProfileIntW(
+@@ -4112,6 +4138,18 @@ int main(int argc, char** argv) {
+                     if (g_gpu_simulator) {
+                         g_throughput_phases.push_back(phases);
+                     }
++                } else if (g_late_gpu_ms > 0 && g_gpu_simulator) {
++                    // DCS VR Control (0009): dcs-triple-scenes' heavy phase.
++                    // The frame's GPU work goes in as its CPU part ends and
++                    // is not waited for: the frame is done on the GPU that
++                    // long after its xrEndFrame, while the next one renders.
++                    ok = ok && XR_SUCCEEDED(next_wait_result) &&
++                        g_gpu_simulator->submit(
++                            std::chrono::milliseconds(g_late_gpu_ms)) &&
++                        XR_SUCCEEDED(acquire_image(swapchain, &acquire_info, &acquired_index)) &&
++                        XR_SUCCEEDED(wait_image(swapchain, &image_wait_info)) &&
++                        XR_SUCCEEDED(release_image(swapchain, &release_info)) &&
++                        submit_frame(pending.predictedDisplayTime);
+                 } else {
+                     ok = ok && XR_SUCCEEDED(next_wait_result) &&
+                         capture_fresh_application_image() &&
+@@ -4214,7 +4252,8 @@ int main(int argc, char** argv) {
+         // agreeing windows of thirty real frames), and in 3X for the queue
+         // to reach its depth first, then until it has.
+         const int kOverlappingFrames =
+-            (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode) ? 0
++            (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode ||
++             g_scenes_mode) ? 0
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4225,7 +4264,7 @@ int main(int argc, char** argv) {
+         constexpr int kSettleBound = 400;
+         int settle_frames = 0;
+         if (g_display_latency_mode && !g_adaptive_latency_mode &&
+-            !g_late_skip_mode && !g_triple_deep_mode) {
++            !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode) {
+             settle_frames = run_until_settled(kSettleBound);
+         }
+         // dcs-triple-deep (0007): 14 s of a steady application, the last 8
+@@ -4249,6 +4288,54 @@ int main(int argc, char** argv) {
+             }
+             g_simulated_render_us = 0;
+         }
++        // dcs-triple-scenes / dcs-adaptive-scenes (0009): where each phase
++        // ends in the records: light, heavy (the light one's end again in
++        // the adaptive case), the stall, the light one after it.
++        std::array<std::size_t, 4> scene_marks{};
++        const auto scene_mark = [&] {
++            std::scoped_lock lock(g_end_records_mutex);
++            return g_end_records.size();
++        };
++        if (g_scenes_mode) {
++            g_gpu_simulator = std::make_unique<GpuWorkSimulator>();
++            sequence_succeeded = sequence_succeeded && g_gpu_simulator->initialize();
++            const int light_us = g_scenes_adaptive ? 4'000 : 13'000;
++            g_simulated_render_us = light_us;
++            for (int index = 0; sequence_succeeded && index < (g_scenes_adaptive ? 300 : 300);
++                 ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            scene_marks[0] = scene_mark();
++            if (!g_scenes_adaptive) {
++                g_simulated_render_us = 20'000;
++                g_late_gpu_ms = 26;
++                for (int index = 0; sequence_succeeded && index < 420; ++index) {
++                    sequence_succeeded = run_frame(true);
++                }
++                g_late_gpu_ms = 0;
++                sequence_succeeded = sequence_succeeded && wait_for_queue_idle();
++            }
++            scene_marks[1] = scene_mark();
++            // The mission load: the application stops calling frame
++            // functions for a second and a half.
++            precise_sleep(std::chrono::milliseconds(1500));
++            scene_marks[2] = scene_mark();
++            if (g_scenes_adaptive) {
++                // The new scene's first frames.
++                g_simulated_render_us = 120'000;
++                for (int index = 0; sequence_succeeded && index < 3; ++index) {
++                    sequence_succeeded = run_frame(true);
++                }
++            }
++            g_simulated_render_us = light_us;
++            for (int index = 0; sequence_succeeded && index < 330; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            scene_marks[3] = scene_mark();
++            g_simulated_render_us = 0;
++            g_gpu_simulator.reset();
++            sequence_succeeded = sequence_succeeded && wait_for_queue_idle();
++        }
+         // dcs-late-skip (0006): where each phase starts in the records.
+         std::size_t late_skip_heavy_from = 0;
+         std::size_t late_skip_light_from = 0;
+@@ -4418,6 +4505,120 @@ int main(int argc, char** argv) {
+                       << throughput_frames << " frames\n";
+             return EXIT_SUCCESS;
+         }
++        if (g_scenes_mode) {
++            // 0009: each phase's steady tail (the last 300 submissions, three
++            // seconds at the fake's 100 Hz) shows a fresh frame in every slot
++            // - nothing re-presented, nothing empty, two synthetics for each
++            // real frame - and nothing over the run goes out of order.
++            std::vector<EndFrameRecord> records;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records = g_end_records;
++            }
++            std::vector<std::pair<float, XrTime>> told;
++            {
++                std::scoped_lock lock(g_told_mutex);
++                told = g_told_by_pose;
++            }
++            const auto told_for = [&](float pose_x) -> XrTime {
++                for (const auto& [pose, time] : told) {
++                    if (pose == pose_x) {
++                        return time;
++                    }
++                }
++                return -1;
++            };
++            std::size_t unordered = 0;
++            XrTime last_told = 0;
++            for (const EndFrameRecord& record : records) {
++                if (record.layer_count == 0 ||
++                    (record.target != SubmittedTarget::current &&
++                     record.target != SubmittedTarget::synthetic)) {
++                    continue;
++                }
++                const XrTime time = told_for(record.poses[0].position.x);
++                if (time >= 0) {
++                    unordered += time < last_told ? 1U : 0U;
++                    last_told = std::max(last_told, time);
++                }
++            }
++            struct Tail {
++                std::size_t repeats{};
++                std::size_t empty{};
++                std::size_t real{};
++                std::size_t synthetic{};
++            };
++            const auto tail = [&](std::size_t end) {
++                Tail result{};
++                end = std::min(end, records.size());
++                const std::size_t from = end > 300 ? end - 300 : 0;
++                for (std::size_t index = from; index < end; ++index) {
++                    const EndFrameRecord& record = records[index];
++                    if (record.layer_count == 0) {
++                        ++result.empty;
++                        continue;
++                    }
++                    const bool repeat = index > 0 &&
++                        record.target == SubmittedTarget::current &&
++                        records[index - 1].target == SubmittedTarget::current &&
++                        records[index - 1].poses[0].position.x ==
++                            record.poses[0].position.x;
++                    if (repeat) {
++                        ++result.repeats;
++                    } else if (record.target == SubmittedTarget::synthetic) {
++                        ++result.synthetic;
++                    } else if (record.target == SubmittedTarget::current) {
++                        ++result.real;
++                    }
++                }
++                return result;
++            };
++            std::vector<std::pair<const char*, Tail>> tails;
++            if (!g_scenes_adaptive) {
++                tails.emplace_back("light", tail(scene_marks[0]));
++                tails.emplace_back("heavy", tail(scene_marks[1]));
++            }
++            // The last few submissions are the teardown's.
++            tails.emplace_back("light again", tail(scene_marks[3] > 6 ? scene_marks[3] - 6 : 0));
++            bool tails_valid = true;
++            std::ostringstream summary;
++            for (const auto& [name, value] : tails) {
++                summary << ' ' << name << ": real " << value.real << " synthetic "
++                        << value.synthetic << " repeat " << value.repeats
++                        << " empty " << value.empty << ';';
++                if (g_scenes_adaptive) {
++                    tails_valid = tails_valid && value.repeats == 0 && value.empty == 0;
++                } else {
++                    tails_valid = tails_valid && value.repeats == 0 &&
++                        value.empty == 0 && value.real >= 90 &&
++                        value.synthetic + 2 >= 2 * value.real;
++                }
++            }
++            const XrDuration multiplier =
++                pending.predictedDisplayPeriod / kFakeDisplayPeriod;
++            const bool shape_valid = g_scenes_adaptive ? multiplier == 2 : multiplier == 3;
++            const bool valid = sequence_succeeded && teardown_succeeded &&
++                presenter_seen && violations == 0 && unordered == 0 &&
++                tails_valid && shape_valid &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            if (!valid) {
++                std::cerr << "DCS scenes validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen
++                          << " violations=" << violations
++                          << " unordered=" << unordered
++                          << " multiplier=" << multiplier
++                          << " records=" << records.size()
++                          << " marks=" << scene_marks[0] << '/' << scene_marks[1]
++                          << '/' << scene_marks[2] << '/' << scene_marks[3]
++                          << summary.str() << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << "OpenXR DCS scenes test passed ("
++                      << (g_scenes_adaptive ? "adaptive" : "3X deep") << "):"
++                      << summary.str() << " final multiplier " << multiplier << '\n';
++            return EXIT_SUCCESS;
++        }
+         if (g_triple_deep_mode) {
+             // 0007: over the steady stretch, every slot a fresh frame - two
+             // synthetics and a real one per application frame, nothing
+diff --git a/tests/layer_scene_change.cmake b/tests/layer_scene_change.cmake
+new file mode 100644
+index 0000000..f354162
+--- /dev/null
++++ b/tests/layer_scene_change.cmake
+@@ -0,0 +1,174 @@
++# DCS VR Control (0009): runs dcs-triple-scenes (CASE triple) or
++# dcs-adaptive-scenes (CASE adaptive) with SCENES_INI beside the layer DLL
++# and checks from the flight log that
++#   - the late-frame skip, off by default, never turned on;
++#   - the 1.5 s stall was recorded as a scene change (scene_change, result
++#     >= 1000 ms) in the shape the session was in;
++#   - triple: the heavy phase took a third depth slot (403 with a=3, which
++#     0008's two-slot cap could not) before the scene change, which gave
++#     its slots back (b) and was followed by a first slot again (403 a=1);
++#     and the last STEADY_SECONDS whole seconds before the teardown's had no
++#     first synthetic late, nothing re-presented and at least MIN_FRESH fresh
++#     submissions (the fake runs about 100 slots a second);
++#   - adaptive: no adaptive switch within the scene's two-second settle,
++#     whatever the new scene's first frames did.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN SCENES_INI WORK_DIR CASE)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++if(NOT DEFINED STEADY_SECONDS)
++    set(STEADY_SECONDS 3)
++endif()
++if(NOT DEFINED MIN_FRESH)
++    set(MIN_FRESH 80)
++endif()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${SCENES_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(scenes_ini_name "${SCENES_INI}" NAME)
++file(RENAME "${WORK_DIR}/${scenes_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++if(CASE STREQUAL "adaptive")
++    set(mode dcs-adaptive-scenes)
++else()
++    set(mode dcs-triple-scenes)
++endif()
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        ${mode}
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${mode}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++string(FIND "${contents}" "op=submission_timing result=3 dur_us=0 a=1 " skip_entered)
++if(NOT skip_entered EQUAL -1)
++    message(FATAL_ERROR "The late-frame skip turned on with late_frame_skip at its default")
++endif()
++
++# The stall itself, from the application's own xrEndFrame calls: where the
++# behaviour is judged, whether or not the layer saw a scene change.
++string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=B op=app_end_frame" end_frames "${contents}")
++set(stall_ms -1)
++set(previous_ms -1)
++foreach(record IN LISTS end_frames)
++    string(REGEX REPLACE "^ms=([0-9]+)\\.[0-9]+ .*" "\\1" at_ms "${record}")
++    if(previous_ms GREATER_EQUAL 0)
++        math(EXPR gap "${at_ms} - ${previous_ms}")
++        if(gap GREATER 1000)
++            set(stall_ms ${at_ms})
++        endif()
++    endif()
++    set(previous_ms "${at_ms}")
++endforeach()
++if(stall_ms LESS 0)
++    message(FATAL_ERROR "The scenario's stall is not in the log")
++endif()
++
++if(CASE STREQUAL "adaptive")
++    # 0008 switched to 3X on the new scene's first frames (p90 ~126 ms).
++    math(EXPR settle_end "${stall_ms} + 2000")
++    string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=adaptive_switch result=[0-9]+ dur_us=0 a=[0-9]+ b=[0-9]+ c=[0-9]+" switches "${contents}")
++    foreach(record IN LISTS switches)
++        string(REGEX REPLACE "^ms=([0-9]+)\\..*" "\\1" at_ms "${record}")
++        if(at_ms GREATER_EQUAL stall_ms AND at_ms LESS settle_end)
++            message(FATAL_ERROR "An adaptive switch within the scene's settle: ${record} (stall ended at ${stall_ms} ms)")
++        endif()
++    endforeach()
++else()
++    # 0008 judged first synthetics by their hand-over only and kept one or
++    # two slots: the heavy phase's, handed over on time but written after,
++    # never asked for more.
++    string(REGEX MATCH "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=presenter_transition result=403 dur_us=0 a=3 " third_slot "${contents}")
++    if(third_slot STREQUAL "")
++        message(FATAL_ERROR "The heavy phase never took a third depth slot")
++    endif()
++    string(REGEX REPLACE "^ms=([0-9]+)\\..*" "\\1" third_slot_ms "${third_slot}")
++    if(third_slot_ms GREATER stall_ms)
++        message(FATAL_ERROR "The third depth slot came after the heavy phase: ${third_slot}")
++    endif()
++endif()
++
++string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=scene_change result=[0-9]+ dur_us=0 a=[0-9]+ b=[0-9]+ c=[0-9]+" scenes "${contents}")
++list(LENGTH scenes scene_count)
++if(NOT scene_count EQUAL 1)
++    message(FATAL_ERROR "Expected one scene change, found ${scene_count}: ${scenes}")
++endif()
++list(GET scenes 0 scene)
++string(REGEX REPLACE "^ms=([0-9]+)\\.[0-9]+ .* result=([0-9]+) dur_us=0 a=([0-9]+) b=([0-9]+) c=([0-9]+)$" "\\1;\\2;\\3;\\4;\\5" fields "${scene}")
++list(GET fields 0 scene_ms)
++list(GET fields 1 gap_ms)
++list(GET fields 2 scene_multiplier)
++list(GET fields 3 scene_flags)
++if(gap_ms LESS 1000 OR gap_ms GREATER 3000)
++    message(FATAL_ERROR "The scene change's gap is not the stall's: ${scene}")
++endif()
++string(FIND "${contents}" "${scene}" scene_at)
++
++if(CASE STREQUAL "adaptive")
++    if(NOT scene_multiplier EQUAL 2)
++        message(FATAL_ERROR "The scene change was not in 2X: ${scene}")
++    endif()
++    message(STATUS "Scene change (adaptive): ${scene}; no switch in its settle")
++    return()
++endif()
++
++if(NOT scene_multiplier EQUAL 3)
++    message(FATAL_ERROR "The scene change was not in 3X: ${scene}")
++endif()
++math(EXPR slots_given_back "${scene_flags} & 65535")
++if(slots_given_back LESS 3)
++    message(FATAL_ERROR "The heavy phase's depth (${slots_given_back} slots) was not given back at the scene change: ${scene}")
++endif()
++string(SUBSTRING "${contents}" ${scene_at} -1 after_scene)
++string(FIND "${after_scene}" "op=presenter_transition result=403 dur_us=0 a=1 " rearmed_at)
++if(rearmed_at EQUAL -1)
++    message(FATAL_ERROR "No depth slot was taken again after the scene change")
++endif()
++
++# The last STEADY_SECONDS whole seconds before the teardown's.
++string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=submission_timing result=1 dur_us=0 a=[0-9]+ b=[0-9]+" tallies "${contents}")
++list(LENGTH tallies tally_count)
++math(EXPR needed "${STEADY_SECONDS} + 1")
++if(tally_count LESS needed)
++    message(FATAL_ERROR "Only ${tally_count} per-second submission records")
++endif()
++math(EXPR last "${tally_count} - 2")
++math(EXPR first "${tally_count} - 1 - ${STEADY_SECONDS}")
++set(summary "")
++foreach(index RANGE ${first} ${last})
++    list(GET tallies ${index} record)
++    string(REGEX REPLACE "^ms=([0-9]+)\\.[0-9]+ .* a=([0-9]+) b=([0-9]+)$" "\\1;\\2;\\3" tally_fields "${record}")
++    list(GET tally_fields 1 counts)
++    list(GET tally_fields 2 lates)
++    math(EXPR real "${counts} & 65535")
++    math(EXPR gen1 "(${counts} >> 16) & 65535")
++    math(EXPR gen2 "(${counts} >> 32) & 65535")
++    math(EXPR repeat "(${counts} >> 48) & 65535")
++    math(EXPR late_gen1 "(${lates} >> 16) & 65535")
++    math(EXPR fresh "${real} + ${gen1} + ${gen2}")
++    string(APPEND summary " [real ${real} gen1 ${gen1} gen2 ${gen2} repeat ${repeat} late-gen1 ${late_gen1}]")
++    if(late_gen1 GREATER 0 OR repeat GREATER 0 OR fresh LESS MIN_FRESH)
++        message(FATAL_ERROR "Not every slot fresh in the light scene after the load:${summary}")
++    endif()
++endforeach()
++message(STATUS "Scene change (3X deep): ${scene}; third slot in the heavy phase, depth re-armed after the load;${summary}")
+diff --git a/tests/ofxr_bridge_scenes_adaptive.ini b/tests/ofxr_bridge_scenes_adaptive.ini
+new file mode 100644
+index 0000000..b82ddbe
+--- /dev/null
++++ b/tests/ofxr_bridge_scenes_adaptive.ini
+@@ -0,0 +1,19 @@
++[ofxr]
++; DCS VR Control (0009): adaptive 2X/3X starting in 2X.
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++adaptive_probe=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_scenes_triple.ini b/tests/ofxr_bridge_scenes_triple.ini
+new file mode 100644
+index 0000000..0ac41e5
+--- /dev/null
++++ b/tests/ofxr_bridge_scenes_triple.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++; DCS VR Control (0009): 3X with the deeper pipeline; late_frame_skip is
++; left at its default (off).
++deep_pipeline=1
++triple_frame_gen=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right

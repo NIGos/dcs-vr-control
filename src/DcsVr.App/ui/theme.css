@@ -1,0 +1,442 @@
+/* Launcher theme, layered over app.css. Modelled on the structure of the DCS launcher (icon rail, flat charcoal
+   settings rows, orange accent, right-hand control panel) with its own wordmark and artwork.
+   Remove the <link> to theme.css in index.html to return to the original look. */
+:root{
+  --bg:#262626;--rail:#1c1c1c;--panel:#202020;--s0:#2b2b2b;--s1:#303030;--s2:#383838;--field:#1b1b1b;
+  --line:#3a3a3a;--line-strong:#4a4a4a;--text:#f2f2f2;--soft:#d6d6d6;--muted:#a8a8a8;--faint:#8a8a8a;
+  --accent:#f5a01a;--accent-hi:#ffb94a;--accent-dim:#f5a01a24;--accent-dark:#7a5214;--cyan:#69c4e6;--green:#5bd68a;--red:#f49988;
+  --amber:var(--accent);--display:"Bahnschrift SemiCondensed","Bahnschrift",Interface,"Segoe UI",sans-serif;--radius:4px;--ease:cubic-bezier(.2,.8,.2,1)}
+body{background:var(--bg);font-size:14px;color:var(--text)}
+#shell{grid-template-columns:64px minmax(0,1fr) 300px;grid-template-rows:minmax(0,1fr)}
+h1,h2,h3{font-family:var(--display)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+p{color:var(--muted)}
+
+/* Icon rail */
+.rail{background:var(--rail);border-right:1px solid #111;padding:14px 8px;align-items:center}
+.rail .brand{padding:0 0 18px;justify-content:center}
+.rail .brand>div,.rail-label,.nav-item>div{display:none}
+.rail .brand svg{width:30px;height:30px;fill:var(--accent)}
+.rail .brand img{width:34px;height:34px}
+nav{gap:4px;width:100%}
+.nav-item{justify-content:center;padding:11px 0;border-radius:6px;color:var(--accent);border:0}
+.nav-item svg{width:24px;height:24px;stroke-width:1.5}
+.nav-item:hover{background:#ffffff0d}
+.nav-item.selected{background:var(--accent-dim);color:var(--accent-hi)}
+.nav-item.selected:before{left:-8px;width:3px;height:60%;top:20%;border-radius:2px;background:var(--accent);box-shadow:none}
+.rail-bottom{padding-top:10px;width:100%}
+.rail .search-button{width:100%;justify-content:center;padding:10px 0;border:0;background:transparent;color:var(--accent);font-size:0}
+.rail .search-button>span{font-size:24px}
+.rail .search-button kbd{display:none}
+.rail .search-button:hover{background:#ffffff0d}
+
+/* Workspace: section title with a thin rule, like the launcher's option headers */
+.workspace{background:var(--bg)}
+.page-heading{display:block;padding:20px 28px 0;margin:0}
+.page-heading>div{border-bottom:1px solid var(--line-strong);padding-bottom:12px}
+.breadcrumb,.page-heading .eyebrow{display:none}
+.page-heading h1{font:600 17px/1.2 "Segoe UI",Interface,sans-serif;letter-spacing:.3px;text-transform:uppercase;color:var(--text)}
+.page-heading p{margin-top:4px;font-size:12px;color:var(--muted)}
+#scrollArea{padding:18px 28px 28px}
+.eyebrow{color:var(--accent)}
+
+/* Surfaces: flat groups separated by space and rules */
+.card{background:transparent;border:0;border-radius:0;box-shadow:none;padding:4px 0 18px}
+.card-heading{padding:0 0 8px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.card .card-heading h2,.card>h2{font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase;color:var(--soft)}
+.card .card-heading .fine{margin-top:2px}
+.two-column{gap:0 34px}
+.callout{background:#f5a01a14;border:1px solid #f5a01a40;border-radius:var(--radius)}
+.callout b{color:var(--accent-hi)}
+.inline-note{background:var(--s0);border-color:var(--line);color:var(--soft);border-radius:var(--radius)}
+.tag{border-color:var(--accent-dark);color:var(--accent);background:transparent;border-radius:3px}
+.tag.soft{border-color:var(--line-strong);color:var(--muted)}
+
+/* Settings rows: label on the left, control on the right */
+.setting{display:grid;grid-template-columns:minmax(0,1fr) minmax(170px,56%);column-gap:16px;align-items:center;padding:10px 0;border-top:0}
+.setting>.setting-label{grid-column:1;font:600 14px "Segoe UI",Interface,sans-serif;color:var(--text);margin:0}
+.setting>p{grid-column:1;margin:2px 0 0;font-size:11.5px;line-height:1.45;color:var(--faint)}
+.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:2;grid-row:1 / span 2}
+.setting>.input-error{grid-column:1 / -1}
+.setting .switch-row{grid-column:1 / -1}
+.setting .switch-row .setting-label{font:600 14px "Segoe UI",Interface,sans-serif}
+.setting .switch-row p{font-size:11.5px;color:var(--faint);margin-top:2px}
+#componentControls .setting,#diagnosticControls .setting{grid-template-columns:1fr}
+/* Narrow groups put the label above the control so long choices are never cut. */
+.two-column>div,#pacingControls,#externalPacingControls,#qualityControls>div,#neuralControls>div{container-type:inline-size}
+@container (max-width:470px){.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}}
+#componentControls .setting>.path-row,#diagnosticControls .setting>.path-row,#componentControls .setting>select{grid-column:1;grid-row:auto;margin-top:6px}
+select,input[type=text],input[type=number]{background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);min-height:40px;font-size:14px;padding:8px 12px}
+select{appearance:none;padding-right:34px;background-image:linear-gradient(45deg,transparent 50%,var(--accent) 50%),linear-gradient(135deg,var(--accent) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
+select:hover,input[type=text]:hover,input[type=number]:hover{background-color:#151515}
+select:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--accent-dark)}
+select:disabled,input:disabled{color:var(--faint)}
+option{background:#1b1b1b;color:var(--text)}
+.path-row input{color:var(--soft);font-size:12px}
+.setting-number{gap:10px}
+.setting-number input[type=number]{width:74px;min-height:32px;text-align:right;color:var(--text);background:transparent;padding:4px 2px;font-size:13px}
+.number-unit{color:var(--faint)}
+input[type=range]{appearance:none;-webkit-appearance:none;height:16px;background:transparent}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(var(--accent),var(--accent)) 0/var(--fill,50%) 100% no-repeat,#3c3c3c}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:var(--accent);border:0}
+input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
+.switch{width:44px;height:22px;background:#1b1b1b;border:2px solid #cfcfcf;border-radius:999px}
+.switch:before{width:12px;height:12px;left:3px;top:3px;background:#e8e8e8}
+.switch:checked{background:var(--accent);border-color:var(--accent)}
+.switch:checked:before{transform:translateX(22px);background:#1b1b1b}
+.setting.inactive{opacity:.42}
+
+/* Pipeline: three status tiles at the top of Flight setup */
+.pipeline{gap:10px;margin-bottom:20px}
+.stage{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius);padding:12px 14px;transition:background .14s,border-color .14s}
+.stage:hover{background:var(--s1);border-color:var(--line-strong)}
+.stage>span{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font:600 10px var(--display);letter-spacing:1px;gap:8px}
+.stage em{font:700 9px var(--display);font-style:normal;letter-spacing:1.2px;padding:2px 7px;border-radius:999px}
+.stage.on em{color:#1b1b1b;background:var(--accent)}
+.stage.off{border-left-color:#555}
+.stage.off em{color:var(--muted);border:1px solid var(--line-strong)}
+.stage.off b{color:var(--faint)}
+.stage.off small{color:#9a9a9a}
+.stage b{font:600 15px "Segoe UI",Interface,sans-serif;margin:6px 0 2px;display:block}
+.stage small{font-size:12px;color:var(--muted)}
+.stage:after{content:none}
+.budget{background:var(--s0);border:1px solid var(--line);border-radius:var(--radius)}
+.budget span{color:var(--muted)}
+.budget strong{font-family:var(--display);color:#fff}
+.coverage{border-color:var(--line);border-radius:var(--radius)}
+.focus-box{border-color:var(--accent)}
+
+/* Buttons */
+.button{border-radius:var(--radius);font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.3px;text-transform:uppercase}
+.button.secondary,.button.quiet{background:transparent;border:1.5px solid #d8d8d8;color:var(--text);border-radius:999px;padding:8px 18px}
+.button.secondary:hover:not(:disabled),.button.quiet:hover:not(:disabled){background:#ffffff12}
+.button.primary{background:var(--accent);border-color:var(--accent);color:#1b1b1b;box-shadow:none}
+.button.primary:hover:not(:disabled){background:var(--accent-hi);border-color:var(--accent-hi)}
+button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!important;border-color:#4a4a4a!important;box-shadow:none!important}
+
+/* Right control panel */
+.control-panel{display:flex;flex-direction:column;min-height:0;background:var(--panel);border-left:1px solid #141414}
+.panel-top{flex:1;min-height:0;overflow:auto;padding:22px 22px 10px}
+.wordmark{display:flex;align-items:baseline;gap:8px;font-family:var(--display);font-style:italic;line-height:1;margin-bottom:6px}
+.wordmark b{font-size:52px;font-weight:800;letter-spacing:-1px;color:#fff}
+.wordmark span{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--accent)}
+.panel-device{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:18px}
+.device-dot{width:7px;height:7px;border-radius:50%;background:var(--green);border:0;box-shadow:0 0 6px var(--green)}
+.panel-section{margin-top:18px}
+.panel-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font:600 14px "Segoe UI",Interface,sans-serif;color:var(--text)}
+.panel-label label{font:inherit}
+.panel-links{display:flex;gap:12px}
+.link-button{border:0;background:transparent;padding:2px 0;color:var(--accent);font:700 12px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase;cursor:pointer}
+.link-button:hover:not(:disabled){color:var(--accent-hi);text-decoration:underline}
+.control-panel select{width:100%}
+.panel-profile{font:600 13px "Segoe UI",Interface,sans-serif;color:var(--soft);margin:10px 0 0;text-transform:none;letter-spacing:0}
+.route-switch{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.route-switch button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:44px;border:1.5px solid #d8d8d8;border-radius:999px;background:transparent;color:var(--text);font:700 14px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase;cursor:pointer;transition:background .14s,color .14s,border-color .14s}
+.route-switch button:hover:not(:disabled){background:#ffffff12}
+.route-switch button.selected{background:#fff;color:#1b1b1b;border-color:#fff}
+.live-dot{width:7px;height:7px;border-radius:50%;background:#ffffff2e;flex-shrink:0}
+.route-switch button.live .live-dot{background:var(--green);box-shadow:0 0 8px var(--green)}
+.route-switch button.selected.live .live-dot{background:#178a45;box-shadow:none}
+.route-live{min-height:16px;margin-top:8px;font-size:11.5px;line-height:1.45;color:var(--muted)}
+.route-live.mismatch{color:#ffd2c8}
+.route-live.mismatch:before{content:"Route mismatch · ";font-weight:700;color:var(--red)}
+.hero-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{display:inline-flex;align-items:baseline;gap:6px;padding:4px 10px;border-radius:999px;background:var(--s2);font-size:12px;color:var(--text)}
+.chip small{font:600 9px var(--display);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.pill-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pill{min-height:44px;border:1.5px solid #d8d8d8;border-radius:999px;background:transparent;color:var(--text);font:700 12px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase;cursor:pointer;padding:6px 10px}
+.pill:hover:not(:disabled){background:#ffffff12}
+
+/* Workflow in the panel: one large Launch DCS button, secondary actions as links below it */
+.workflow{display:flex;flex-direction:column;align-items:stretch;gap:12px;padding:14px 22px 16px;background:var(--panel);border-top:1px solid #141414;box-shadow:none}
+.workflow-status{align-items:flex-start}
+.workflow-status strong{font-size:13px}
+.workflow-status p{font-size:11.5px;max-width:none}
+.status-dot{background:var(--accent);box-shadow:0 0 6px var(--accent);margin-top:4px}
+.status-dot.error{background:var(--red);box-shadow:0 0 6px var(--red)}
+.status-dot.ready{background:var(--green);box-shadow:0 0 6px var(--green)}
+.workflow-actions{display:grid;grid-template-columns:1fr;gap:8px}
+.workflow-actions .button{display:flex;align-items:center;justify-content:center;gap:10px;min-height:44px;border-radius:999px;font-size:14px;letter-spacing:.8px}
+.workflow-links{display:flex;flex-wrap:wrap;justify-content:center;gap:2px 16px}
+.workflow-links .link-button{font-size:11px;letter-spacing:.4px}
+.workflow-links .link-button[hidden]{display:none}
+.workflow-links .link-button:disabled{color:var(--faint);cursor:default}
+.button.launch{min-height:52px;font:800 17px "Segoe UI",sans-serif;letter-spacing:2px;color:#1b1b1b;background:var(--accent);border:0;box-shadow:0 6px 22px #f5a01a40;clip-path:none}
+.button.launch:hover:not(:disabled){background:var(--accent-hi)}
+.button.launch:disabled{border:1.5px solid #4a4a4a!important}
+.button.launch span{padding-left:2px}
+.panel-foot{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--faint)}
+.rail-version{margin:0;padding:0;font:11px Consolas,monospace;color:var(--faint)}
+
+/* Diagnostics, recovery and dialogs */
+.section-actions h2{font:600 15px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase}
+.issue{border-radius:var(--radius);font-size:13px;line-height:1.55;padding:11px 14px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent)}
+.issue.Error{border-left-color:var(--red);background:#3a2623}
+.issue.Info{border-left-color:var(--cyan);background:#22313a}
+.issue b{display:inline-block;margin-right:8px;padding:1px 8px;border-radius:999px;font:700 10px/1.7 var(--display);letter-spacing:1px;text-transform:uppercase;color:#1b1b1b;background:var(--accent)}
+.issue.Error b{background:var(--red)}
+.issue.Info b{background:var(--cyan)}
+.readiness-item{border-radius:var(--radius);background:var(--s0);border-color:var(--line)}
+dl{gap:8px 14px}
+dd{color:var(--soft)}
+pre{background:#1b1b1b;border-color:var(--line);color:var(--soft)}
+.empty-state{border-radius:var(--radius);border-color:var(--line-strong);background:var(--s0)}
+dialog{background:var(--s0);border:1px solid var(--line-strong);border-radius:8px;color:var(--text)}
+dialog::backdrop{background:#000000b0}
+.setup-header{background:linear-gradient(90deg,#262626f0,#26262680),url(keyart.svg) center 40%/cover}
+.setup-header h2{text-transform:uppercase;letter-spacing:.6px}
+.setup-steps .current{color:var(--accent)}
+.setup-steps .current span{border-color:var(--accent);background:var(--accent-dim)}
+.detect-dialog{max-width:680px}
+.detect-list{display:grid;gap:6px;margin:14px 0;max-height:46vh;overflow:auto}
+.detect-row{display:grid;grid-template-columns:170px minmax(0,1fr);gap:2px 14px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg)}
+.detect-row b{font:700 12px var(--display);letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}
+.detect-row span{font-size:13px;color:var(--accent);overflow-wrap:anywhere}
+.detect-row small{grid-column:2;font-size:11px;color:var(--faint);overflow-wrap:anywhere}
+.detect-notes p{padding:10px 12px;margin:6px 0;border-left:3px solid var(--accent);background:var(--accent-dim);border-radius:4px;font-size:12px;color:var(--soft)}
+.detect-notes:empty{display:none}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:#4a4a4a;border:2px solid var(--bg)}
+
+@media(max-width:1180px){#shell{grid-template-columns:58px minmax(0,1fr) 270px}.two-column{grid-template-columns:1fr}.wordmark b{font-size:42px}.panel-top,.workflow{padding-left:16px;padding-right:16px}}
+@media(max-width:900px){#shell{grid-template-columns:52px minmax(0,1fr) 240px}.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}.pipeline{grid-template-columns:1fr}.wordmark b{font-size:34px}.wordmark span{font-size:16px}.page-heading,#scrollArea{padding-left:18px;padding-right:18px}}
+@media(max-height:760px){.panel-top{padding-top:14px}.wordmark b{font-size:36px}.panel-section{margin-top:12px}.workflow{gap:8px;padding-top:10px;padding-bottom:10px}.workflow-actions .button{min-height:38px}.button.launch{min-height:44px}}
+.status-links{display:flex;gap:14px;margin-top:6px}.status-links .link-button[hidden]{display:none}
+/* Guided setup: problems first, passed checks and file paths folded away. */
+.setup-hint{display:block;margin-top:7px;color:var(--muted,#9a9a9a);font-size:11px;line-height:1.5}
+.setup-passed,.setup-files{margin:14px 0;border-top:1px solid #ffffff14;padding-top:10px}
+.setup-passed summary,.setup-files summary{cursor:pointer;font-size:12px;color:#c9c9c9;letter-spacing:.3px}
+.setup-passed summary:hover,.setup-files summary:hover{color:var(--accent)}
+.setup-passed .readiness-item{margin-top:8px}
+.setup-grid label[hidden]{display:none}
+.needs{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 16px;margin:0 0 14px;border-left:3px solid var(--accent);background:var(--accent-dim,#f5a01a1a);font-size:13px;color:var(--text)}
+/* Labelled navigation on wide windows; icons only below 1180px. */
+@media(min-width:1181px){
+  #shell{grid-template-columns:184px minmax(0,1fr) 300px}
+  .rail{align-items:stretch;padding:14px 10px}
+  .rail .brand{justify-content:flex-start;padding-left:8px}
+  .nav-item{justify-content:flex-start;gap:12px;padding:10px 12px}
+  .nav-item>div{display:block}
+  .nav-item b{font-size:13px;font-weight:600;color:var(--soft)}
+  .nav-item small{display:none}
+  .nav-item.selected b{color:var(--accent-hi)}
+  .nav-item.selected:before{left:-10px}
+  .rail .search-button{justify-content:flex-start;gap:10px;padding:10px 12px;font-size:13px;color:var(--soft)}
+  .rail .search-button>span{font-size:20px;color:var(--accent)}
+}
+/* Frameless window: drag areas and title-bar buttons. Double-clicking a drag area maximizes. */
+.page-heading,.rail .brand,.panel-top .wordmark,.panel-device,.window-controls{app-region:drag;-webkit-app-region:drag}
+.page-heading button,.window-controls button{app-region:no-drag;-webkit-app-region:no-drag}
+.control-panel{position:relative}
+.window-controls{position:absolute;top:0;right:0;left:0;height:34px;display:flex;justify-content:flex-end;z-index:5}
+.window-controls button{width:44px;height:34px;display:grid;place-items:center;border:0;background:transparent;color:var(--muted);cursor:default}
+.window-controls svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.1}
+.window-controls button:hover{background:#ffffff14;color:var(--text)}
+.window-controls button.close:hover{background:#c42b1c;color:#fff}
+.window-controls button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+/* Right panel: wider, with even spacing between groups. Top padding always clears the window buttons. */
+.control-panel .panel-top{padding-top:40px}
+.route-switch,.pill-grid,.workflow-actions{gap:10px}
+.pill-grid .pill{white-space:nowrap;padding-left:10px;padding-right:10px}
+.hero-chips{gap:8px}
+@media(min-width:1181px){
+  #shell{grid-template-columns:184px minmax(0,1fr) 360px}
+  .panel-top,.workflow{padding-left:26px;padding-right:26px}
+  .panel-section{margin-top:22px}
+  .panel-label{margin-bottom:10px}
+  .hero-chips{margin-top:12px}
+}
+@media(max-width:1180px){#shell{grid-template-columns:58px minmax(0,1fr) 300px}.panel-top,.workflow{padding-left:18px;padding-right:18px}.pill-grid .pill{white-space:normal}}
+@media(max-height:760px){.control-panel .panel-top{padding-top:34px}.wordmark b{font-size:30px}.wordmark span{font-size:16px}.panel-section{margin-top:10px}.panel-device{margin-top:2px}.hero-chips{margin-top:8px}}
+
+/* Feature checklist in the right panel: one row per feature, with its live summary and a link to its page. */
+.feature-list{display:grid;gap:8px}
+.feature{display:grid;grid-template-columns:minmax(0,1fr) 28px;align-items:center;column-gap:4px;padding:7px 4px 7px 10px;border:1px solid var(--line);border-left:3px solid #555;border-radius:var(--radius);background:var(--s0)}
+.feature.on{border-left-color:var(--accent)}
+.feature-check{display:flex;gap:10px;align-items:center;min-width:0;cursor:pointer}
+.feature-check input{width:17px;height:17px;margin:0;accent-color:var(--accent);flex-shrink:0;cursor:pointer}
+.feature-text{display:flex;flex-direction:column;min-width:0}
+.feature-check b{font:600 13.5px/1.3 "Segoe UI",Interface,sans-serif;color:var(--text)}
+.feature-summary{display:block;margin:1px 0 0;font-size:11.5px;line-height:1.35;color:var(--soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.feature:not(.on) .feature-summary{color:var(--faint)}
+.feature-open{width:26px;height:26px;border:0;border-radius:4px;background:transparent;color:var(--accent);font:700 18px/1 "Segoe UI",sans-serif;cursor:pointer}
+.feature-notes{grid-column:1 / -1}
+.feature-open:hover:not(:disabled){background:#ffffff12}
+.feature-notes:empty{display:none}
+.feature-note{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 10px;margin:5px 4px 0 27px;padding:4px 8px;border-radius:3px;font-size:11.5px;line-height:1.35;color:var(--soft);background:#22313a}
+.feature-note.needs{background:var(--accent-dim)}
+.feature-note .link-button{font-size:11px}
+.panel-profile{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 10px}
+.panel-profile .link-button{font-size:10.5px;letter-spacing:.4px}
+.panel-profile .link-button[hidden]{display:none}
+/* Pimax Play focus values on the Quad Views page. */
+.pimax-fovea{margin:6px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--s0)}
+.pimax-fovea[hidden]{display:none}
+.pimax-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px}
+.pimax-head b{display:block;font:600 14px "Segoe UI",Interface,sans-serif}
+.pimax-head small{display:block;font-size:11px;color:var(--faint);overflow-wrap:anywhere}
+.pimax-head .button{flex-shrink:0;padding:5px 14px;font-size:12px}
+/* The app's saved DLSS 5 runtime copy, under the Runtime file field. */
+.saved-runtime{grid-column:1 / -1;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--s0)}
+.saved-runtime[hidden],.path-row .button[hidden]{display:none}
+.saved-runtime-head{display:flex;flex-direction:column;gap:8px}
+.saved-runtime-head b{display:block;font:600 13px "Segoe UI",Interface,sans-serif;overflow-wrap:anywhere}
+.saved-runtime-head small{display:block;margin-top:2px;font-size:11px;color:var(--faint);overflow-wrap:anywhere}
+.saved-runtime-actions{display:flex;gap:6px}
+.saved-runtime-actions .button{padding:5px 12px;font-size:12px}
+.saved-runtime .fine{margin-top:6px;overflow-wrap:anywhere}
+.pimax-values{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 14px;margin:4px 0;font-size:12.5px}
+.pimax-values dt{color:var(--muted)}
+.pimax-values dd{margin:0;font:inherit;text-align:right;color:var(--accent);font-variant-numeric:tabular-nums}
+.pimax-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 14px;margin:4px 0 2px}
+.pimax-controls dt,.pimax-controls dd{padding:6px 0;border-bottom:1px solid var(--line)}
+.pimax-controls dt{color:var(--muted);font:600 11px var(--display);letter-spacing:1px;text-transform:uppercase;align-self:center}
+.pimax-controls dd{margin:0;text-align:right;color:var(--accent);font:600 15px var(--display);font-variant-numeric:tabular-nums}
+.pimax-details{margin-top:10px;border-top:1px solid var(--line)}
+.pimax-details>summary{padding:9px 0 6px;font:600 12.5px "Segoe UI",Interface,sans-serif;color:var(--soft);cursor:pointer}
+.pimax-details>summary:hover{color:var(--accent-hi)}
+.pimax-details .fine{margin-top:6px}
+.pimax-note{margin:6px 0 0;padding:6px 8px;border-left:3px solid var(--cyan);background:#22313a;font-size:11.5px;color:var(--soft)}
+.pimax-note.warn{border-left-color:var(--accent);background:#2e2616}
+.setting[hidden]{display:none}
+/* CPU Boost page. */
+.list-input{grid-column:2;grid-row:1 / span 2;min-height:96px;resize:vertical;background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);font:13px Consolas,"Cascadia Mono",monospace;padding:8px 10px}
+.list-input:focus{outline:none;box-shadow:0 0 0 2px var(--accent-dark)}
+.list-input:disabled{color:var(--faint)}
+@container (max-width:470px){.setting>.list-input{grid-column:1;grid-row:auto;margin-top:6px}}
+.boost-cores{display:grid;grid-template-columns:minmax(0,42%) minmax(0,1fr);gap:4px 14px;margin:8px 0 12px;font-size:12.5px}
+.boost-cores dt{color:var(--muted)}
+.boost-cores dd{margin:0;font:inherit;color:var(--soft);overflow-wrap:anywhere}
+.boost-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.boost-table th{text-align:left;color:var(--muted);font-weight:600;padding:5px 6px;border-bottom:1px solid var(--line-strong)}
+.boost-table td{padding:6px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--soft)}
+.boost-table td small{display:block;color:var(--faint);font-size:11px}
+.boost-notes{margin:10px 0 0;padding-left:18px;font-size:12px;color:var(--muted)}
+.boost-notes li{margin:3px 0}
+.boost-section{margin:18px 0 6px;font-size:13px;font-weight:650;color:var(--text);letter-spacing:.01em}
+.boost-section:first-child{margin-top:0}
+.vram-table td:last-child,.vram-table th:last-child{text-align:right;white-space:nowrap}
+.vram-table tfoot td{border-bottom:0;border-top:1px solid var(--line-strong)}
+/* Guided setup: the same feature checklist. */
+.setup-features{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}
+.setup-feature{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-left:3px solid #555;border-radius:var(--radius);background:var(--bg);cursor:pointer}
+.setup-feature.on{border-left-color:var(--accent)}
+.setup-feature input{width:17px;height:17px;margin:2px 0 0;accent-color:var(--accent);flex-shrink:0}
+.setup-feature b{display:block;font:600 14px "Segoe UI",Interface,sans-serif;color:var(--text)}
+.setup-feature small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.setup-feature em{display:block;font-style:normal;font-size:11.5px;margin-top:6px;padding:5px 8px;border-radius:3px;background:#22313a;color:var(--soft)}
+.setup-feature em.needs{background:var(--accent-dim)}
+@media(max-width:1180px){.pipeline{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.setup-features{grid-template-columns:1fr}}
+@media(max-width:900px){.pipeline{grid-template-columns:1fr}}
+/* The version lives at the foot of the rail. Motion follows Windows' own setting (prefers-reduced-motion). */
+.rail-foot{display:flex;flex-direction:column;align-items:center;gap:8px;margin-top:8px;padding-top:10px;border-top:1px solid #ffffff10}
+.rail-foot .rail-version{margin:0;padding:0;font:10px Consolas,monospace;color:var(--faint)}
+@media(min-width:1181px){.rail-foot{flex-direction:row;justify-content:flex-end;padding:10px 12px 0}}
+/* A cue that the right panel scrolls: a shadow above the workflow footer while more of the panel is below. */
+.workflow{position:relative;z-index:1;transition:box-shadow .15s}
+.workflow.more-above{box-shadow:0 -12px 14px -8px #000000d0}
+/* Compact right panel below 1000 px: the whole checklist, profile name and setup buttons fit at 1320 × 920. */
+@media(max-height:1000px){
+  .control-panel .panel-top{padding-top:34px;padding-bottom:8px}
+  .wordmark{margin-bottom:2px}.wordmark b{font-size:36px}.wordmark span{font-size:16px}
+  .panel-device{margin-bottom:4px}
+  .panel-section{margin-top:12px}
+  .panel-label{margin-bottom:6px}
+  .route-switch button{min-height:34px}
+  .route-live{min-height:0;margin-top:5px}
+  .route-live:empty{display:none}
+  .feature-list{gap:6px}
+  .feature{padding:5px 4px 5px 10px}
+  .feature-note{margin-top:4px;padding:3px 8px}
+  .panel-profile{margin-top:6px}
+  .hero-chips{margin-top:6px}
+  .pill{min-height:34px}
+  .workflow{gap:8px;padding-top:9px;padding-bottom:12px}
+  .workflow-status p{line-height:1.4}
+  .workflow-actions .button.launch{min-height:46px;font-size:16px;letter-spacing:1.8px}
+}
+/* The wordmark shares the top row with the window buttons when the panel is wide enough to keep them apart. */
+@media(min-width:1181px) and (max-height:1000px){.control-panel .panel-top{padding-top:12px}.panel-section{margin-top:12px}.panel-label{margin-bottom:6px}.hero-chips{margin-top:6px}}
+/* Real but rarely changed settings sit in a closed disclosure at the foot of their card; search and links open it. */
+details.advanced{margin-top:6px;border-top:1px solid var(--line);padding-top:0}
+details.advanced>summary{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;padding:11px 0 9px;font:600 13px "Segoe UI",Interface,sans-serif;color:var(--soft);list-style:none}
+details.advanced>summary::-webkit-details-marker{display:none}
+details.advanced>summary:before{content:"\203A";color:var(--accent);display:inline-block;width:10px;font-size:16px;line-height:1;transition:transform .15s var(--ease)}
+details.advanced[open]>summary:before{transform:rotate(90deg)}
+details.advanced>summary small{font-weight:400;font-size:11.5px;color:var(--faint)}
+details.advanced>summary:hover{color:var(--accent-hi)}
+.advanced-block{margin:0 0 18px}
+.advanced-block>.inline-actions{margin-top:2px}
+.cadence-card .card-heading .fine{margin-top:2px}
+.cadence-card .budget-grid{margin:14px 0 0}
+.cadence-card .budget{margin-bottom:0}
+
+/* Overview: launch status, the four features, the last flight. */
+.dash-status{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 14px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius)}
+.dash-status:empty{display:none}
+.dash-dot{width:11px;height:11px;border-radius:50%;background:var(--accent);flex-shrink:0;box-shadow:0 0 0 4px var(--accent-dim)}
+.dash-status.ready{border-left-color:var(--green)}.dash-status.ready .dash-dot{background:var(--green);box-shadow:0 0 0 4px #5bd68a22}
+.dash-status.running{border-left-color:var(--cyan)}.dash-status.running .dash-dot{background:var(--cyan);box-shadow:0 0 0 4px #69c4e622}
+.dash-status.invalid{border-left-color:var(--red)}.dash-status.invalid .dash-dot{background:var(--red);box-shadow:0 0 0 4px #f4998822}
+.dash-main{flex:1;min-width:0}
+.dash-main b{display:block;font:600 19px/1.2 var(--display);color:var(--text)}
+.dash-main p{margin:3px 0 2px;font-size:12.5px;line-height:1.45;color:var(--soft)}
+.dash-main small{display:block;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dash-side{display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex-shrink:0}
+.dash-chip{border:1px solid var(--line-strong);border-radius:999px;padding:4px 12px;background:transparent;color:var(--soft);font:600 12px "Segoe UI",Interface,sans-serif;cursor:pointer;white-space:nowrap}
+.dash-chip.fix{color:#ffd3ca;border-color:#94534a;background:#3a2623}
+.dash-chip.check{color:#ffe3b5;border-color:var(--accent-dark);background:var(--accent-dim)}
+.dash-chip.ok{color:#bdebd2;border-color:#2f6b4f;background:#1f3a2d}
+.dash-chip:hover{filter:brightness(1.15)}
+.pipeline{margin-bottom:14px}
+.flight-card .card-heading{margin-bottom:0}
+.flight-card #flightBody>p{margin:8px 0 0}
+.flight-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0 0}
+.flight-item{min-width:0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-left:3px solid var(--line-strong);border-radius:var(--radius)}
+.flight-item.warn{border-left-color:var(--accent)}
+.flight-item dt{font:600 10px var(--display);letter-spacing:1.1px;text-transform:uppercase;color:var(--muted)}
+.flight-item dd{margin:3px 0 0;min-width:0}
+.flight-item dd b{display:block;font:600 17px/1.3 var(--display);color:var(--text)}
+.flight-item dd small{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font:11.5px/1.4 "Segoe UI",Interface,sans-serif;color:var(--faint)}
+#page-diagnostics .section-actions .inline-actions{flex-wrap:nowrap;flex-shrink:0}
+@media(max-width:1180px){.flight-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:900px){.flight-grid{grid-template-columns:1fr}.dash-status{flex-wrap:wrap}.dash-side{flex-direction:row;flex-wrap:wrap;align-items:center}}
+/* Checks: Must fix, Check yourself, OK (folded); one line each, a click shows the whole text. */
+.check-group{margin:0 0 16px}
+.check-group>h3,.check-ok>summary{display:flex;align-items:center;gap:8px;margin:0 0 7px;font:600 13px var(--display);letter-spacing:.8px;text-transform:uppercase;color:var(--soft)}
+.check-ok>summary{cursor:pointer;list-style:none}
+.check-ok>summary::-webkit-details-marker{display:none}
+.check-ok>summary:after{content:"\203A";color:var(--accent);font-size:16px;line-height:1;transition:transform .15s var(--ease)}
+.check-ok[open]>summary:after{transform:rotate(90deg)}
+.check-count{display:inline-grid;place-items:center;min-width:22px;height:20px;padding:0 6px;border-radius:999px;background:var(--s2);color:var(--text);font:700 11px "Segoe UI",Interface,sans-serif;letter-spacing:0}
+.check-fix .check-count{background:#643735;color:#ffd3ca}
+.check-check .check-count{background:var(--accent-dark);color:#ffe3b5}
+.check-ok .check-count{background:#234639;color:#a5dec3}
+.check-row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;gap:10px;padding:6px 12px;margin:0 0 5px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--line-strong);border-radius:var(--radius)}
+.check-row.fix{border-left-color:var(--red)}.check-row.check{border-left-color:var(--accent)}.check-row.ok{border-left-color:var(--green)}
+.check-row .check-mark{width:20px;height:20px;font-size:11px;font-weight:700}
+.check-row.fix .check-mark{background:#643735;color:#ffd3ca}.check-row.check .check-mark{background:var(--accent-dark);color:#ffe3b5}.check-row.ok .check-mark{background:#234639;color:#a5dec3}
+.check-line{display:block;min-width:0;padding:3px 0;border:0;background:transparent;color:var(--muted);font:12.5px/1.45 "Segoe UI",Interface,sans-serif;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.check-line b{margin-right:8px;color:var(--text);font-weight:600}
+.check-row.expanded .check-line{white-space:normal;overflow-wrap:anywhere}
+.check-row>.link-button{white-space:nowrap}
+.check-none{margin:0 0 4px;font-size:12px}
+details.detected-card>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;list-style:none;font:600 15px var(--display);letter-spacing:.4px;text-transform:uppercase;color:var(--soft)}
+details.detected-card>summary::-webkit-details-marker{display:none}
+details.detected-card[open]>summary{margin-bottom:10px}
+.detected-actions{margin:0 0 8px}
+/* Key capture: click, press the combination; Esc cancels, Backspace clears. */
+.setting>.hotkey-row{grid-column:2;grid-row:1 / span 2;display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0}
+.hotkey-capture{min-height:36px;padding:5px 10px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--field);color:var(--text);text-align:left;cursor:pointer}
+.hotkey-capture kbd{font:600 13px Consolas,"Cascadia Mono",monospace;letter-spacing:.3px}
+.hotkey-capture:hover:not(:disabled){border-color:var(--accent-dark)}
+.hotkey-capture.capturing{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.hotkey-capture.capturing kbd{color:var(--accent-hi)}
+.hotkey-capture:disabled{cursor:default;color:var(--faint)}
+.hotkey-note{min-height:0;font-size:11.5px;line-height:1.35;color:var(--faint)}
+.hotkey-note:empty{display:none}
+.hotkey-note.warn{color:#ffd28a}
+.hotkey-note.error{color:var(--red)}
+@container (max-width:470px){.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
+@media(max-width:900px){.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}

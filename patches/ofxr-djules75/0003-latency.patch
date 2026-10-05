@@ -1,0 +1,2673 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 564f2a4..d695966 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -46,6 +46,7 @@ add_library(xrfg_core STATIC
+     src/core/diagnostic_overlay_model.cpp
+     src/core/fps_overlay_model.cpp
+     src/core/image.cpp
++    src/core/latency_control.cpp
+     src/core/optical_flow.cpp
+     src/core/pose.cpp)
+ target_include_directories(xrfg_core PUBLIC include)
+@@ -81,6 +82,15 @@ if(XRFG_BUILD_TESTS)
+         target_compile_definitions(xrfg_diagnostic_overlay_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+     endif()
+     add_test(NAME xrfg_diagnostic_overlay_tests COMMAND xrfg_diagnostic_overlay_tests)
++    # DCS VR Control latency controls: 3X release delay, told display time,
++    # adaptive 2X/3X.
++    add_executable(xrfg_latency_control_tests tests/latency_control_tests.cpp)
++    target_link_libraries(xrfg_latency_control_tests PRIVATE xrfg_core)
++    if(MSVC)
++        target_compile_options(xrfg_latency_control_tests PRIVATE /W4 /permissive- /EHsc)
++        target_compile_definitions(xrfg_latency_control_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
++    endif()
++    add_test(NAME xrfg_latency_control_tests COMMAND xrfg_latency_control_tests)
+ 
+     add_executable(xrfg_optical_flow_tests tests/optical_flow_tests.cpp)
+     target_link_libraries(xrfg_optical_flow_tests PRIVATE xrfg_core)
+@@ -766,6 +776,61 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 SKIP_REGULAR_EXPRESSION "SKIP: no Vulkan implementation on this machine")
+         endforeach()
+ 
++        # DCS VR Control: the display time the application is told under the
++        # presenter is its real frame's presentation time, once measured, in
++        # each shape: 2X with the deeper pipeline (the shipped default), 2X
++        # shallow and 3X. On a fake runtime paced like a display.
++        add_test(
++            NAME xrfg_layer_display_time_deep
++            COMMAND xrfg_layer_call_chain
++                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
++                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-display-time-deep.log"
++                dcs-latency)
++        set_tests_properties(xrfg_layer_display_time_deep PROPERTIES TIMEOUT 60)
++        foreach(shape shallow triple)
++            if(shape STREQUAL "shallow")
++                set(shape_ini "${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_shallow_pipeline.ini")
++            else()
++                set(shape_ini "${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_triple_frame_gen.ini")
++            endif()
++            add_test(
++                NAME xrfg_layer_display_time_${shape}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DPIPELINE_INI=${shape_ini}"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/display-time-${shape}"
++                    "-DMODE=dcs-latency"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
++            set_tests_properties(xrfg_layer_display_time_${shape} PROPERTIES TIMEOUT 120)
++        endforeach()
++        # Adaptive 2X/3X: 3X -> 2X on headroom, back to 3X when the
++        # application turns heavy, through the live switch.
++        add_test(
++            NAME xrfg_layer_adaptive_frame_gen
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DADAPTIVE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-frame-gen"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_frame_gen.cmake")
++        set_tests_properties(xrfg_layer_adaptive_frame_gen PROPERTIES TIMEOUT 120)
++        # Adaptive starting in 2X with the deeper pipeline off still reserves
++        # 3X's synthetic ring (the call chain expects two synthetic slots
++        # whenever adaptive_frame_gen=1), and the scenarios hold as they are.
++        foreach(mode default steamvr-presenter flight-simulator dcs)
++            add_test(
++                NAME xrfg_layer_adaptive_2x_${mode}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive_shallow.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-2x-${mode}"
++                    "-DMODE=${mode}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
++            set_tests_properties(xrfg_layer_adaptive_2x_${mode} PROPERTIES TIMEOUT 60)
++        endforeach()
++
+         # The D3D11 bridge needs d3d11_bridge=1, which the shipped ini
+         # leaves off: the application binds a real D3D11 device and the fake
+         # runtime takes the D3D12 session the layer hands it.
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 06de6d4..9e9a09a 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -172,6 +172,25 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // A D3D11 session bridged to a D3D12 runtime session: result is a stage
+     // or a failure code (see the layer's D3D11 bridge).
+     d3d11_bridge,
++    // DCS VR Control. Adaptive 2X/3X: the frame multiplier changed or the
++    // adaptive mode was turned on or off. result is why: 1 the application
++    // had headroom for 2X, 2 its p90 work was over two display periods in
++    // 2X, 3 2X missed slots, 4 the ini's triple_frame_gen changed, 5 adaptive
++    // turned on (a=0) or off (b=0). a= the multiplier before, b= after, c= the
++    // p90 work in microseconds that decided it (0 when not measured).
++    adaptive_switch,
++    // DCS VR Control. Once a second while the presenter runs: result= the
++    // frame multiplier, plus 10 under adaptive control; a= the p90 of the
++    // application's work over that second in microseconds (release to first
++    // synthetic written, so CPU and GPU), 0 without samples; b= samples in
++    // bits 0-15, missed slots in bits 16-31; c= the display time correction
++    // in microseconds.
++    latency_status,
++    // DCS VR Control. The display time the application is told moved: result=
++    // the median residual that moved it, real presentation minus told, in
++    // microseconds (signed); a= the correction before, b= after, both in
++    // microseconds; c= the shape (0 2X, 1 2X deep, 2 3X).
++    display_time_correction,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+index f3c146a..46be3e2 100644
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -101,6 +101,7 @@ struct GenerationStatus {
+     bool nvidia_unavailable{}; // NVIDIA failed to initialise; FidelityFX took over
+     bool budget_exhausted{};   // runtime refused private swapchains: pass-through
+     std::uint32_t multiplier{2};
++    bool adaptive{};           // [ofxr] adaptive_frame_gen: the multiplier is chosen live
+ };
+ 
+ enum class DiagnosticColor : std::uint8_t { white, green, amber, grey, red };
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index e436bb1..26e5333 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -94,6 +94,22 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_triple_frame_gen(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS VR Control. `[ofxr] adaptive_frame_gen`: the session moves between 2X
++// and 3X on its own, from the application's measured work per frame; the
++// triple_frame_gen value is the mode it starts in, and a change of it while
++// the session runs is taken as the user's choice: the session switches to it
++// and the adaptive dwell starts over from there. Off unless set to 1. Read at
++// xrCreateSession, where it reserves what 3X needs, and then followed live.
++[[nodiscard]] bool read_adaptive_frame_gen(
++    const std::filesystem::path& module_directory) noexcept;
++
++// DCS VR Control. `[ofxr] display_time_correction`: the display time the
++// application is told under the presenter names the scanout its real frame
++// actually lands on (measured), so it predicts its head pose for when the
++// frame is shown. On unless set to 0. Read once per session.
++[[nodiscard]] bool read_display_time_correction(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // Held by every running session that cannot follow the "3X Frame Gen"
+ // switch live - one started with "Prefer FPS over latency" off, or one the
+ // runtime's swapchain limit pushed back to a single synthetic. The tray asks
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+new file mode 100644
+index 0000000..38cdf48
+--- /dev/null
++++ b/include/xrfg/latency_control.hpp
+@@ -0,0 +1,236 @@
++#pragma once
++// DCS VR Control: the decisions behind the layer's latency controls, kept free
++// of Windows, D3D and OpenXR so they can be unit tested on their own. The
++// layer feeds them what it measures and acts on what they return.
++//
++//   TripleReleaseTuner         how long 3X keeps the application after its
++//                              frame is handed over (the release delay)
++//   DisplayTimeCorrector       how far the display time the application is
++//                              told must move to name the scanout its real
++//                              frame actually lands on
++//   AdaptiveFrameGenController when to run 2X and when 3X
++//
++// All times are nanoseconds on one monotonic timeline the caller chooses.
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++
++namespace xrfg::latency {
++
++using Nanoseconds = std::int64_t;
++
++inline constexpr Nanoseconds kMillisecond = 1'000'000;
++inline constexpr Nanoseconds kSecond = 1'000'000'000;
++
++// ---------------------------------------------------------------------------
++// 3X release delay.
++//
++// One observation per application frame: whether that frame's first synthetic
++// was late by the test the caller applies. Judged a window of kWindowFrames at
++// a time. A window with none late raises the delay by kRaiseStep up to the
++// ceiling, and once at the ceiling and past the hold, probes kRaiseStep above
++// it. One with two or more late puts the ceiling kBackoffStep under the delay
++// that failed and holds it there for `backoff` windows; each further failure
++// doubles that hold, up to kMaxHoldWindows, and a clean window at or above the
++// delay that last failed (the room has grown) brings it back to
++// kBaseHoldWindows. Late frames with no
++// delay applied move nothing: they are the application's own, and a start-up
++// burst once put the ceiling at zero for forty seconds. The ceiling never goes
++// below zero and a zero ceiling still probes, so a tuner that was pushed all
++// the way down comes back up once its frames are on time again.
++struct TripleReleaseTuner {
++    static constexpr std::uint32_t kWindowFrames = 30;
++    static constexpr std::uint32_t kBaseHoldWindows = 10;
++    static constexpr std::uint32_t kMaxHoldWindows = 80;
++    static constexpr Nanoseconds kRaiseStep = 2 * kMillisecond;
++    static constexpr Nanoseconds kBackoffStep = 3 * kMillisecond;
++
++    Nanoseconds delay{0};
++    // Negative until the first window sets it to two periods: the
++    // application needs the third to render in.
++    Nanoseconds ceiling{-1};
++    std::uint32_t hold{};
++    std::uint32_t backoff{kBaseHoldWindows};
++    // The delay of the last window that failed; negative when none has, or
++    // since a clean window reached it again.
++    Nanoseconds last_failure{-1};
++    std::uint32_t window_frames{};
++    std::uint32_t window_late{};
++    // First synthetics handed to the runtime before their output was written,
++    // this window. Recorded for the log whatever the test in force.
++    std::uint32_t window_unwritten{};
++
++    void reset() noexcept { *this = TripleReleaseTuner{}; }
++};
++
++struct TripleReleaseWindow {
++    bool closed{};
++    Nanoseconds delay{};
++    Nanoseconds ceiling{};
++    std::uint32_t late{};
++    std::uint32_t unwritten{};
++    std::uint32_t hold{};
++};
++
++// One frame's observation. A non-positive period is ignored.
++TripleReleaseWindow observe_triple_release(
++    TripleReleaseTuner& tuner, Nanoseconds period, bool late) noexcept;
++
++// ---------------------------------------------------------------------------
++// Display time correction.
++//
++// The application is told a display time on the layer's virtual timeline: the
++// presenter's prediction plus one virtual period. Its real frame lands later
++// than that, by however deep the presenter's queue is in front of it and by
++// however far the application itself pipelines its frames (DCS World waits for
++// the next frame before it ends the current one). Measured, not computed: one
++// residual per real frame, the runtime display time it was submitted for minus
++// the display time the application ended it with. A window of kWindowSamples
++// whose spread is under half a period and whose median rounds to a non-zero
++// number of periods, twice in a row with the same step, moves the correction
++// by that many periods, within [0, kMaxPeriods]. The correction is added to
++// what the application is told, so the residual it leaves behind is zero.
++struct DisplayTimeCorrector {
++    static constexpr std::size_t kWindowSamples = 30;
++    static constexpr Nanoseconds kMaxPeriods = 8;
++    // Real frames ignored after a correction moves or the mode changes: they
++    // were told under the old value and are still in the queue.
++    static constexpr std::uint32_t kSettleSamples = 6;
++    // Mode keys: what was learned in each shape is kept for when the session
++    // comes back to it.
++    static constexpr std::size_t kModes = 3;
++
++    Nanoseconds correction{0};
++    std::array<Nanoseconds, kWindowSamples> window{};
++    std::size_t count{};
++    std::uint32_t skip{};
++    Nanoseconds pending_step{};
++    std::array<Nanoseconds, kModes> learned{-1, -1, -1};
++    std::size_t mode{};
++
++    void reset() noexcept { *this = DisplayTimeCorrector{}; }
++};
++
++// 0: 2X shallow, 1: 2X with the deeper pipeline, 2: 3X.
++[[nodiscard]] std::size_t display_time_mode(
++    std::uint32_t frames_per_application_frame, bool deep_pipeline) noexcept;
++
++struct DisplayTimeStep {
++    bool window_closed{};
++    bool changed{};
++    Nanoseconds median{};
++    Nanoseconds spread{};
++    Nanoseconds before{};
++    Nanoseconds after{};
++};
++
++DisplayTimeStep observe_presented(
++    DisplayTimeCorrector& corrector,
++    Nanoseconds residual,
++    Nanoseconds period) noexcept;
++
++// The pipeline changed shape. Starts from what was learned in the new shape
++// if anything was, otherwise from the old correction scaled by the virtual
++// periods (rounded to whole periods). Returns the correction now in force.
++Nanoseconds rebase_display_time_correction(
++    DisplayTimeCorrector& corrector,
++    std::size_t new_mode,
++    Nanoseconds old_virtual_period,
++    Nanoseconds new_virtual_period,
++    Nanoseconds period) noexcept;
++
++// ---------------------------------------------------------------------------
++// Adaptive 2X / 3X.
++//
++// Fed the application's work per frame - from its release to the moment its
++// frame's first synthetic exists, so CPU and GPU both - and every frame that
++// missed its slot. Decides from that, not from the application's paced
++// interval: an application paced to a third of the refresh in 3X may well be
++// able to hold half of it.
++//
++//   3X -> 2X  p90 work <= downshift_fraction of two periods over the last
++//             downshift_window (3 s, doubled after each flap, up to
++//             max_downshift_window), with no missed slot in it (the layer
++//             reports missed slots in 2X only: in 3X they are the release
++//             delay probing).
++//   2X -> 3X  p90 work > two periods, or upshift_late_events missed slots,
++//             over the last upshift_window (0.75 s).
++//
++// Never within min_dwell of the previous switch, and samples within settle of
++// a switch are not counted: the pipeline re-phases once on a switch.
++struct AdaptiveConfig {
++    double downshift_fraction{0.85};
++    Nanoseconds downshift_window{3 * kSecond};
++    Nanoseconds max_downshift_window{48 * kSecond};
++    Nanoseconds upshift_window{750 * kMillisecond};
++    Nanoseconds min_dwell{5 * kSecond};
++    Nanoseconds settle{1 * kSecond};
++    // An upshift this soon after a downshift is a flap.
++    Nanoseconds flap_window{20 * kSecond};
++    std::uint32_t upshift_late_events{2};
++    std::uint32_t min_samples_down{20};
++    std::uint32_t min_samples_up{6};
++};
++
++enum class AdaptiveReason : std::uint32_t {
++    none = 0,
++    headroom = 1,     // 3X -> 2X
++    slow = 2,         // 2X -> 3X, p90 work over budget
++    late = 3,         // 2X -> 3X, missed slots
++    manual = 4,       // the ini's triple_frame_gen changed (caller's record)
++    enabled = 5,      // adaptive turned on or off (caller's record)
++};
++
++struct AdaptiveStats {
++    Nanoseconds p90{-1};
++    std::uint32_t samples{};
++    std::uint32_t late{};
++};
++
++struct AdaptiveDecision {
++    std::uint32_t target{};     // 0: stay
++    AdaptiveReason reason{AdaptiveReason::none};
++    AdaptiveStats stats;
++    Nanoseconds threshold{};
++};
++
++class AdaptiveFrameGenController {
++public:
++    explicit AdaptiveFrameGenController(AdaptiveConfig config = {}) noexcept;
++
++    // Starts (or restarts) in `mode` at `now`; the dwell counts from here.
++    void start(std::uint32_t mode, Nanoseconds now) noexcept;
++    void add_work(Nanoseconds at, Nanoseconds work) noexcept;
++    void add_late(Nanoseconds at, std::uint32_t count = 1) noexcept;
++    [[nodiscard]] AdaptiveDecision evaluate(
++        Nanoseconds now, Nanoseconds period) const noexcept;
++    // The caller applied a switch.
++    void switched(std::uint32_t to, Nanoseconds now) noexcept;
++
++    [[nodiscard]] std::uint32_t mode() const noexcept { return mode_; }
++    [[nodiscard]] Nanoseconds downshift_window() const noexcept {
++        return downshift_window_;
++    }
++    // Over (now - span, now], ignoring what fell within settle of a switch.
++    [[nodiscard]] AdaptiveStats stats(
++        Nanoseconds now, Nanoseconds span) const noexcept;
++
++private:
++    static constexpr std::size_t kWorkSamples = 512;
++    static constexpr std::size_t kLateEvents = 128;
++    AdaptiveConfig config_;
++    std::uint32_t mode_{3};
++    Nanoseconds last_switch_{};
++    Nanoseconds last_downshift_{-1};
++    Nanoseconds downshift_window_{};
++    std::array<Nanoseconds, kWorkSamples> work_at_{};
++    std::array<Nanoseconds, kWorkSamples> work_{};
++    std::size_t work_count_{};
++    std::size_t work_next_{};
++    std::array<Nanoseconds, kLateEvents> late_at_{};
++    std::size_t late_count_{};
++    std::size_t late_next_{};
++};
++
++} // namespace xrfg::latency
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index 0678863..e1a142b 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -243,6 +243,34 @@ bool read_triple_frame_gen(
+     }
+ }
+ 
++bool read_adaptive_frame_gen(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return false;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        return GetPrivateProfileIntW(
++                   L"ofxr", L"adaptive_frame_gen", 0, ini_path.c_str()) != 0;
++    } catch (...) {
++        return false;
++    }
++}
++
++bool read_display_time_correction(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return true;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        return GetPrivateProfileIntW(
++                   L"ofxr", L"display_time_correction", 1, ini_path.c_str()) != 0;
++    } catch (...) {
++        return true;
++    }
++}
++
+ namespace {
+ constexpr wchar_t kFixedFrameMultiplierEvent[] =
+     L"Local\\OFXRBridgeFixedFrameMultiplier";
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+index 31caa8f..525ec2a 100644
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -106,6 +106,7 @@ std::string format_generation_line(const DiagnosticInputs& in, DiagnosticColor&
+     if (g.budget_exhausted) { color = DiagnosticColor::red; return "Framegen: fallback (swapchain limit)"; }
+     std::string text = std::string("Framegen: OFXR ") + (g.nvidia && !g.nvidia_unavailable ? "NVIDIA" : "FidelityFX") +
+         " " + std::to_string(std::clamp<std::uint32_t>(g.multiplier, 2U, 3U)) + "x";
++    if (g.adaptive) text += " auto";
+     if (g.nvidia_unavailable) text += " (NVIDIA failed)";
+     if (!in.generating) {
+         color = DiagnosticColor::amber;
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+new file mode 100644
+index 0000000..94ad824
+--- /dev/null
++++ b/src/core/latency_control.cpp
+@@ -0,0 +1,285 @@
++#include "xrfg/latency_control.hpp"
++
++#include <algorithm>
++#include <cmath>
++
++namespace xrfg::latency {
++namespace {
++
++// Rounds to the nearest whole number of periods, halves away from zero.
++[[nodiscard]] Nanoseconds round_periods(Nanoseconds value, Nanoseconds period) noexcept {
++    if (period <= 0) {
++        return 0;
++    }
++    const Nanoseconds half = period / 2;
++    return value >= 0 ? (value + half) / period : -((-value + half) / period);
++}
++
++} // namespace
++
++TripleReleaseWindow observe_triple_release(
++    TripleReleaseTuner& tuner, Nanoseconds period, bool late) noexcept {
++    TripleReleaseWindow report{};
++    if (period <= 0) {
++        return report;
++    }
++    if (late) {
++        ++tuner.window_late;
++    }
++    if (++tuner.window_frames < TripleReleaseTuner::kWindowFrames) {
++        return report;
++    }
++    const std::uint32_t late_count = tuner.window_late;
++    const std::uint32_t unwritten = tuner.window_unwritten;
++    tuner.window_frames = 0;
++    tuner.window_late = 0;
++    tuner.window_unwritten = 0;
++    auto& delay = tuner.delay;
++    auto& ceiling = tuner.ceiling;
++    if (ceiling < 0) {
++        ceiling = period * 2;
++    }
++    if (late_count >= 2) {
++        // Only a delay can be blamed. Frames that are late with none applied
++        // are the title's own and say nothing about where the ceiling goes.
++        if (delay > 0) {
++            tuner.last_failure = delay;
++            ceiling = std::max<Nanoseconds>(0, delay - TripleReleaseTuner::kBackoffStep);
++            delay = ceiling;
++            tuner.hold = tuner.backoff;
++            tuner.backoff = std::min(
++                tuner.backoff * 2, TripleReleaseTuner::kMaxHoldWindows);
++        }
++    } else if (late_count == 0) {
++        if (tuner.last_failure >= 0 && delay >= tuner.last_failure) {
++            // On time where it failed before: the room has grown.
++            tuner.backoff = TripleReleaseTuner::kBaseHoldWindows;
++            tuner.last_failure = -1;
++        }
++        if (delay < ceiling) {
++            delay = std::min(ceiling, delay + TripleReleaseTuner::kRaiseStep);
++        } else if (tuner.hold > 0) {
++            --tuner.hold;
++        } else {
++            // Also from a zero ceiling: being pushed all the way down once
++            // must not cost the rest of the session.
++            ceiling = std::min(period * 2, ceiling + TripleReleaseTuner::kRaiseStep);
++            delay = ceiling;
++        }
++    }
++    report.closed = true;
++    report.delay = delay;
++    report.ceiling = ceiling;
++    report.late = late_count;
++    report.unwritten = unwritten;
++    report.hold = tuner.hold;
++    return report;
++}
++
++std::size_t display_time_mode(
++    std::uint32_t frames_per_application_frame, bool deep_pipeline) noexcept {
++    if (frames_per_application_frame > 2) {
++        return 2;
++    }
++    return deep_pipeline ? 1 : 0;
++}
++
++DisplayTimeStep observe_presented(
++    DisplayTimeCorrector& corrector,
++    Nanoseconds residual,
++    Nanoseconds period) noexcept {
++    DisplayTimeStep step{};
++    step.before = corrector.correction;
++    step.after = corrector.correction;
++    if (period <= 0) {
++        return step;
++    }
++    if (corrector.skip > 0) {
++        --corrector.skip;
++        return step;
++    }
++    corrector.window[corrector.count++] = residual;
++    if (corrector.count < corrector.window.size()) {
++        return step;
++    }
++    auto sorted = corrector.window;
++    std::sort(sorted.begin(), sorted.end());
++    corrector.count = 0;
++    const std::size_t n = sorted.size();
++    step.window_closed = true;
++    step.median = sorted[n / 2];
++    step.spread = sorted[(n * 9) / 10] - sorted[n / 10];
++    if (step.spread > period / 2) {
++        // The frames do not agree on where they land: a stall, a menu, a
++        // switch. Nothing to learn from this window.
++        corrector.pending_step = 0;
++        return step;
++    }
++    const Nanoseconds periods = round_periods(step.median, period);
++    if (periods == 0) {
++        corrector.pending_step = 0;
++        corrector.learned[corrector.mode] = corrector.correction;
++        return step;
++    }
++    if (corrector.pending_step != periods) {
++        // Once is not enough: the next window has to ask for the same step.
++        corrector.pending_step = periods;
++        return step;
++    }
++    corrector.pending_step = 0;
++    const Nanoseconds moved = std::clamp(
++        corrector.correction + periods * period,
++        Nanoseconds{0},
++        DisplayTimeCorrector::kMaxPeriods * period);
++    if (moved != corrector.correction) {
++        corrector.correction = moved;
++        corrector.skip = DisplayTimeCorrector::kSettleSamples;
++        step.changed = true;
++    }
++    step.after = corrector.correction;
++    return step;
++}
++
++Nanoseconds rebase_display_time_correction(
++    DisplayTimeCorrector& corrector,
++    std::size_t new_mode,
++    Nanoseconds old_virtual_period,
++    Nanoseconds new_virtual_period,
++    Nanoseconds period) noexcept {
++    new_mode = std::min(new_mode, DisplayTimeCorrector::kModes - 1);
++    if (corrector.learned[new_mode] >= 0) {
++        corrector.correction = corrector.learned[new_mode];
++    } else if (old_virtual_period > 0 && new_virtual_period > 0 && period > 0) {
++        // Whatever the application adds by pipelining its own frames scales
++        // with its period; whole periods either way.
++        const long double scaled =
++            static_cast<long double>(corrector.correction) *
++            static_cast<long double>(new_virtual_period) /
++            static_cast<long double>(old_virtual_period);
++        const Nanoseconds periods = static_cast<Nanoseconds>(
++            std::llround(scaled / static_cast<long double>(period)));
++        corrector.correction = std::clamp(
++            periods * period, Nanoseconds{0},
++            DisplayTimeCorrector::kMaxPeriods * period);
++    }
++    corrector.mode = new_mode;
++    corrector.count = 0;
++    corrector.pending_step = 0;
++    corrector.skip = DisplayTimeCorrector::kSettleSamples;
++    return corrector.correction;
++}
++
++AdaptiveFrameGenController::AdaptiveFrameGenController(AdaptiveConfig config) noexcept
++    : config_(config), downshift_window_(config.downshift_window) {}
++
++void AdaptiveFrameGenController::start(std::uint32_t mode, Nanoseconds now) noexcept {
++    mode_ = mode > 2 ? 3U : 2U;
++    last_switch_ = now;
++    last_downshift_ = -1;
++    downshift_window_ = config_.downshift_window;
++    work_count_ = 0;
++    work_next_ = 0;
++    late_count_ = 0;
++    late_next_ = 0;
++}
++
++void AdaptiveFrameGenController::add_work(Nanoseconds at, Nanoseconds work) noexcept {
++    if (work < 0) {
++        return;
++    }
++    work_at_[work_next_] = at;
++    work_[work_next_] = work;
++    work_next_ = (work_next_ + 1) % kWorkSamples;
++    work_count_ = std::min(work_count_ + 1, kWorkSamples);
++}
++
++void AdaptiveFrameGenController::add_late(Nanoseconds at, std::uint32_t count) noexcept {
++    for (std::uint32_t index = 0; index < count; ++index) {
++        late_at_[late_next_] = at;
++        late_next_ = (late_next_ + 1) % kLateEvents;
++        late_count_ = std::min(late_count_ + 1, kLateEvents);
++    }
++}
++
++AdaptiveStats AdaptiveFrameGenController::stats(
++    Nanoseconds now, Nanoseconds span) const noexcept {
++    AdaptiveStats result{};
++    const Nanoseconds from = std::max(now - span, last_switch_ + config_.settle);
++    std::array<Nanoseconds, kWorkSamples> values{};
++    std::size_t n = 0;
++    for (std::size_t index = 0; index < work_count_; ++index) {
++        if (work_at_[index] > from && work_at_[index] <= now) {
++            values[n++] = work_[index];
++        }
++    }
++    for (std::size_t index = 0; index < late_count_; ++index) {
++        if (late_at_[index] > from && late_at_[index] <= now) {
++            ++result.late;
++        }
++    }
++    result.samples = static_cast<std::uint32_t>(n);
++    if (n > 0) {
++        std::sort(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(n));
++        // Nearest rank.
++        const std::size_t rank = (n * 9 + 9) / 10; // ceil(0.9 n)
++        result.p90 = values[std::max<std::size_t>(rank, 1) - 1];
++    }
++    return result;
++}
++
++AdaptiveDecision AdaptiveFrameGenController::evaluate(
++    Nanoseconds now, Nanoseconds period) const noexcept {
++    AdaptiveDecision decision{};
++    if (period <= 0) {
++        return decision;
++    }
++    const Nanoseconds two_periods = period * 2;
++    if (mode_ > 2) {
++        decision.threshold = static_cast<Nanoseconds>(
++            config_.downshift_fraction * static_cast<double>(two_periods));
++        decision.stats = stats(now, downshift_window_);
++        if (now - last_switch_ < config_.min_dwell ||
++            now - (last_switch_ + config_.settle) < downshift_window_) {
++            return decision;
++        }
++        if (decision.stats.samples >= config_.min_samples_down &&
++            decision.stats.late == 0 &&
++            decision.stats.p90 <= decision.threshold) {
++            decision.target = 2;
++            decision.reason = AdaptiveReason::headroom;
++        }
++        return decision;
++    }
++    decision.threshold = two_periods;
++    decision.stats = stats(now, config_.upshift_window);
++    if (now - last_switch_ < config_.min_dwell) {
++        return decision;
++    }
++    if (decision.stats.late >= config_.upshift_late_events) {
++        decision.target = 3;
++        decision.reason = AdaptiveReason::late;
++    } else if (decision.stats.samples >= config_.min_samples_up &&
++               decision.stats.p90 > two_periods) {
++        decision.target = 3;
++        decision.reason = AdaptiveReason::slow;
++    }
++    return decision;
++}
++
++void AdaptiveFrameGenController::switched(std::uint32_t to, Nanoseconds now) noexcept {
++    to = to > 2 ? 3U : 2U;
++    if (to == 2 && mode_ > 2) {
++        last_downshift_ = now;
++    } else if (to == 3 && mode_ == 2) {
++        if (last_downshift_ >= 0 && now - last_downshift_ < config_.flap_window) {
++            downshift_window_ = std::min(
++                downshift_window_ * 2, config_.max_downshift_window);
++        } else {
++            downshift_window_ = config_.downshift_window;
++        }
++    }
++    mode_ = to;
++    last_switch_ = now;
++}
++
++} // namespace xrfg::latency
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index 4802ea3..e774d08 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -94,6 +94,12 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "vulkan_interop";
+     case BridgeFlightOperation::d3d11_bridge:
+         return "d3d11_bridge";
++    case BridgeFlightOperation::adaptive_switch:
++        return "adaptive_switch";
++    case BridgeFlightOperation::latency_status:
++        return "latency_status";
++    case BridgeFlightOperation::display_time_correction:
++        return "display_time_correction";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index c3a7d43..369c51c 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -7,6 +7,7 @@
+ #include "xrfg/bridge_flight_logger.hpp"
+ #include "xrfg/generation_backpressure.hpp"
+ #include "xrfg/implicit_layer.hpp"
++#include "xrfg/latency_control.hpp"
+ #include "xrfg/embedded_control.hpp"
+ #include "xrfg/provider_api.hpp"
+ #include <atomic>
+@@ -726,11 +727,155 @@ struct JoinProbe {
+     }
+ };
+ 
++[[nodiscard]] xrfg::latency::Nanoseconds steady_nanoseconds(
++    std::chrono::steady_clock::time_point at) noexcept {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++        at.time_since_epoch()).count();
++}
++
++// DCS VR Control: when each application frame's first synthetic was actually
++// written, for adaptive 2X/3X. The layer has the fence that says so (the one
++// the presenter polls), but nothing waits on it: the presenter only looks at
++// the moment it hands a frame over. This thread waits on it, frame by frame,
++// and reports the application's work - from its release by the once-per-pair
++// hold to that moment, so its CPU time, its GPU time and the synthesis behind
++// it - to the adaptive controller. One event, one wait at a time; a frame
++// whose fence does not complete within a second is dropped, and a device
++// removed ends nothing but that frame's sample.
++struct ReadinessProbe {
++    struct Item {
++        std::vector<Microsoft::WRL::ComPtr<ID3D12Fence>> fences;
++        std::vector<std::uint64_t> values;
++        std::chrono::steady_clock::time_point released_at{};
++    };
++
++    ReadinessProbe(
++        std::mutex& sink_mutex,
++        xrfg::latency::AdaptiveFrameGenController& sink)
++        : sink_mutex_(&sink_mutex), sink_(&sink) {
++        event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++        if (event_ != nullptr) {
++            try {
++                thread_ = std::thread([this] { run(); });
++            } catch (...) {
++            }
++        }
++    }
++    ReadinessProbe(const ReadinessProbe&) = delete;
++    ReadinessProbe& operator=(const ReadinessProbe&) = delete;
++
++    ~ReadinessProbe() {
++        {
++            std::scoped_lock lock(mutex_);
++            stop_ = true;
++        }
++        condition_.notify_all();
++        if (event_ != nullptr) {
++            SetEvent(event_);
++        }
++        if (thread_.joinable()) {
++            thread_.join();
++        }
++        if (event_ != nullptr) {
++            CloseHandle(event_);
++        }
++    }
++
++    void submit(Item item) noexcept {
++        try {
++            if (!thread_.joinable() || item.fences.empty()) {
++                return;
++            }
++            {
++                std::scoped_lock lock(mutex_);
++                // Never a backlog: a probe that falls behind reports late.
++                constexpr std::size_t kMaximumItems = 8;
++                while (items_.size() >= kMaximumItems) {
++                    items_.pop_front();
++                }
++                items_.push_back(std::move(item));
++            }
++            condition_.notify_one();
++        } catch (...) {
++        }
++    }
++
++private:
++    void run() noexcept {
++        try {
++            for (;;) {
++                Item item;
++                {
++                    std::unique_lock lock(mutex_);
++                    condition_.wait(
++                        lock, [&] { return stop_ || !items_.empty(); });
++                    if (stop_) {
++                        return;
++                    }
++                    item = std::move(items_.front());
++                    items_.pop_front();
++                }
++                bool complete = true;
++                for (std::size_t index = 0;
++                     complete && index < item.fences.size(); ++index) {
++                    ID3D12Fence* fence = item.fences[index].Get();
++                    const std::uint64_t value = item.values[index];
++                    for (;;) {
++                        const std::uint64_t completed = fence->GetCompletedValue();
++                        if (completed == std::numeric_limits<std::uint64_t>::max()) {
++                            complete = false;
++                            break;
++                        }
++                        if (completed >= value) {
++                            break;
++                        }
++                        if (FAILED(fence->SetEventOnCompletion(value, event_))) {
++                            complete = false;
++                            break;
++                        }
++                        const DWORD waited = WaitForSingleObject(event_, 1'000);
++                        {
++                            std::scoped_lock lock(mutex_);
++                            if (stop_) {
++                                return;
++                            }
++                        }
++                        if (waited != WAIT_OBJECT_0) {
++                            complete = false;
++                            break;
++                        }
++                    }
++                }
++                if (!complete) {
++                    continue;
++                }
++                const auto ready = std::chrono::steady_clock::now();
++                const auto work = std::chrono::duration_cast<
++                    std::chrono::nanoseconds>(ready - item.released_at).count();
++                std::scoped_lock lock(*sink_mutex_);
++                sink_->add_work(steady_nanoseconds(ready), work);
++            }
++        } catch (...) {
++        }
++    }
++
++    std::mutex* sink_mutex_{};
++    xrfg::latency::AdaptiveFrameGenController* sink_{};
++    HANDLE event_{};
++    std::thread thread_;
++    std::mutex mutex_;
++    std::condition_variable condition_;
++    std::deque<Item> items_;
++    bool stop_{};
++};
++
+ struct SessionState {
+     explicit SessionState(std::shared_ptr<Dispatch> next_dispatch)
+         : dispatch(std::move(next_dispatch)), manual_control(current_layer_directory()) {}
+ 
+     ~SessionState() {
++        // Its thread reports into adaptive_controller; stop it first.
++        readiness_probe.reset();
+         xrfg::embedded::detach(control_id);
+         if (presenter_pace_timer != nullptr) {
+             CloseHandle(presenter_pace_timer);
+@@ -1188,32 +1333,57 @@ struct SessionState {
+     // real frame's hand-over, which was the first version of this test -
+     // left most of that period unused: The Callisto Protocol settled at 4 ms
+     // of delay with the application still finishing 8 ms before it could be
+-    // queued. A runtime that paces the presenter with its own wait gives no
+-    // such hold to look from, and there the test stays at the previous real
+-    // frame's hand-over.
++    // queued.
++    //
++    // A runtime that paces the presenter with its own wait gives no such
++    // hold to look from. There the test was first made at the previous real
++    // frame's hand-over, a whole period early, and on Pimax OpenXR with DCS
++    // World at 90 Hz that failed on every frame of a flight - "delay 0,
++    // ceiling 0, 30 of 30 late" each second - while the same first synthetics
++    // were written by their own hand-over on all but a handful. So off
++    // SteamVR the first synthetic is judged at its own hand-over: late when
++    // it goes to the runtime unwritten, or when its slot comes with nothing
++    // queued and the previous frame is repeated. The runtime still has until
++    // its compositor runs to see the pixels (it waits on the binding queue),
++    // which is the margin that test keeps. (DCS VR Control.)
+     //
+     // It is judged over thirty frames, a second of them, because a frame
+     // that runs long is late whatever the delay, and stepping back for each
+-    // one held the delay far below what the title could take. A window with
+-    // none late raises the delay by two milliseconds, up to the ceiling. One
+-    // with two or more puts the ceiling three milliseconds under where that
+-    // happened and holds it there for ten windows before probing above it
+-    // again at the same two milliseconds. Late frames with no delay applied
+-    // move nothing: a start-up burst once put the ceiling at zero and cost
+-    // the first forty seconds of a session. Guarded by presenter_mutex.
+-    std::chrono::nanoseconds triple_release_delay{0};
+-    // Negative until the first window sets it to two periods: the
+-    // application needs the third to render in.
+-    std::chrono::nanoseconds triple_release_ceiling{-1};
+-    std::uint32_t triple_release_ceiling_hold{};
+-    std::uint32_t triple_release_window_frames{};
+-    std::uint32_t triple_release_window_late{};
+-    // First synthetics that went to the runtime before their output was
+-    // written, this window. What the margin exists to keep at zero.
+-    std::uint32_t triple_release_window_unwritten{};
++    // one held the delay far below what the title could take. See
++    // xrfg::latency::TripleReleaseTuner for the steps, the ceiling and the
++    // hold that backs off after each failed probe. Guarded by
++    // presenter_mutex.
++    xrfg::latency::TripleReleaseTuner triple_release;
+     // A real frame has gone out and the next hand-over is a frame's first
+     // synthetic: the pace looks at it before that hand-over.
+     bool triple_release_probe_due{};
++    // Off SteamVR: a real frame has gone out in 3X, so the next slot is due
++    // a first synthetic and is judged.
++    bool triple_leader_due{};
++    // DCS VR Control: the display time the application is told under the
++    // presenter, moved to name the scanout its real frame lands on; see
++    // xrfg::latency::DisplayTimeCorrector. Fed by the presenter with every
++    // real frame it hands over. Guarded by presenter_mutex.
++    bool display_time_correction_enabled{};
++    xrfg::latency::DisplayTimeCorrector display_time_corrector;
++    // DCS VR Control: adaptive 2X/3X ("[ofxr] adaptive_frame_gen"). The
++    // controller, its work samples and its missed slots are guarded by
++    // adaptive_mutex; the samples come from the readiness probe's thread and
++    // the decisions are taken on the application's xrEndFrame thread, in
++    // apply_live_frame_multiplier.
++    std::atomic<bool> adaptive_active{false};
++    std::mutex adaptive_mutex;
++    xrfg::latency::AdaptiveFrameGenController adaptive_controller;
++    // Missed slots counted by the presenter since the xrEndFrame thread last
++    // took them.
++    std::atomic<std::uint32_t> adaptive_missed_slots{0};
++    // The ini's triple_frame_gen as last read, so a change of it is seen.
++    bool adaptive_ini_triple{};
++    // When the once-per-pair hold last released the application; the start
++    // of its work. The application's xrEndFrame thread only.
++    std::chrono::steady_clock::time_point application_released_at{};
++    std::chrono::steady_clock::time_point latency_status_at{};
++    std::unique_ptr<ReadinessProbe> readiness_probe;
+     // The application's thread only.
+     HANDLE application_release_timer{};
+     // A condition variable waits on the system tick, which is 15.6 ms by
+@@ -1259,6 +1429,16 @@ struct SessionState {
+     // never two in a row.
+     std::uint64_t presenter_frame_serial{};
+     std::uint64_t application_served_serial{};
++    // DCS VR Control: the presenter frame the application was last released
++    // at, by the once-per-pair hold, and that frame's predicted display time.
++    // With the display time correction on, the application's next display
++    // time counts from this frame rather than from whichever the presenter
++    // happens to be on when the wait comes in: the slot its real frame lands
++    // on is set by the queue at its release, and a release delay or a wait
++    // issued a little later would otherwise move what it is told by a whole
++    // period, now and then, while the frame lands where it always does.
++    XrTime application_release_display_time{};
++    std::uint64_t application_release_serial{};
+     bool presenter_stop_requested{};
+     bool presenter_active{};
+     XrSession handle{XR_NULL_HANDLE};
+@@ -3255,6 +3435,15 @@ create_vulkan_frame_generation_swapchains(
+             session->fixed_frame_multiplier.hold();
+         }
+         session->triple_switchable = false;
++        // Adaptive needs the ring this just gave up.
++        if (session->adaptive_active.exchange(false)) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::adaptive_switch,
++                static_cast<std::int64_t>(xrfg::latency::AdaptiveReason::enabled),
++                2,
++                0,
++                0);
++        }
+         for (const ProjectionResourceMapping& mapping : mappings) {
+             const auto swapchain = find_swapchain(mapping.application_swapchain);
+             if (!swapchain) {
+@@ -4195,6 +4384,13 @@ XrResult layer_create_session_impl(
+         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
+     const bool triple_requested =
+         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
++    // DCS VR Control: adaptive 2X/3X and the display time correction.
++    const bool adaptive_requested =
++        xrfg::implicit_layer::read_adaptive_frame_gen(current_layer_directory());
++    state->display_time_correction_enabled =
++        xrfg::implicit_layer::read_display_time_correction(
++            current_layer_directory());
++    state->adaptive_ini_triple = triple_requested;
+     state->vulkan_support =
+         xrfg::implicit_layer::read_vulkan_support(current_layer_directory());
+     state->menu_enabled = initial_control.desired.enabled;
+@@ -4361,13 +4557,33 @@ XrResult layer_create_session_impl(
+         state->frames_per_application_frame = 3;
+         state->deep_pipeline = false;
+     }
++    // Adaptive mode always reserves what 3X needs, the synthetic ring's two
++    // slots, whatever the shape it starts in, so that it can switch: the
++    // deeper pipeline's ring is the same one.
+     state->two_slot_synthetic_ring =
+-        state->deep_pipeline || state->frames_per_application_frame > 2;
++        state->deep_pipeline || state->frames_per_application_frame > 2 ||
++        (adaptive_requested && triple_binding);
+     state->triple_switchable =
+         triple_binding && state->two_slot_synthetic_ring;
+     if (triple_binding && !state->triple_switchable) {
+         state->fixed_frame_multiplier.hold();
+     }
++    if (adaptive_requested && state->triple_switchable) {
++        state->adaptive_active = true;
++        state->adaptive_controller.start(
++            state->frames_per_application_frame,
++            steady_nanoseconds(std::chrono::steady_clock::now()));
++        state->readiness_probe = std::make_unique<ReadinessProbe>(
++            state->adaptive_mutex, state->adaptive_controller);
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::adaptive_switch,
++            static_cast<std::int64_t>(xrfg::latency::AdaptiveReason::enabled),
++            0,
++            state->frames_per_application_frame,
++            0);
++    }
++    state->display_time_corrector.mode = xrfg::latency::display_time_mode(
++        state->frames_per_application_frame, state->deep_pipeline);
+     // 700: the session's shape. a frames per application frame, b the deeper
+     // pipeline, c whether 3X was asked for - or 2 when the record marks a
+     // live change rather than the session's creation.
+@@ -4770,9 +4986,38 @@ XrResult layer_wait_frame_impl(
+         // The application's timeline is anchored to the runtime's own
+         // prediction, one virtual period ahead of the frame the presenter is
+         // about to submit.
++        //
++        // DCS VR Control: plus the display time correction, which is how
++        // much later than that the application's real frames have actually
++        // been landing - the queue in front of them and the application's
++        // own pipelining - so the time it predicts its head pose for is the
++        // time the frame is shown. Measured by the presenter on every real
++        // frame it hands over; see display_time_corrector. Only this
++        // timeline moves: every submission still goes to the runtime with
++        // the runtime's own predicted time (continuous_presenter_main), and
++        // the comparisons the layer makes between application display times
++        // (the pairing lookup, the interpolation interval, the generation
++        // quarantine) are between times on this one timeline. A synthetic
++        // carries its real frame's render pose and FOV, as it always has.
++        const XrDuration display_time_correction =
++            state->display_time_correction_enabled
++                ? static_cast<XrDuration>(
++                      state->display_time_corrector.correction)
++                : 0;
++        // And counted from the frame the application was released at, while
++        // that is still this pair's; see application_release_display_time.
++        XrTime presenter_anchor =
++            state->presenter_frame_state.predictedDisplayTime;
++        if (state->display_time_correction_enabled &&
++            state->application_release_display_time != 0 &&
++            state->presenter_frame_serial >= state->application_release_serial &&
++            state->presenter_frame_serial - state->application_release_serial <
++                state->frames_per_application_frame) {
++            presenter_anchor = state->application_release_display_time;
++        }
+         const XrTime anchor = add_display_duration(
+-            state->presenter_frame_state.predictedDisplayTime,
+-            virtual_period);
++            add_display_duration(presenter_anchor, virtual_period),
++            display_time_correction);
+         // A second wait inside one presenter frame has to come back later than
+         // the first, so the guard below steps off the last time served. That
+         // step invents time the runtime never advanced, and the ceiling is
+@@ -6389,7 +6634,8 @@ void fail_pending_presenter_submissions_locked(
+ }
+ 
+ // How long before its hand-over a frame's first synthetic has to be written
+-// for the 3X release delay to count it on time. See triple_release_delay.
++// for the 3X release delay to count it on time, on SteamVR. See
++// triple_release.
+ constexpr auto kTripleReadinessMargin = std::chrono::nanoseconds(4'000'000);
+ 
+ struct TripleReleaseReport {
+@@ -6411,68 +6657,30 @@ struct TripleReleaseReport {
+ }
+ 
+ // One observation for the 3X release delay, and the step when a window of
+-// them closes. presenter_mutex held; the report is for the caller to record
+-// once it has let go.
++// them closes; see xrfg::latency::TripleReleaseTuner. presenter_mutex held;
++// the report is for the caller to record once it has let go.
+ void observe_triple_release(
+     SessionState& state,
+     bool leader_ready,
+     TripleReleaseReport* report) noexcept {
+-    const auto period = std::chrono::nanoseconds(
+-        static_cast<std::int64_t>(state.presenter_display_period));
+-    if (period <= std::chrono::nanoseconds::zero()) {
+-        return;
+-    }
+-    if (!leader_ready) {
+-        ++state.triple_release_window_late;
+-    }
+-    constexpr std::uint32_t kWindowFrames = 30;
+-    constexpr std::uint32_t kHoldWindows = 10;
+-    constexpr auto kMillisecond = std::chrono::nanoseconds(1'000'000);
+-    if (++state.triple_release_window_frames < kWindowFrames) {
+-        return;
+-    }
+-    const std::uint32_t late = state.triple_release_window_late;
+-    const std::uint32_t unwritten = state.triple_release_window_unwritten;
+-    state.triple_release_window_frames = 0;
+-    state.triple_release_window_late = 0;
+-    state.triple_release_window_unwritten = 0;
+-    auto& delay = state.triple_release_delay;
+-    auto& ceiling = state.triple_release_ceiling;
+-    if (ceiling < std::chrono::nanoseconds::zero()) {
+-        ceiling = period * 2;
+-    }
+-    if (late >= 2) {
+-        // Only a delay can be blamed. Frames that are late with none
+-        // applied are the title's own - a session's first second always
+-        // has some - and say nothing about where the ceiling belongs.
+-        if (delay > std::chrono::nanoseconds::zero()) {
+-            ceiling = std::max(
+-                std::chrono::nanoseconds::zero(), delay - 3 * kMillisecond);
+-            delay = ceiling;
+-            state.triple_release_ceiling_hold = kHoldWindows;
+-        }
+-    } else if (late == 0) {
+-        if (delay < ceiling) {
+-            delay = std::min(ceiling, delay + 2 * kMillisecond);
+-        } else if (state.triple_release_ceiling_hold > 0) {
+-            --state.triple_release_ceiling_hold;
+-        } else {
+-            ceiling = std::min(period * 2, ceiling + 2 * kMillisecond);
+-            delay = ceiling;
+-        }
+-    }
+-    if (report != nullptr) {
+-        report->delay_us = delay.count() / 1000;
+-        report->ceiling_us = ceiling.count() / 1000;
+-        report->late = late;
+-        report->unwritten = unwritten;
++    const auto window = xrfg::latency::observe_triple_release(
++        state.triple_release,
++        static_cast<xrfg::latency::Nanoseconds>(state.presenter_display_period),
++        !leader_ready);
++    if (window.closed && report != nullptr) {
++        report->delay_us = window.delay / 1000;
++        report->ceiling_us = window.ceiling / 1000;
++        report->late = window.late;
++        report->unwritten = window.unwritten;
+     }
+ }
+ 
+ // 801: the 3X release delay, once a window. a the delay in microseconds; b
+ // how many of the window's thirty first synthetics were late by the test in
+ // force, with the count handed over unwritten in the bits above 16; c the
+-// ceiling in microseconds.
++// ceiling in microseconds. Off SteamVR the test in force is the hand-over
++// itself, so there the two counts agree except for slots that found nothing
++// queued.
+ void log_triple_release(const TripleReleaseReport& report) noexcept {
+     if (report.delay_us < 0) {
+         return;
+@@ -7141,11 +7349,22 @@ void continuous_presenter_main(
+             std::int64_t held_reason = 0;
+             // 3X release delay, recorded after the lock.
+             TripleReleaseReport release_report{};
++            // DCS VR Control: slots this cycle missed (adaptive 2X/3X), and a
++            // display time correction step, both recorded after the lock.
++            std::uint32_t missed_slots = 0;
++            xrfg::latency::DisplayTimeStep display_time_step{};
++            std::size_t display_time_mode = 0;
+             {
+                 std::scoped_lock lock(state->presenter_mutex);
+                 // The boundary the application's release is steered against;
+                 // see application_completion_phase.
+                 state->presenter_pop_at = pop_now;
++                // Off SteamVR, 3X: whether this slot is a first synthetic's
++                // and is judged for the release delay; see triple_release.
++                const bool judge_leader = state->triple_leader_due &&
++                    state->frames_per_application_frame > 2 &&
++                    !state->dispatch->steamvr_runtime;
++                state->triple_leader_due = false;
+                 if (!state->presenter_stop_requested &&
+                     !state->presenter_submissions.empty()) {
+                     const auto& front = state->presenter_submissions.front();
+@@ -7186,6 +7405,9 @@ void continuous_presenter_main(
+                         held_sequence = front->sequence;
+                         held_reason = too_young ? 400 : 401;
+                         repeated_frame = state->presenter_last_frame;
++                        // A synthetic not written a period after it was
++                        // queued is a slot the application missed.
++                        missed_slots += not_written ? 1U : 0U;
+                     } else {
+                         if (too_young || not_written) {
+                             // Recorded below as 402: would have held.
+@@ -7196,34 +7418,97 @@ void continuous_presenter_main(
+                         }
+                         request = front;
+                         state->presenter_submissions.pop_front();
+-                        // 3X release delay; see triple_release_delay.
++                        const bool leader = request->owned_frame &&
++                            request->owned_frame->leads_frame;
++                        const bool leader_written = leader &&
++                            synthetic_output_ready(*request->owned_frame);
++                        // A first synthetic handed over unwritten: the
++                        // runtime may still see it in time, but it is the
++                        // application's frame arriving late all the same.
++                        // Only where its readiness is known at all.
++                        if (leader && !leader_written) {
++                            ++missed_slots;
++                        }
++                        // 3X release delay; see triple_release.
+                         if (state->frames_per_application_frame > 2 &&
+                             request->owned_frame) {
+-                            if (request->owned_frame->leads_frame) {
+-                                if (!synthetic_output_ready(
+-                                        *request->owned_frame)) {
+-                                    ++state->triple_release_window_unwritten;
++                            if (leader) {
++                                if (!leader_written) {
++                                    ++state->triple_release.window_unwritten;
++                                }
++                                if (judge_leader) {
++                                    observe_triple_release(
++                                        *state, leader_written,
++                                        &release_report);
+                                 }
+                             } else if (!request->owned_frame->synthetic) {
+                                 // A real frame is going out, so the next
+                                 // hand-over is a first synthetic. SteamVR's
+                                 // pace looks at it the margin before that;
+-                                // elsewhere this is the only place to look.
++                                // elsewhere it is judged at its own slot.
+                                 if (state->dispatch->steamvr_runtime) {
+                                     state->triple_release_probe_due = true;
+                                 } else {
+-                                    observe_triple_release(
+-                                        *state,
+-                                        triple_leader_ready(*state),
+-                                        &release_report);
++                                    state->triple_leader_due = true;
+                                 }
+                             }
+                         }
++                        // DCS VR Control: where the application's real frame
++                        // lands against the display time it was told; see
++                        // display_time_corrector. A synthetic says nothing,
++                        // and neither does a frame the runtime will not show.
++                        const XrFrameEndInfo* real_info =
++                            request->owned_frame
++                                ? (request->owned_frame->synthetic
++                                       ? nullptr
++                                       : &request->owned_frame->info)
++                                : request->borrowed_frame;
++                        if (real_info != nullptr &&
++                            state->display_time_correction_enabled &&
++                            frame_state.shouldRender == XR_TRUE &&
++                            real_info->displayTime > 0 &&
++                            frame_state.predictedDisplayTime > 0) {
++                            display_time_step =
++                                xrfg::latency::observe_presented(
++                                    state->display_time_corrector,
++                                    static_cast<xrfg::latency::Nanoseconds>(
++                                        frame_state.predictedDisplayTime -
++                                        real_info->displayTime),
++                                    static_cast<xrfg::latency::Nanoseconds>(
++                                        state->presenter_display_period));
++                            display_time_mode =
++                                state->display_time_corrector.mode;
++                        }
+                     }
+                 } else if (!state->presenter_stop_requested) {
+                     repeated_frame = state->presenter_last_frame;
++                    // The slot came with nothing queued: the application
++                    // missed it. In 3X off SteamVR, judged as the first
++                    // synthetic's when it was the one due.
++                    if (repeated_frame != nullptr) {
++                        ++missed_slots;
++                    }
++                    if (judge_leader) {
++                        observe_triple_release(*state, false, &release_report);
++                    }
+                 }
+             }
++            // Fed to adaptive control in 2X only. In 3X a missed slot is the
++            // release delay probing its ceiling (see triple_release) far more
++            // often than the application running out of time, and the
++            // application's own time is what the work samples measure.
++            if (missed_slots != 0 && state->adaptive_active.load() &&
++                state->frames_per_application_frame == 2) {
++                state->adaptive_missed_slots.fetch_add(missed_slots);
++            }
++            if (display_time_step.changed) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::display_time_correction,
++                    display_time_step.median / 1000,
++                    static_cast<std::uint64_t>(display_time_step.before / 1000),
++                    static_cast<std::uint64_t>(display_time_step.after / 1000),
++                    display_time_mode);
++            }
+             // Recorded outside presenter_mutex, which the application waits
+             // on. result=400: a synthetic held for the pipeline's depth;
+             // 401: held because its output had not been written yet; 402: one
+@@ -8278,6 +8563,8 @@ void continuous_presenter_main(
+         // wait of this one straight away or never.
+         state->presenter_frame_serial = 0;
+         state->application_served_serial = 0;
++        state->application_release_display_time = 0;
++        state->application_release_serial = 0;
+         // A schedule left over from a previous presenter would stall the first
+         // submission of this one.
+         // A display time from a previous presenter says nothing about this
+@@ -8432,6 +8719,11 @@ void wait_for_presenter_pair(
+             ? reached - served - kPresenterFramesPerPair
+             : 0;
+         state->application_served_serial = reached;
++        if (state->presenter_frame_state_valid) {
++            state->application_release_display_time =
++                state->presenter_frame_state.predictedDisplayTime;
++            state->application_release_serial = reached;
++        }
+         // Keep the application's completion off the pop boundary; see
+         // application_completion_phase. The step is decided here, under the
+         // lock, and slept after it.
+@@ -8440,8 +8732,9 @@ void wait_for_presenter_pair(
+         std::int64_t steer_step_us = 0;
+         if (state->frames_per_application_frame > 2) {
+             // 3X is steered on synthesis readiness instead, on every
+-            // runtime: see triple_release_delay.
+-            release_offset = state->triple_release_delay;
++            // runtime: see triple_release.
++            release_offset =
++                std::chrono::nanoseconds(state->triple_release.delay);
+         } else if (!state->dispatch->steamvr_runtime &&
+             state->presenter_display_period > 0) {
+             const auto period = std::chrono::nanoseconds(
+@@ -8519,6 +8812,9 @@ void wait_for_presenter_pair(
+                 }
+             }
+         }
++        // DCS VR Control: the application starts its next frame now; its work
++        // for adaptive 2X/3X is counted from here.
++        state->application_released_at = std::chrono::steady_clock::now();
+         // result=800: the release offset stepped. a the median completion
+         // phase that triggered it, b the offset now in force, c the step,
+         // all in microseconds.
+@@ -9748,10 +10044,13 @@ struct PreparedProjectionFrame {
+             // the runtime reads the D3D11 images the copy writes. Both
+             // accessors hand back a fence the presenter can poll without
+             // either object's lock.
+-            // And 3X, where the release delay is steered on it.
++            // And 3X, where the release delay is steered on it, and adaptive
++            // 2X/3X in either shape, which times the application's work by
++            // it (DCS VR Control).
+             if (request_pair &&
+                 (state->session->deep_pipeline ||
+-                 state->session->frames_per_application_frame > 2)) {
++                 state->session->frames_per_application_frame > 2 ||
++                 state->session->adaptive_active.load())) {
+                 if (generation->interop) {
+                     std::uint64_t published = 0;
+                     if (SUCCEEDED(generation->interop->publication_fence(
+@@ -10745,6 +11044,17 @@ void note_bridged_submissions(
+ // follows primes rather than pairing across the change. The application
+ // sees its period step between two and three display periods at its next
+ // wait, and one frame without synthetics.
++//
++// DCS VR Control: with `[ofxr] adaptive_frame_gen` the same switch is taken
++// on the adaptive controller's decision (see
++// xrfg::latency::AdaptiveFrameGenController), so an adaptive switch costs
++// exactly what a tray switch does. Under adaptive control the ini's
++// triple_frame_gen is the mode the session started in; a change of it while
++// the session runs is the user choosing a mode, so the session switches to
++// it and the controller starts over from there, dwell and all. Turning
++// adaptive off live puts the session in the mode the ini names; turning it on
++// live starts the controller in the mode the session is in. A switch resets
++// the 3X release delay and rebases the display time correction.
+ void apply_live_frame_multiplier(
+     const std::shared_ptr<SessionState>& state,
+     bool use_continuous_presenter) noexcept {
+@@ -10752,25 +11062,126 @@ void apply_live_frame_multiplier(
+         if (!state->triple_switchable) {
+             return;
+         }
++        using xrfg::latency::AdaptiveReason;
++        const auto now = std::chrono::steady_clock::now();
++        const auto now_ns = steady_nanoseconds(now);
++        const std::uint32_t current = state->frames_per_application_frame;
++        std::uint32_t target = 0;
++        AdaptiveReason reason = AdaptiveReason::none;
++        std::int64_t decided_p90_ns = -1;
++        bool adaptive = state->adaptive_active.load();
++        bool adaptive_toggled = false;
++        bool ini_triple = state->adaptive_ini_triple;
+         // The ini is rewritten by the tray; a read every quarter second is
+         // cheap and nothing here is urgent.
+-        const auto now = std::chrono::steady_clock::now();
+-        if (now < state->triple_poll_at) {
+-            return;
++        if (now >= state->triple_poll_at) {
++            state->triple_poll_at = now + std::chrono::milliseconds(250);
++            ini_triple =
++                xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
++            const bool ini_adaptive =
++                xrfg::implicit_layer::read_adaptive_frame_gen(current_layer_directory());
++            const std::uint32_t ini_target = ini_triple ? 3U : 2U;
++            if (ini_adaptive != adaptive) {
++                adaptive = ini_adaptive;
++                adaptive_toggled = true;
++                state->adaptive_active = adaptive;
++                if (adaptive) {
++                    {
++                        std::scoped_lock adaptive_lock(state->adaptive_mutex);
++                        state->adaptive_controller.start(current, now_ns);
++                    }
++                    state->adaptive_missed_slots = 0;
++                    if (!state->readiness_probe) {
++                        state->readiness_probe = std::make_unique<ReadinessProbe>(
++                            state->adaptive_mutex, state->adaptive_controller);
++                    }
++                } else {
++                    target = ini_target;
++                    reason = AdaptiveReason::manual;
++                }
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_switch,
++                    static_cast<std::int64_t>(AdaptiveReason::enabled),
++                    adaptive ? 0U : current,
++                    adaptive ? current : 0U,
++                    0);
++            } else if (!adaptive || ini_triple != state->adaptive_ini_triple) {
++                target = ini_target;
++                reason = AdaptiveReason::manual;
++            }
++        }
++        XrDuration period = 0;
++        {
++            std::scoped_lock lock(state->presenter_mutex);
++            period = state->presenter_display_period;
+         }
+-        state->triple_poll_at = now + std::chrono::milliseconds(250);
+-        const std::uint32_t target =
+-            xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory())
+-                ? 3U
+-                : 2U;
+-        if (target == state->frames_per_application_frame) {
++        if (period <= 0) {
++            std::scoped_lock lock(state->mutex);
++            period = state->minimum_runtime_display_period;
++        }
++        if (adaptive && target == 0) {
++            std::scoped_lock adaptive_lock(state->adaptive_mutex);
++            const std::uint32_t missed = state->adaptive_missed_slots.exchange(0);
++            if (missed != 0) {
++                state->adaptive_controller.add_late(now_ns, missed);
++            }
++            const auto decision = state->adaptive_controller.evaluate(
++                now_ns, static_cast<xrfg::latency::Nanoseconds>(period));
++            if (decision.target != 0 && decision.target != current) {
++                target = decision.target;
++                reason = decision.reason;
++                decided_p90_ns = decision.stats.p90;
++            }
++        }
++        // Once a second while the presenter runs: what the controls see.
++        if (period > 0 && now >= state->latency_status_at &&
++            (adaptive || state->display_time_correction_enabled)) {
++            state->latency_status_at = now + std::chrono::seconds(1);
++            xrfg::latency::AdaptiveStats stats{};
++            if (adaptive) {
++                std::scoped_lock adaptive_lock(state->adaptive_mutex);
++                stats = state->adaptive_controller.stats(
++                    now_ns, xrfg::latency::kSecond);
++            }
++            xrfg::latency::Nanoseconds correction = 0;
++            {
++                std::scoped_lock lock(state->presenter_mutex);
++                correction = state->display_time_correction_enabled
++                    ? state->display_time_corrector.correction
++                    : 0;
++            }
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::latency_status,
++                static_cast<std::int64_t>(current) + (adaptive ? 10 : 0),
++                stats.p90 > 0 ? static_cast<std::uint64_t>(stats.p90 / 1000) : 0U,
++                std::min<std::uint64_t>(stats.samples, 0xFFFFU) |
++                    (std::min<std::uint64_t>(stats.late, 0xFFFFU) << 16),
++                static_cast<std::uint64_t>(correction / 1000));
++        }
++        if (target == 0 || target == current) {
++            if (reason == AdaptiveReason::manual) {
++                if (adaptive && ini_triple != state->adaptive_ini_triple) {
++                    // The user picked the mode the session is already in:
++                    // the controller starts over from it all the same.
++                    std::scoped_lock adaptive_lock(state->adaptive_mutex);
++                    state->adaptive_controller.start(current, now_ns);
++                }
++                state->adaptive_ini_triple = ini_triple;
++            }
+             return;
+         }
+         if (use_continuous_presenter &&
+             XR_FAILED(wait_for_presenter_idle(state))) {
++            // Nothing changed; the next call decides again (and a manual
++            // change is still seen, its ini value not having been taken).
+             return;
+         }
++        if (reason == AdaptiveReason::manual) {
++            state->adaptive_ini_triple = ini_triple;
++        }
+         bool deep = false;
++        xrfg::latency::Nanoseconds correction_before = 0;
++        xrfg::latency::Nanoseconds correction = 0;
+         {
+             std::scoped_lock content_lock(state->presenter_content_mutex);
+             std::scoped_lock lock(state->presenter_mutex);
+@@ -10779,23 +11190,61 @@ void apply_live_frame_multiplier(
+                 target == 2U && state->deep_pipeline_configured;
+             deep = state->deep_pipeline;
+             // The release delay belongs to the shape it was found in.
+-            state->triple_release_delay = std::chrono::nanoseconds::zero();
+-            state->triple_release_ceiling = std::chrono::nanoseconds(-1);
+-            state->triple_release_ceiling_hold = 0;
+-            state->triple_release_window_frames = 0;
+-            state->triple_release_window_late = 0;
+-            state->triple_release_window_unwritten = 0;
++            state->triple_release.reset();
+             state->triple_release_probe_due = false;
++            state->triple_leader_due = false;
++            // The display time correction too, scaled to the new period or
++            // taken from what was learned in this shape before.
++            const auto display_period = static_cast<xrfg::latency::Nanoseconds>(
++                state->presenter_display_period > 0
++                    ? state->presenter_display_period
++                    : period);
++            correction_before = state->display_time_corrector.correction;
++            correction = xrfg::latency::rebase_display_time_correction(
++                state->display_time_corrector,
++                xrfg::latency::display_time_mode(target, deep),
++                display_period * current,
++                display_period * target,
++                display_period);
+             // The once-per-frame hold counts from here in the new shape.
+             state->application_served_serial = state->presenter_frame_serial;
++            state->application_release_display_time = 0;
+         }
+         clear_generation_continuity(state);
++        if (adaptive) {
++            std::scoped_lock adaptive_lock(state->adaptive_mutex);
++            if (reason == AdaptiveReason::manual) {
++                state->adaptive_controller.start(target, now_ns);
++            } else {
++                state->adaptive_controller.switched(target, now_ns);
++            }
++            state->adaptive_missed_slots = 0;
++        }
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::presenter_transition,
+             700,
+             target,
+             deep ? 1u : 0u,
+             2);
++        if (adaptive || adaptive_toggled) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::adaptive_switch,
++                static_cast<std::int64_t>(reason),
++                current,
++                target,
++                decided_p90_ns > 0
++                    ? static_cast<std::uint64_t>(decided_p90_ns / 1000)
++                    : 0U);
++        }
++        if (state->display_time_correction_enabled) {
++            // result 0: rebased by a switch rather than measured.
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::display_time_correction,
++                0,
++                static_cast<std::uint64_t>(correction_before / 1000),
++                static_cast<std::uint64_t>(correction / 1000),
++                xrfg::latency::display_time_mode(target, deep));
++        }
+     } catch (...) {
+     }
+ }
+@@ -10920,6 +11369,7 @@ XrResult layer_end_frame_impl(
+         generation.budget_exhausted =
+             state->generation_budget_exhausted.load(std::memory_order_acquire);
+         generation.multiplier = state->frames_per_application_frame.load();
++        generation.adaptive = state->adaptive_active.load();
+         state->fps_overlay->set_generation_status(generation);
+         state->fps_overlay->application_frame(end_info);
+     }
+@@ -11477,11 +11927,29 @@ XrResult layer_end_frame_impl(
+     XrResult result = XR_SUCCESS;
+     if (use_continuous_presenter) {
+         if (pair_ready) {
++            // DCS VR Control: adaptive 2X/3X times this frame by its first
++            // synthetic; see ReadinessProbe. Taken before the presenter can
++            // see the frame.
++            ReadinessProbe::Item readiness{};
++            if (state->adaptive_active.load() && state->readiness_probe &&
++                state->application_released_at !=
++                    std::chrono::steady_clock::time_point{}) {
++                for (const auto& ready : presenter_first_frame->synthetic_ready) {
++                    if (ready.fence && ready.value != 0) {
++                        readiness.fences.push_back(ready.fence);
++                        readiness.values.push_back(ready.value);
++                    }
++                }
++                readiness.released_at = state->application_released_at;
++            }
+             result = enqueue_presenter_pair(
+                 state,
+                 presenter_first_frame,
+                 presenter_extra_frame,
+                 presenter_current_frame);
++            if (XR_SUCCEEDED(result) && !readiness.fences.empty()) {
++                state->readiness_probe->submit(std::move(readiness));
++            }
+             if (XR_FAILED(result)) {
+                 // Refused before anything was queued, so nothing else will
+                 // ever release these.
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index 9904c37..6605794 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -151,6 +151,24 @@ int main(int argc, char** argv) {
+             404,
+             1010,
+             77);
++        enabled.event(
++            xrfg::BridgeFlightOperation::adaptive_switch,
++            1,
++            3,
++            2,
++            15000);
++        enabled.event(
++            xrfg::BridgeFlightOperation::latency_status,
++            13,
++            15000,
++            30,
++            55555);
++        enabled.event(
++            xrfg::BridgeFlightOperation::display_time_correction,
++            -11111,
++            55555,
++            44444,
++            2);
+         enabled.shutdown();
+ 
+         const std::string log = read(log_path);
+@@ -178,6 +196,14 @@ int main(int argc, char** argv) {
+                     "op=nvidia_gpu_total result=0 dur_us=0 a=404 b=1010 c=77") !=
+                     std::string::npos,
+             "bridge log is missing V049 NVIDIA GPU timing fields");
++        require(
++            log.find("op=adaptive_switch result=1 dur_us=0 a=3 b=2 c=15000") !=
++                    std::string::npos &&
++                log.find("op=latency_status result=13 dur_us=0 a=15000 b=30 c=55555") !=
++                    std::string::npos &&
++                log.find("op=display_time_correction result=-11111 dur_us=0 a=55555 b=44444 c=2") !=
++                    std::string::npos,
++            "bridge log is missing the DCS VR Control latency records");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+index 716b3e5..353210e 100644
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -112,6 +112,13 @@ int main() {
+         require(generation(in, C::green) == "Framegen: OFXR NVIDIA 2x", "NVIDIA 2x");
+         in.generation.multiplier = 3;
+         require(generation(in, C::green) == "Framegen: OFXR NVIDIA 3x", "3x");
++        in.generation.adaptive = true;
++        require(generation(in, C::green) == "Framegen: OFXR NVIDIA 3x auto", "3x auto");
++        in.generation.multiplier = 2;
++        require(generation(in, C::green) == "Framegen: OFXR NVIDIA 2x auto", "2x auto");
++        in.generating = false;
++        require(generation(in, C::amber) == "Framegen: OFXR NVIDIA 2x auto - not generating", "auto not generating");
++        in.generating = true; in.generation.adaptive = false;
+         in.generation.multiplier = 2; in.generation.nvidia = false;
+         require(generation(in, C::green) == "Framegen: OFXR FidelityFX 2x", "FidelityFX");
+         in.generation.nvidia_unavailable = true;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+new file mode 100644
+index 0000000..1bddd30
+--- /dev/null
++++ b/tests/latency_control_tests.cpp
+@@ -0,0 +1,421 @@
++// DCS VR Control latency controls: the 3X release delay, the display time the
++// application is told, and adaptive 2X/3X.
++#include "xrfg/latency_control.hpp"
++
++#include <cstdint>
++#include <deque>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++
++namespace {
++
++using namespace xrfg::latency;
++
++void require(bool pass, const std::string& message) {
++    if (!pass) {
++        throw std::runtime_error(message);
++    }
++}
++
++constexpr Nanoseconds kPeriod = 11'111'111; // 90 Hz
++
++// ---------------------------------------------------------------------------
++// 3X release delay.
++
++// A Pimax-like session judged at the first synthetic's own hand-over: the
++// application finishes in time while the delay stays at or under `room`.
++struct TunerRun {
++    std::uint32_t late_frames{};
++    std::uint32_t failed_windows{};
++    Nanoseconds final_delay{};
++    Nanoseconds max_delay{};
++};
++
++TunerRun run_tuner(TripleReleaseTuner& tuner, Nanoseconds room, std::uint32_t frames) {
++    TunerRun run{};
++    for (std::uint32_t frame = 0; frame < frames; ++frame) {
++        const bool late = tuner.delay > room;
++        run.late_frames += late ? 1U : 0U;
++        const auto window = observe_triple_release(tuner, kPeriod, late);
++        if (window.closed && window.late >= 2) {
++            ++run.failed_windows;
++        }
++        run.max_delay = std::max(run.max_delay, tuner.delay);
++    }
++    run.final_delay = tuner.delay;
++    return run;
++}
++
++void triple_release_tests() {
++    {
++        // No delay yet and frames on time: the first window sets the ceiling
++        // to two periods and steps up.
++        TripleReleaseTuner tuner;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_release(tuner, kPeriod, false);
++        }
++        require(window.closed, "window closes after thirty frames");
++        require(window.ceiling == 2 * kPeriod, "first ceiling is two periods");
++        require(window.delay == TripleReleaseTuner::kRaiseStep, "first clean window raises 2 ms");
++    }
++    {
++        // Late frames with no delay applied move nothing.
++        TripleReleaseTuner tuner;
++        for (std::uint32_t i = 0; i < 10 * TripleReleaseTuner::kWindowFrames; ++i) {
++            observe_triple_release(tuner, kPeriod, true);
++        }
++        require(tuner.delay == 0 && tuner.ceiling == 2 * kPeriod,
++            "lateness without a delay must not set the ceiling");
++    }
++    {
++        // The log that motivated this: Pimax, 90 Hz, room for ~9.5 ms. The
++        // tuner settles near the room without late frames in steady state.
++        TripleReleaseTuner tuner;
++        const Nanoseconds room = 9'500'000;
++        const auto first = run_tuner(tuner, room, 90 * 30); // 90 s at 30 fps
++        require(first.final_delay <= room, "settled delay is on time");
++        require(first.final_delay >= room - TripleReleaseTuner::kBackoffStep - TripleReleaseTuner::kRaiseStep,
++            "settled delay is within a step of the room: " + std::to_string(first.final_delay));
++        // Each failed probe costs a window; backoff keeps them rare: at most
++        // one per hold, and holds double.
++        require(first.failed_windows <= 6, "probes above the room are backed off: " +
++            std::to_string(first.failed_windows));
++        require(first.late_frames <= first.failed_windows * TripleReleaseTuner::kWindowFrames,
++            "late frames only in probing windows");
++        // Steady state afterwards: a further minute has fewer failures still.
++        const auto second = run_tuner(tuner, room, 60 * 30);
++        require(second.failed_windows <= 2, "backoff keeps steady-state probes rare: " +
++            std::to_string(second.failed_windows));
++        require(tuner.backoff > TripleReleaseTuner::kBaseHoldWindows || second.failed_windows == 0,
++            "repeated failures lengthen the hold");
++    }
++    {
++        // A ceiling pushed to zero comes back: the old tuner stayed at
++        // "delay 0, ceiling 0, all late" for a whole flight.
++        TripleReleaseTuner tuner;
++        run_tuner(tuner, 9'000'000, 30 * 30);
++        require(tuner.delay > 0, "delay found first");
++        // The scene gets heavy: no room at all for a while.
++        run_tuner(tuner, -1, 60 * 30);
++        require(tuner.delay == 0 && tuner.ceiling == 0, "pushed down to zero");
++        // Light again: it must probe up from zero, after its hold.
++        const auto recovered = run_tuner(tuner, 9'000'000, 120 * 30);
++        require(recovered.final_delay >= 4'000'000,
++            "a zero ceiling probes again: " + std::to_string(recovered.final_delay));
++    }
++    {
++        // Backoff doubles on consecutive failures and is capped.
++        TripleReleaseTuner tuner;
++        tuner.ceiling = 2 * kPeriod;
++        std::uint32_t previous_hold = 0;
++        for (int round = 0; round < 8; ++round) {
++            tuner.delay = 10'000'000;
++            tuner.hold = 0;
++            for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++                observe_triple_release(tuner, kPeriod, i < 2);
++            }
++            require(tuner.hold >= previous_hold, "hold never shrinks on a failure");
++            require(tuner.hold <= TripleReleaseTuner::kMaxHoldWindows, "hold capped");
++            previous_hold = tuner.hold;
++        }
++        require(previous_hold == TripleReleaseTuner::kMaxHoldWindows, "hold reaches its cap");
++        require(tuner.ceiling == 10'000'000 - TripleReleaseTuner::kBackoffStep, "ceiling 3 ms under the failure");
++    }
++    {
++        // Unwritten counts are reported per window.
++        TripleReleaseTuner tuner;
++        tuner.window_unwritten = 3;
++        TripleReleaseWindow window{};
++        for (std::uint32_t i = 0; i < TripleReleaseTuner::kWindowFrames; ++i) {
++            window = observe_triple_release(tuner, kPeriod, false);
++        }
++        require(window.unwritten == 3 && tuner.window_unwritten == 0, "unwritten reported and reset");
++        require(observe_triple_release(tuner, 0, true).closed == false && tuner.window_late == 0,
++            "no period, no observation");
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Display time. A presenter on a grid of kPeriod; the application is told the
++// presenter's prediction plus one virtual period plus the correction, and its
++// real frame lands a fixed number of periods after the uncorrected time, set
++// by the pipeline's shape. The residual of a frame is known only once it has
++// been presented, `depth` application frames after it was told.
++
++struct Pipeline {
++    std::uint32_t frames{3};
++    bool deep{};
++    Nanoseconds offset_periods{5};
++};
++
++struct TellSimulation {
++    DisplayTimeCorrector corrector;
++    std::deque<std::pair<Nanoseconds, Nanoseconds>> in_flight; // told, real
++    Nanoseconds now{1'000'000'000'000};
++    std::size_t depth{2};
++    Nanoseconds jitter{};
++    std::uint64_t frame{};
++
++    // Runs `count` application frames; returns how many of the last `tail`
++    // were told exactly the time their real frame was presented for.
++    std::size_t run(const Pipeline& pipeline, std::size_t count, std::size_t tail) {
++        std::size_t exact = 0;
++        const Nanoseconds virtual_period = kPeriod * pipeline.frames;
++        for (std::size_t i = 0; i < count; ++i) {
++            const Nanoseconds uncorrected = now + virtual_period;
++            const Nanoseconds told = uncorrected + corrector.correction;
++            const Nanoseconds noise = jitter == 0 ? 0
++                : static_cast<Nanoseconds>((frame * 7919U) % 3U) * jitter - jitter;
++            const Nanoseconds real = uncorrected + pipeline.offset_periods * kPeriod + noise;
++            in_flight.emplace_back(told, real);
++            if (in_flight.size() > depth) {
++                const auto [presented_told, presented_real] = in_flight.front();
++                in_flight.pop_front();
++                observe_presented(corrector, presented_real - presented_told, kPeriod);
++            }
++            if (i + tail >= count && told == real) {
++                ++exact;
++            }
++            now += virtual_period;
++            ++frame;
++        }
++        return exact;
++    }
++
++    void switch_to(const Pipeline& from, const Pipeline& to) {
++        rebase_display_time_correction(
++            corrector, display_time_mode(to.frames, to.deep),
++            kPeriod * from.frames, kPeriod * to.frames, kPeriod);
++    }
++};
++
++void display_time_tests() {
++    require(display_time_mode(3, true) == 2 && display_time_mode(3, false) == 2 &&
++            display_time_mode(2, true) == 1 && display_time_mode(2, false) == 0,
++        "mode keys");
++    const Pipeline triple{3, false, 5};      // measured on DCS/Pimax: +55.56 ms at 90 Hz
++    const Pipeline deep_pair{2, true, 3};    // +33.3 ms
++    const Pipeline shallow_pair{2, false, 2};
++    {
++        // Each shape on its own: told == real presentation time once settled.
++        for (const Pipeline& pipeline : {triple, deep_pair, shallow_pair}) {
++            TellSimulation sim;
++            const std::size_t exact = sim.run(pipeline, 300, 100);
++            require(exact == 100, "told time is the real presentation time in mode " +
++                std::to_string(pipeline.frames) + (pipeline.deep ? " deep" : "") +
++                " (" + std::to_string(exact) + "/100, correction " +
++                std::to_string(sim.corrector.correction) + ")");
++            require(sim.corrector.correction == pipeline.offset_periods * kPeriod,
++                "correction equals the measured offset");
++        }
++    }
++    {
++        // Settles within a few seconds and never overshoots, although every
++        // residual arrives two frames late.
++        TellSimulation sim;
++        Nanoseconds peak = 0;
++        for (int i = 0; i < 200; ++i) {
++            sim.run(triple, 1, 0);
++            peak = std::max(peak, sim.corrector.correction);
++        }
++        require(sim.corrector.correction == 5 * kPeriod, "3X settles at five periods");
++        require(peak == 5 * kPeriod, "no overshoot");
++    }
++    {
++        // Switching shapes keeps it right: scaled the first time, learned after.
++        TellSimulation sim;
++        sim.run(triple, 300, 0);
++        sim.switch_to(triple, deep_pair);
++        require(sim.corrector.correction == 3 * kPeriod,
++            "3X -> deep 2X rebases by the virtual periods: " + std::to_string(sim.corrector.correction));
++        require(sim.run(deep_pair, 200, 150) == 150, "deep 2X exact after the switch");
++        sim.switch_to(deep_pair, triple);
++        require(sim.corrector.correction == 5 * kPeriod, "back to 3X uses what was learned there");
++        require(sim.run(triple, 100, 90) == 90, "3X exact after switching back");
++        sim.switch_to(triple, shallow_pair);
++        require(sim.run(shallow_pair, 300, 100) == 100, "shallow 2X learned by measurement");
++        require(sim.corrector.correction == 2 * kPeriod, "shallow 2X at two periods");
++    }
++    {
++        // Small jitter (well under half a period) still converges to the grid.
++        TellSimulation sim;
++        sim.jitter = 300'000;
++        sim.run(triple, 300, 0);
++        require(sim.corrector.correction == 5 * kPeriod, "jitter tolerated");
++    }
++    {
++        // Frames that disagree about where they land teach nothing.
++        DisplayTimeCorrector corrector;
++        for (int i = 0; i < 300; ++i) {
++            observe_presented(corrector, (i % 2) ? 5 * kPeriod : 0, kPeriod);
++        }
++        require(corrector.correction == 0, "a spread window does not move the correction");
++    }
++    {
++        // Never earlier than the presenter's own anchor, never beyond the cap.
++        DisplayTimeCorrector corrector;
++        for (int i = 0; i < 300; ++i) {
++            observe_presented(corrector, -3 * kPeriod, kPeriod);
++        }
++        require(corrector.correction == 0, "correction is not negative");
++        for (int i = 0; i < 3000; ++i) {
++            observe_presented(corrector, 40 * kPeriod, kPeriod);
++        }
++        require(corrector.correction == DisplayTimeCorrector::kMaxPeriods * kPeriod, "correction capped");
++        require(observe_presented(corrector, 0, 0).window_closed == false, "no period, no observation");
++    }
++    {
++        // One stray window is not enough to move it.
++        DisplayTimeCorrector corrector;
++        for (std::size_t i = 0; i < DisplayTimeCorrector::kWindowSamples; ++i) {
++            observe_presented(corrector, 2 * kPeriod, kPeriod);
++        }
++        require(corrector.correction == 0 && corrector.pending_step == 2, "first window only proposes");
++        for (std::size_t i = 0; i < DisplayTimeCorrector::kWindowSamples; ++i) {
++            observe_presented(corrector, 0, kPeriod);
++        }
++        require(corrector.correction == 0 && corrector.pending_step == 0, "a settled window cancels it");
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Adaptive 2X/3X. Samples at the application's paced rate.
++
++struct AdaptiveRun {
++    Nanoseconds switched_at{-1};
++    std::uint32_t target{};
++    AdaptiveDecision decision;
++};
++
++// Feeds `seconds` of frames with a constant work time and asks for a decision
++// each frame; stops at the first switch, which it applies.
++AdaptiveRun drive(AdaptiveFrameGenController& controller, Nanoseconds& now, Nanoseconds seconds,
++    Nanoseconds work, std::uint32_t late_every = 0) {
++    AdaptiveRun run{};
++    const Nanoseconds frame = kPeriod * controller.mode();
++    const Nanoseconds end = now + seconds;
++    std::uint32_t index = 0;
++    while (now < end) {
++        now += frame;
++        controller.add_work(now, work);
++        if (late_every != 0 && ++index % late_every == 0) {
++            controller.add_late(now);
++        }
++        const auto decision = controller.evaluate(now, kPeriod);
++        if (decision.target != 0) {
++            run.switched_at = now;
++            run.target = decision.target;
++            run.decision = decision;
++            controller.switched(decision.target, now);
++            return run;
++        }
++    }
++    return run;
++}
++
++void adaptive_tests() {
++    const Nanoseconds start = 50 * kSecond;
++    {
++        // DCS in 3X, paced to 30 but needing 15 ms: room for 45 with margin.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto run = drive(controller, now, 20 * kSecond, 15 * kMillisecond);
++        require(run.target == 2 && run.decision.reason == AdaptiveReason::headroom, "3X -> 2X on headroom");
++        require(run.switched_at - start >= 5 * kSecond, "not within the minimum dwell");
++        require(run.switched_at - start <= 5 * kSecond + 2 * kPeriod * 3, "as soon as dwell and window allow");
++        require(run.decision.stats.p90 == 15 * kMillisecond && run.decision.stats.samples >= 20, "stats reported");
++        require(controller.mode() == 2, "controller follows the switch");
++    }
++    {
++        // 20 ms is over 85% of two periods (18.9 ms): stays in 3X.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        require(drive(controller, now, 60 * kSecond, 20 * kMillisecond).target == 0, "no downshift without margin");
++    }
++    {
++        // Headroom, but its first synthetics are late now and then: stays.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        require(drive(controller, now, 60 * kSecond, 12 * kMillisecond, 60).target == 0,
++            "missed slots block a downshift");
++    }
++    {
++        // A p90 is a p90: one slow frame in ten does not block it.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        for (int i = 0; i < 9; ++i) controller.add_work(start + 2 * kSecond + i, 10 * kMillisecond);
++        controller.add_work(start + 2 * kSecond + 9, 30 * kMillisecond);
++        const auto stats = controller.stats(start + 3 * kSecond, 3 * kSecond);
++        require(stats.samples == 10 && stats.p90 == 10 * kMillisecond, "nearest-rank p90");
++        // Samples inside the settle after a start are not counted.
++        controller.add_work(start + kSecond / 2, 50 * kMillisecond);
++        require(controller.stats(start + 3 * kSecond, 3 * kSecond).samples == 10, "settle ignored");
++    }
++    {
++        // In 2X: slow frames send it back to 3X quickly, but never within
++        // the dwell of the downshift.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        const auto down = drive(controller, now, 20 * kSecond, 15 * kMillisecond);
++        require(down.target == 2, "downshift first");
++        const auto up = drive(controller, now, 20 * kSecond, 26 * kMillisecond);
++        require(up.target == 3 && up.decision.reason == AdaptiveReason::slow, "2X -> 3X when p90 > two periods");
++        require(up.switched_at - down.switched_at >= 5 * kSecond, "upshift respects the dwell");
++        require(up.switched_at - down.switched_at <= 5 * kSecond + kSecond, "and is quick after it");
++        // That was a flap: the next downshift needs twice the evidence.
++        require(controller.downshift_window() == 6 * kSecond, "flap doubles the downshift window");
++        const auto again = drive(controller, now, 30 * kSecond, 15 * kMillisecond);
++        require(again.target == 2 && again.switched_at - up.switched_at >= 7 * kSecond,
++            "second downshift waits for the longer window");
++    }
++    {
++        // In 2X: missed slots send it back even when the work looks fine.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        const auto up = drive(controller, now, 20 * kSecond, 10 * kMillisecond, 10);
++        require(up.target == 3 && up.decision.reason == AdaptiveReason::late, "2X -> 3X on missed slots");
++        require(up.switched_at - start >= 5 * kSecond && up.switched_at - start < 6 * kSecond, "after the dwell");
++    }
++    {
++        // A downshift that holds for longer than the flap window resets the
++        // evidence needed for the next one.
++        AdaptiveFrameGenController controller;
++        controller.start(3, start);
++        Nanoseconds now = start;
++        drive(controller, now, 20 * kSecond, 15 * kMillisecond);
++        drive(controller, now, 30 * kSecond, 15 * kMillisecond); // stays in 2X
++        const auto up = drive(controller, now, 10 * kSecond, 30 * kMillisecond);
++        require(up.target == 3, "upshift");
++        require(controller.downshift_window() == 3 * kSecond, "no flap, base window");
++    }
++    {
++        // Steady 2X with margin stays there.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        require(drive(controller, now, 60 * kSecond, 16 * kMillisecond).target == 0, "2X holds");
++        require(controller.evaluate(now, 0).target == 0, "no period, no decision");
++    }
++}
++
++} // namespace
++
++int main() {
++    try {
++        triple_release_tests();
++        display_time_tests();
++        adaptive_tests();
++        std::cout << "Latency control tests passed\n";
++        return 0;
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}
+diff --git a/tests/layer_adaptive_frame_gen.cmake b/tests/layer_adaptive_frame_gen.cmake
+new file mode 100644
+index 0000000..61189fb
+--- /dev/null
++++ b/tests/layer_adaptive_frame_gen.cmake
+@@ -0,0 +1,65 @@
++# DCS VR Control: runs the dcs-adaptive call-chain scenario with
++# `adaptive_frame_gen=1` (ADAPTIVE_INI beside the layer DLL) and checks, from
++# the flight log, that adaptive control took the session 3X -> 2X on headroom
++# and 2X -> 3X when the application turned heavy, through the live switch,
++# with the status and display time records a flight log is read by.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN ADAPTIVE_INI WORK_DIR)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${ADAPTIVE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(adaptive_ini_name "${ADAPTIVE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${adaptive_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        dcs-adaptive
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain 'dcs-adaptive' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++foreach(expected IN ITEMS
++        # Adaptive on at creation, starting in 3X as triple_frame_gen says.
++        "op=adaptive_switch result=5 dur_us=0 a=0 b=3 c=0"
++        # The ring 3X needs, and the session's shape.
++        "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=1"
++        # Headroom: 3X -> 2X, then the live switch's own record.
++        "op=adaptive_switch result=1 dur_us=0 a=3 b=2 c="
++        "op=presenter_transition result=700 dur_us=0 a=2 b=1 c=2"
++        # Heavy in 2X: back to 3X.
++        "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=2"
++        # Status under adaptive control, in each mode.
++        "op=latency_status result=13 "
++        "op=latency_status result=12 "
++        # The display time correction, measured and rebased on a switch.
++        "op=display_time_correction result=0 dur_us=0 ")
++    string(FIND "${contents}" "${expected}" found)
++    if(found EQUAL -1)
++        message(FATAL_ERROR "The flight log is missing: ${expected}")
++    endif()
++endforeach()
++string(REGEX MATCH "op=adaptive_switch result=[23] dur_us=0 a=2 b=3 c=[0-9]+" upshift "${contents}")
++if(upshift STREQUAL "")
++    message(FATAL_ERROR "No 2X -> 3X adaptive switch for a slow or late application")
++endif()
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index d651980..e4e117d 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -158,6 +158,21 @@ std::atomic<std::uint32_t> g_budget_refusals{0};
+ // decides whether the frame pairs, and it has to accept the older pending
+ // frame. The fake runtime behaves exactly as in steamvr-presenter.
+ bool g_dcs_mode = false;
++// dcs-latency (DCS VR Control): the dcs shape for a few hundred frames on a
++// fake runtime whose predicted display times advance one display period per
++// wait, as a real one's do, so the display time the application is told can
++// be checked against the runtime display time its real frame is handed over
++// for. The application's submitted pose encodes the time it was told.
++bool g_display_latency_mode = false;
++// dcs-adaptive (DCS VR Control): dcs-latency with `adaptive_frame_gen=1`,
++// starting in 3X. The application is light, so adaptive control has to move
++// it to 2X; once there it turns heavy (a simulated render of
++// g_simulated_render_ms), so it has to come back to 3X; and then the display
++// time it is told must again be its real frame's.
++bool g_adaptive_latency_mode = false;
++int g_simulated_render_ms = 0;
++std::mutex g_told_mutex;
++std::vector<std::pair<float, XrTime>> g_told_by_pose;
+ bool g_flight_simulator_mode = false;
+ bool g_destroy_pending_swapchain = false;
+ bool g_destroy_pending_space = false;
+@@ -347,6 +362,12 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
+ }
+ 
+ [[nodiscard]] XrTime fake_camera_time(XrTime display_time) noexcept {
++    // dcs-latency advances a whole period per wait for hundreds of frames;
++    // a tenth of the usual step keeps the camera (and its FOV, which widens
++    // with it) inside what a projection can be, and every period distinct.
++    if (g_display_latency_mode) {
++        return (display_time / kFakeDisplayPeriod) * 10;
++    }
+     if (g_steamvr_presenter_mode || g_flight_simulator_mode) {
+         return (display_time / kFakeDisplayPeriod) * 100;
+     }
+@@ -487,6 +508,65 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_session(XrSession) {
+     return XR_SUCCESS;
+ }
+ 
++// dcs-latency: blocks like a runtime pacing to its display, to the next tick
++// of a kFakeDisplayPeriod grid, so the wall clock and the display times the
++// fake hands out advance together and a release delay means what it would on
++// a headset. A high-resolution timer: a sleep rounds up to the system tick.
++void pace_like_a_display() {
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++    static std::mutex pace_mutex;
++    static std::chrono::steady_clock::time_point next_tick{};
++    static HANDLE timer = [] {
++        HANDLE created = CreateWaitableTimerExW(
++            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++            TIMER_ALL_ACCESS);
++        return created != nullptr
++            ? created
++            : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
++    }();
++    std::chrono::steady_clock::time_point target{};
++    {
++        std::scoped_lock lock(pace_mutex);
++        const auto now = std::chrono::steady_clock::now();
++        if (next_tick < now) {
++            next_tick = now;
++        }
++        next_tick += std::chrono::nanoseconds(kFakeDisplayPeriod);
++        target = next_tick;
++    }
++    const auto remaining = target - std::chrono::steady_clock::now();
++    if (timer != nullptr && remaining > std::chrono::nanoseconds::zero()) {
++        LARGE_INTEGER due{};
++        due.QuadPart = -static_cast<LONGLONG>(
++            std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count() / 100);
++        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
++            WaitForSingleObject(timer, INFINITE);
++        }
++    }
++}
++
++// A sleep that is not rounded up to the system tick.
++void precise_sleep(std::chrono::nanoseconds duration) {
++    static thread_local HANDLE timer = [] {
++        HANDLE created = CreateWaitableTimerExW(
++            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++            TIMER_ALL_ACCESS);
++        return created != nullptr
++            ? created
++            : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
++    }();
++    if (timer == nullptr || duration <= std::chrono::nanoseconds::zero()) {
++        return;
++    }
++    LARGE_INTEGER due{};
++    due.QuadPart = -static_cast<LONGLONG>(duration.count() / 100);
++    if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
++        WaitForSingleObject(timer, INFINITE);
++    }
++}
++
+ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
+     XrSession,
+     const XrFrameWaitInfo*,
+@@ -520,6 +600,10 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
+             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+     }
++    if (g_display_latency_mode &&
++        GetCurrentThreadId() != g_test_application_thread_id) {
++        pace_like_a_display();
++    }
+     if (g_flight_simulator_mode &&
+         GetCurrentThreadId() != g_test_application_thread_id) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+@@ -549,7 +633,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
+             : XR_TRUE;
+     g_next_display_time += g_flight_simulator_mode
+         ? kFakeDisplayPeriod * 3
+-        : 100;
++        : g_display_latency_mode ? kFakeDisplayPeriod : 100;
+     {
+         std::scoped_lock lock(g_frame_loop_mutex);
+         if (!g_waited_display_times.empty()) {
+@@ -2084,8 +2168,8 @@ int main(int argc, char** argv) {
+             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
+             "flight-simulator|uevr-pipelined-time|inverted-fov|"
+             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
+-            "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
+-            "d3d11-bridge-unsubmitted]\n";
++            "dcs|dcs-d3d11|dcs-latency|dcs-adaptive|d3d11-bridge|"
++            "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2095,7 +2179,11 @@ int main(int argc, char** argv) {
+         argc == 4 && std::strcmp(argv[3], "d3d11-bridge-unsubmitted") == 0;
+     g_d3d11_bridge_mode = g_acquire_ahead_mode || g_unsubmitted_mode ||
+         (argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0);
+-    g_dcs_mode = g_dcs_d3d11_mode ||
++    g_adaptive_latency_mode =
++        argc == 4 && std::strcmp(argv[3], "dcs-adaptive") == 0;
++    g_display_latency_mode = g_adaptive_latency_mode ||
++        (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
++    g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+     g_cropped_subimage_mode =
+         argc == 4 && std::strcmp(argv[3], "cropped-split-eye") == 0;
+@@ -2103,7 +2191,11 @@ int main(int argc, char** argv) {
+         argc == 4 && std::strcmp(argv[3], "d3d11-double-wide") == 0;
+     g_destroy_pending_space =
+         argc == 4 && std::strcmp(argv[3], "steamvr-destroy-space") == 0;
+-    g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
++    // dcs-latency and dcs-adaptive run on a runtime that is not SteamVR, as
++    // DCS World on Pimax OpenXR does: the presenter comes by the pipelined
++    // route and paces on the runtime's own wait.
++    g_steamvr_presenter_mode = g_destroy_pending_space ||
++        (g_dcs_mode && !g_display_latency_mode) ||
+         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
+     g_single_threaded_mode =
+         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
+@@ -2146,11 +2238,19 @@ int main(int argc, char** argv) {
+             g_frames_per_application_frame = 3;
+             g_deep_pipeline = true;
+         }
++        // Adaptive 2X/3X reserves 3X's ring from the start, on a binding 3X
++        // covers - any but a D3D11 session left on the interop.
++        if (GetPrivateProfileIntW(
++                L"ofxr", L"adaptive_frame_gen", 0, ini.wstring().c_str()) != 0 &&
++            !(g_d3d11_interop_mode && !g_d3d11_bridge_mode)) {
++            g_deep_pipeline = true;
++        }
+     }
+     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
+         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
+         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
+-        !g_inverted_vertical_fov && !g_vulkan_mode && !g_swapchain_budget_mode) {
++        !g_inverted_vertical_fov && !g_vulkan_mode && !g_swapchain_budget_mode &&
++        !g_display_latency_mode) {
+         std::cerr << "unknown test mode\n";
+         return EXIT_FAILURE;
+     }
+@@ -2159,7 +2259,7 @@ int main(int argc, char** argv) {
+         CreateMutexA(nullptr, FALSE, "Local\\XRFGLayerCallChainFakeRuntimeTest");
+     const DWORD mutex_wait = execution_mutex == nullptr
+                                  ? WAIT_FAILED
+-                                 : WaitForSingleObject(execution_mutex, 30'000);
++                                 : WaitForSingleObject(execution_mutex, 120'000);
+     if (execution_mutex == nullptr ||
+         (mutex_wait != WAIT_OBJECT_0 && mutex_wait != WAIT_ABANDONED_0)) {
+         if (execution_mutex != nullptr) {
+@@ -2913,6 +3013,11 @@ int main(int argc, char** argv) {
+             projection_views[index].pose = submitted.pose;
+             projection_views[index].fov = submitted.fov;
+         }
++        if (g_display_latency_mode) {
++            std::scoped_lock lock(g_told_mutex);
++            g_told_by_pose.emplace_back(
++                projection_views[0].pose.position.x, display_time);
++        }
+ 
+         XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
+         frame_end_info.displayTime = display_time;
+@@ -3387,9 +3492,16 @@ int main(int argc, char** argv) {
+                 while (!wait_started.load(std::memory_order_acquire)) {
+                     std::this_thread::yield();
+                 }
+-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
++                if (g_display_latency_mode) {
++                    precise_sleep(std::chrono::milliseconds(2));
++                } else {
++                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
++                }
+                 ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info));
+                 wait_thread.join();
++                if (g_simulated_render_ms > 0) {
++                    precise_sleep(std::chrono::milliseconds(g_simulated_render_ms));
++                }
+                 ok = ok && XR_SUCCEEDED(next_wait_result) &&
+                     capture_fresh_application_image() &&
+                     submit_frame(pending.predictedDisplayTime) &&
+@@ -3424,11 +3536,111 @@ int main(int argc, char** argv) {
+             std::scoped_lock lock(g_end_records_mutex);
+             records_before_overlapping_frames = g_end_records.size();
+         }
+-        constexpr int kOverlappingFrames = 8;
++        // dcs-latency / dcs-adaptive: the told display time against the
++        // runtime display time each real frame was handed over for, matched
++        // through the pose the application submitted (it encodes the time it
++        // was told).
++        const auto collect_told_and_shown = [&] {
++            std::vector<std::pair<XrTime, XrTime>> pairs;
++            std::scoped_lock lock(g_end_records_mutex);
++            std::scoped_lock told_lock(g_told_mutex);
++            for (const EndFrameRecord& record : g_end_records) {
++                if (record.target != SubmittedTarget::current) {
++                    continue;
++                }
++                for (const auto& [pose_x, told] : g_told_by_pose) {
++                    if (pose_x == record.poses[0].position.x) {
++                        pairs.emplace_back(told, record.display_time);
++                        break;
++                    }
++                }
++            }
++            return pairs;
++        };
++        // The settled stretch the check is made on: this many real frames
++        // in a row told exactly the time they were shown for. Two windows of
++        // the correction, so a residual it had not corrected could not hide
++        // in it.
++        constexpr std::size_t kSettledFrames = 60;
++        const auto settled_exact = [&] {
++            const auto pairs = collect_told_and_shown();
++            if (pairs.size() < kSettledFrames) {
++                return false;
++            }
++            for (std::size_t index = pairs.size() - kSettledFrames;
++                 index < pairs.size(); ++index) {
++                if (pairs[index].first != pairs[index].second) {
++                    return false;
++                }
++            }
++            return true;
++        };
++        // Runs on until the told time has settled, within a bound. Whatever
++        // moves where real frames land - the 3X queue settling a slot deeper,
++        // the release delay probing, a switch, a stall of the machine - the
++        // correction has to measure it again and then hold; the bound is
++        // what says it did so in time. Returns the frames it took.
++        const auto run_until_settled = [&](int bound) {
++            int extra = 0;
++            while (sequence_succeeded && extra < bound && !settled_exact()) {
++                for (int step = 0; sequence_succeeded && step < 10; ++step) {
++                    sequence_succeeded = run_frame(true);
++                    ++extra;
++                }
++            }
++            return extra;
++        };
++        // dcs-latency: long enough for the correction to settle (two
++        // agreeing windows of thirty real frames), and in 3X for the queue
++        // to reach its depth first, then until it has.
++        const int kOverlappingFrames = g_adaptive_latency_mode ? 0
++            : g_display_latency_mode
++                ? (g_frames_per_application_frame > 2 ? 300 : 160)
++                : 8;
+         for (int index = 0; sequence_succeeded && index < kOverlappingFrames;
+              ++index) {
+             sequence_succeeded = run_frame(true);
+         }
++        constexpr int kSettleBound = 400;
++        int settle_frames = 0;
++        if (g_display_latency_mode && !g_adaptive_latency_mode) {
++            settle_frames = run_until_settled(kSettleBound);
++        }
++        // dcs-adaptive: 3X light until adaptive control moves it to 2X, then
++        // heavy until it moves it back to 3X, then, still in 3X, a frame
++        // that leaves 2X no headroom (so adaptive control has no reason to
++        // move again) until the told time has settled on the new shape.
++        // Each multiplier change shows in the virtual period.
++        bool adaptive_downshift_seen = false;
++        bool adaptive_upshift_seen = false;
++        bool adaptive_moved_after = false;
++        if (g_adaptive_latency_mode) {
++            int phase = 0;
++            for (int index = 0; sequence_succeeded && phase < 2 && index < 1500;
++                 ++index) {
++                g_simulated_render_ms = phase == 1 ? 30 : 0;
++                sequence_succeeded = run_frame(true);
++                const XrDuration multiplier =
++                    pending.predictedDisplayPeriod / kFakeDisplayPeriod;
++                if (phase == 0 && multiplier == 2) {
++                    adaptive_downshift_seen = true;
++                    phase = 1;
++                } else if (phase == 1 && multiplier == 3) {
++                    adaptive_upshift_seen = true;
++                    phase = 2;
++                }
++            }
++            // Over 85% of two periods (17 ms at the fake's 10 ms), well
++            // inside three.
++            g_simulated_render_ms = 20;
++            for (int index = 0; sequence_succeeded && index < 90; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            settle_frames = run_until_settled(kSettleBound);
++            adaptive_moved_after = pending.predictedDisplayPeriod !=
++                kFakeDisplayPeriod * 3;
++            g_simulated_render_ms = 0;
++        }
+         sequence_succeeded = sequence_succeeded &&
+             XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+             capture_fresh_application_image() &&
+@@ -3472,6 +3684,49 @@ int main(int argc, char** argv) {
+         const std::uint32_t off_thread =
+             g_off_thread_frame_calls.load(std::memory_order_relaxed);
+         bool valid = false;
++        if (g_display_latency_mode) {
++            // Every real frame of the settled stretch went to the runtime
++            // for exactly the display time the application was told when it
++            // waited for it: told == real presentation time. Without the
++            // correction no frame is exact in any shape.
++            const auto told_and_shown = collect_told_and_shown();
++            const bool settled = settled_exact();
++            valid = sequence_succeeded && teardown_succeeded &&
++                presenter_seen && violations == 0 && settled &&
++                settle_frames < kSettleBound &&
++                (!g_adaptive_latency_mode ||
++                 (adaptive_downshift_seen && adaptive_upshift_seen &&
++                  !adaptive_moved_after)) &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            if (!valid) {
++                std::cerr << "DCS display-time validation failed: sequence="
++                          << sequence_succeeded << " teardown="
++                          << teardown_succeeded << " promoted="
++                          << presenter_seen << " downshift="
++                          << adaptive_downshift_seen << " upshift="
++                          << adaptive_upshift_seen << " moved-after="
++                          << adaptive_moved_after << " real="
++                          << told_and_shown.size() << " settled=" << settled
++                          << " settle-frames=" << settle_frames
++                          << " period=" << kFakeDisplayPeriod
++                          << " multiplier=" << g_frames_per_application_frame
++                          << "\n  shown-told in periods, in order:";
++                for (const auto& [told, shown] : told_and_shown) {
++                    std::cerr << ' ' << (shown - told) / kFakeDisplayPeriod;
++                }
++                std::cerr << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << (g_adaptive_latency_mode
++                    ? "OpenXR DCS adaptive 2X/3X test passed: 3X -> 2X -> 3X, "
++                      "and real frames shown at the time the application was "
++                      "told"
++                    : "OpenXR DCS display-time test passed: real frames shown "
++                      "at the time the application was told")
++                      << " (settled after " << settle_frames
++                      << " extra frames)\n";
++            return EXIT_SUCCESS;
++        }
+         if (g_dcs_d3d11_mode) {
+             // The D3D11 shape never takes the presenter: no virtual period,
+             // no frame begun by a presenter, nothing to the runtime off the
+diff --git a/tests/ofxr_bridge_adaptive.ini b/tests/ofxr_bridge_adaptive.ini
+new file mode 100644
+index 0000000..5b7d196
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive.ini
+@@ -0,0 +1,17 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=1
++adaptive_frame_gen=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_adaptive_shallow.ini b/tests/ofxr_bridge_adaptive_shallow.ini
+new file mode 100644
+index 0000000..e4e065a
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_shallow.ini
+@@ -0,0 +1,17 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=0
++triple_frame_gen=0
++adaptive_frame_gen=1
++
++[diagnostics]
++logging_enabled=0
++
++[overlay]
++position=upper_right

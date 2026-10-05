@@ -1,0 +1,724 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -794,6 +794,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+         set_tests_properties(xrfg_layer_d3d11_bridge_acquire_ahead PROPERTIES TIMEOUT 60)
+ 
++        # The same bridge with a swapchain the application keeps releasing
++        # through a stretch of frames that name no layer, as DCS's quad-view
++        # swapchains behind Quad Views: copies and history captures stop after
++        # 30 such frames, the frame that names it again carries its last
++        # release, and generation restarts from a prime.
++        add_test(
++            NAME xrfg_layer_d3d11_bridge_unsubmitted
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_d3d11_bridge.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/d3d11-bridge-unsubmitted"
++                "-DMODE=d3d11-bridge-unsubmitted"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
++        set_tests_properties(xrfg_layer_d3d11_bridge_unsubmitted PROPERTIES TIMEOUT 60)
++
+         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
+         # device, so an ini asking for it exercises the layer's fallback to
+         # FidelityFX: the default scenario's exact expectations only hold if
+diff --git a/include/xrfg/d3d11_bridge.hpp b/include/xrfg/d3d11_bridge.hpp
+--- a/include/xrfg/d3d11_bridge.hpp
++++ b/include/xrfg/d3d11_bridge.hpp
+@@ -99,8 +99,33 @@ public:
+     // context signals, the layer's queue waits and copies the shared texture
+     // into the runtime's image. What the layer queues after this on the same
+     // queue - the history capture - reads the shared texture in order.
++    //
++    // A swapchain the application keeps releasing but never names in a
++    // submitted frame (DCS through Quad Views: the four quad-view swapchains
++    // are composited by the layer above and never reach the runtime) stops
++    // copying into the runtime's images once frame_ended has seen it go
++    // unsubmitted for kUnsubmittedFramesBeforeSkip frames in a row. Such a
++    // release does nothing on either queue and returns S_FALSE: the caller
++    // must then queue nothing that reads the shared texture (the layer skips
++    // the frame-generation history capture with it), because no hand-over
++    // orders the layer's queue after the application's rendering. The
++    // decision is taken under the bridge's own lock, so it cannot disagree
++    // with what the release did.
+     [[nodiscard]] HRESULT release(std::uint32_t index) noexcept;
+ 
++    // Once per application xrEndFrame of the session, before the frame goes
++    // downstream: `submitted` says whether the frame names this swapchain.
++    // A swapchain that skipped its copies and is named again gets the image
++    // it released last copied now, ahead of the submission, and never skips
++    // again. Returns S_FALSE when it queued such a copy (the caller then
++    // marks the release for the runtime's queue), S_OK otherwise.
++    [[nodiscard]] HRESULT frame_ended(bool submitted) noexcept;
++
++    // Whether a release copies into the runtime's image right now.
++    [[nodiscard]] bool copies_on_release() const noexcept;
++
++    static constexpr std::uint32_t kUnsubmittedFramesBeforeSkip = 30;
++
+     // Everything the layer will read from image `index` this frame has been
+     // queued: signal, so the next before_write of this image waits for it.
+     [[nodiscard]] HRESULT mark_read(std::uint32_t index) noexcept;
+diff --git a/src/d3d11/d3d11_bridge.cpp b/src/d3d11/d3d11_bridge.cpp
+--- a/src/d3d11/d3d11_bridge.cpp
++++ b/src/d3d11/d3d11_bridge.cpp
+@@ -92,6 +92,19 @@ struct D3D11BridgeSwapchain::Impl {
+     std::array<CopyList, kCopyListCount> copy_lists{};
+     std::size_t next_copy_list{};
+     bool enabled{};
++    // Release copies into the runtime's images are skipped while the
++    // swapchain goes unsubmitted (see D3D11BridgeSwapchain::release).
++    // `skipping`: releases leave the runtime's image alone. `pinned`: the
++    // swapchain was named again after skipping and copies for good, so a
++    // swapchain submitted only now and then costs one late copy, not one per
++    // transition. `stale_index`: the last image released without a copy,
++    // which a frame naming the swapchain would otherwise show stale.
++    bool skipping{};
++    bool pinned{};
++    bool released_since_frame{};
++    std::uint32_t unsubmitted_frames{};
++    std::uint32_t stale_index{kNoStaleIndex};
++    static constexpr std::uint32_t kNoStaleIndex = std::numeric_limits<std::uint32_t>::max();
+ 
+     ~Impl() {
+         if (fence_event != nullptr) {
+@@ -476,13 +489,10 @@ struct D3D11BridgeSwapchain::Impl {
+         }
+     }
+ 
+-    [[nodiscard]] HRESULT release(std::uint32_t index) noexcept {
+-        if (!enabled || index >= runtime_images.size()) {
+-            return E_INVALIDARG;
+-        }
+-        if (path == D3D11BridgePath::depth_private) {
+-            return S_OK;
+-        }
++    // The application's texture into the shared one (copy and resolve
++    // paths), then the hand-over: its context signals and the layer's queue
++    // waits, so whatever the queue does next reads the finished rendering.
++    [[nodiscard]] HRESULT hand_over(std::uint32_t index) noexcept {
+         move_own_to_shared(index);
+         // The application's rendering into the shared texture, complete on
+         // its context, before the layer's queue reads it.
+@@ -496,6 +506,61 @@ struct D3D11BridgeSwapchain::Impl {
+         result = d3d12_queue->Wait(d3d12_fence.Get(), rendered);
+         if (FAILED(result)) {
+             enabled = false;
++        }
++        return result;
++    }
++
++    [[nodiscard]] HRESULT release(std::uint32_t index) noexcept {
++        if (!enabled || index >= runtime_images.size()) {
++            return E_INVALIDARG;
++        }
++        if (path == D3D11BridgePath::depth_private) {
++            return S_OK;
++        }
++        released_since_frame = true;
++        if (skipping) {
++            // Nothing downstream reads the runtime's image of a swapchain no
++            // frame names; it is brought up to date if a frame ever does.
++            stale_index = index;
++            return S_FALSE;
++        }
++        return copy_to_runtime(index);
++    }
++
++    [[nodiscard]] HRESULT frame_ended(bool submitted) noexcept {
++        if (!enabled || path == D3D11BridgePath::depth_private) {
++            return S_OK;
++        }
++        const bool released = released_since_frame;
++        released_since_frame = false;
++        if (submitted) {
++            unsubmitted_frames = 0;
++            if (!skipping) {
++                return S_OK;
++            }
++            skipping = false;
++            pinned = true;
++            if (stale_index == kNoStaleIndex) {
++                return S_OK;
++            }
++            const std::uint32_t index = stale_index;
++            stale_index = kNoStaleIndex;
++            const HRESULT result = copy_to_runtime(index);
++            return FAILED(result) ? result : S_FALSE;
++        }
++        // Only frames the application released this swapchain into count: a
++        // swapchain it has stopped rendering costs nothing either way.
++        if (released && !skipping && !pinned &&
++            ++unsubmitted_frames >=
++                D3D11BridgeSwapchain::kUnsubmittedFramesBeforeSkip) {
++            skipping = true;
++        }
++        return S_OK;
++    }
++
++    [[nodiscard]] HRESULT copy_to_runtime(std::uint32_t index) noexcept {
++        HRESULT result = hand_over(index);
++        if (FAILED(result)) {
+             return result;
+         }
+         CopyList* copy = nullptr;
+@@ -668,6 +733,24 @@ HRESULT D3D11BridgeSwapchain::release(std::uint32_t index) noexcept {
+     }
+ }
+ 
++HRESULT D3D11BridgeSwapchain::frame_ended(bool submitted) noexcept {
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        return impl_->frame_ended(submitted);
++    } catch (...) {
++        return E_FAIL;
++    }
++}
++
++bool D3D11BridgeSwapchain::copies_on_release() const noexcept {
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        return impl_->path != D3D11BridgePath::depth_private && !impl_->skipping;
++    } catch (...) {
++        return true;
++    }
++}
++
+ HRESULT D3D11BridgeSwapchain::mark_read(std::uint32_t index) noexcept {
+     try {
+         std::scoped_lock lock(impl_->mutex);
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5821,12 +5821,32 @@ XrResult layer_release_swapchain_image_impl(
+             }
+         }
+     }
++    std::unique_lock<std::mutex> gpu_lock;
++    if (state->session->manual_control.stop_requested() || !state->session->menu_enabled) {
++        // Preserve the application's acquire/wait/release bookkeeping, but
++        // stop recording new bridge history after the manual arm is revoked.
++        history.reset();
++        interop.reset();
++    }
+     // Bridged: the application's rendering goes to the runtime's image now,
+     // whatever generation does with it afterwards. A failed copy is logged
+     // and the release still goes down, so the runtime shows its last content
+     // rather than the session failing.
++    //
++    // A swapchain no frame has named for a while (D3D11BridgeSwapchain::
++    // release returns S_FALSE: DCS's quad-view swapchains behind Quad Views)
++    // is neither copied nor captured: generation only ever runs on swapchains
++    // a projection layer names, and nothing ordered the layer's queue after
++    // the application's rendering. Its last_released_capture is left empty
++    // below, so a frame that names it again cannot generate from history
++    // older than its release; note_bridged_submissions restarts continuity
++    // when it comes back.
+     if (bridge && candidate_index) {
+         const HRESULT copy_result = bridge->release(*candidate_index);
++        if (copy_result == S_FALSE) {
++            history.reset();
++            interop.reset();
++        }
+         if (FAILED(copy_result)) {
+             xrfg::bridge_flight_logger().event(
+                 xrfg::BridgeFlightOperation::d3d11_bridge,
+@@ -5836,14 +5856,6 @@ XrResult layer_release_swapchain_image_impl(
+                 static_cast<std::uint64_t>(static_cast<std::uint32_t>(copy_result)));
+         }
+     }
+-
+-    std::unique_lock<std::mutex> gpu_lock;
+-    if (state->session->manual_control.stop_requested() || !state->session->menu_enabled) {
+-        // Preserve the application's acquire/wait/release bookkeeping, but
+-        // stop recording new bridge history after the manual arm is revoked.
+-        history.reset();
+-        interop.reset();
+-    }
+     if (candidate_index && history) {
+         gpu_lock = std::unique_lock<std::mutex>(state->session->gpu_mutex);
+     }
+@@ -10577,6 +10589,149 @@ struct PrivateDepthStrip {
+     return &storage.info;
+ }
+ 
++// The swapchains an application's frame names, for the D3D11 bridge's
++// release copies (D3D11BridgeSwapchain::release). Returns false when the
++// frame carries anything this layer cannot see every swapchain of - a layer
++// type or chained structure it does not know - and the caller then treats
++// every swapchain as named, which keeps every copy.
++[[nodiscard]] bool collect_named_swapchains(
++    const XrFrameEndInfo* end_info,
++    std::vector<XrSwapchain>* named) {
++    if (end_info == nullptr || end_info->type != XR_TYPE_FRAME_END_INFO ||
++        end_info->next != nullptr ||
++        (end_info->layerCount != 0 && end_info->layers == nullptr)) {
++        return false;
++    }
++    for (std::uint32_t layer_index = 0; layer_index < end_info->layerCount; ++layer_index) {
++        const XrCompositionLayerBaseHeader* const layer = end_info->layers[layer_index];
++        if (layer == nullptr) {
++            continue;
++        }
++        if (layer->next != nullptr) {
++            return false;
++        }
++        switch (layer->type) {
++            case XR_TYPE_COMPOSITION_LAYER_PROJECTION: {
++                const auto* projection =
++                    reinterpret_cast<const XrCompositionLayerProjection*>(layer);
++                if (projection->viewCount != 0 && projection->views == nullptr) {
++                    return false;
++                }
++                for (std::uint32_t view_index = 0; view_index < projection->viewCount;
++                     ++view_index) {
++                    const XrCompositionLayerProjectionView& view =
++                        projection->views[view_index];
++                    named->push_back(view.subImage.swapchain);
++                    for (const auto* next = static_cast<const XrBaseInStructure*>(view.next);
++                         next != nullptr; next = next->next) {
++                        if (next->type != XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
++                            return false;
++                        }
++                        named->push_back(
++                            reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(next)
++                                ->subImage.swapchain);
++                    }
++                }
++                break;
++            }
++            case XR_TYPE_COMPOSITION_LAYER_QUAD:
++                named->push_back(
++                    reinterpret_cast<const XrCompositionLayerQuad*>(layer)->subImage.swapchain);
++                break;
++            case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR:
++                named->push_back(reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer)
++                                     ->subImage.swapchain);
++                break;
++            case XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR:
++                named->push_back(reinterpret_cast<const XrCompositionLayerEquirectKHR*>(layer)
++                                     ->subImage.swapchain);
++                break;
++            case XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR:
++                named->push_back(reinterpret_cast<const XrCompositionLayerEquirect2KHR*>(layer)
++                                     ->subImage.swapchain);
++                break;
++            case XR_TYPE_COMPOSITION_LAYER_CUBE_KHR:
++                named->push_back(
++                    reinterpret_cast<const XrCompositionLayerCubeKHR*>(layer)->swapchain);
++                break;
++            default:
++                return false;
++        }
++    }
++    return true;
++}
++
++// A bridged D3D11 session: tells every bridged swapchain whether this frame
++// names it, before anything of the frame goes downstream. A swapchain that
++// had stopped copying and is named again gets its last released image copied
++// here, on the session's queue; the release mark that follows puts that copy
++// ahead of the binding queue's join for this frame, as a copy at release
++// would have been. Called before app_end_frame_release_value is taken.
++void note_bridged_submissions(
++    const std::shared_ptr<SessionState>& state,
++    const XrFrameEndInfo* end_info) noexcept {
++    try {
++        if (!state->d3d11_bridge) {
++            return;
++        }
++        std::vector<XrSwapchain> named;
++        const bool complete = collect_named_swapchains(end_info, &named);
++        bool caught_up = false;
++        bool restart_continuity = false;
++        for (const auto& swapchain_state : find_swapchains(state)) {
++            std::shared_ptr<xrfg::D3D11BridgeSwapchain> bridge;
++            {
++                std::scoped_lock lock(swapchain_state->mutex);
++                bridge = swapchain_state->bridge;
++            }
++            if (!bridge) {
++                continue;
++            }
++            const bool submitted = !complete ||
++                std::find(named.begin(), named.end(), swapchain_state->handle) != named.end();
++            const bool copied_before = bridge->copies_on_release();
++            const HRESULT result = bridge->frame_ended(submitted);
++            const bool copies_now = bridge->copies_on_release();
++            if (copies_now && !copied_before) {
++                // Back after skipping: its releases were not captured, so a
++                // generator that ran on it holds history from before the gap.
++                // Start over, as after any break in the sequence: this frame
++                // passes through (no capture) or primes, the next pairs.
++                std::scoped_lock lock(swapchain_state->mutex);
++                restart_continuity = restart_continuity ||
++                    swapchain_state->frame_generation != nullptr;
++            }
++            if (copies_now != copied_before) {
++                // 5: the swapchain's release copies stopped (c = 0) or
++                // resumed (c = 1).
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::d3d11_bridge,
++                    5,
++                    handle_value(swapchain_state->handle),
++                    0,
++                    copies_now ? 1U : 0U);
++            }
++            if (result == S_FALSE) {
++                caught_up = true;
++            } else if (FAILED(result)) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::d3d11_bridge,
++                    4,
++                    handle_value(swapchain_state->handle),
++                    0,
++                    static_cast<std::uint64_t>(static_cast<std::uint32_t>(result)));
++            }
++        }
++        if (caught_up) {
++            mark_application_release(state.get());
++        }
++        if (restart_continuity) {
++            clear_generation_continuity(state);
++        }
++    } catch (...) {
++    }
++}
++
+ // Follows the tray's "3X Frame Gen" switch while the session runs. Called at
+ // the top of the application's xrEndFrame, under frame_call_mutex, before
+ // this frame is prepared.
+@@ -10681,6 +10836,9 @@ XrResult layer_end_frame_impl(
+             }
+         }
+     }
++    // D3D11 bridge: copies skipped for swapchains no frame named are caught
++    // up here if this one names them, before the counter below is taken.
++    note_bridged_submissions(state, end_info);
+     // Every image of the application's that this frame names was released
+     // before this call, so the counter as it stands now covers them all.
+     {
+diff --git a/tests/d3d11_bridge_tests.cpp b/tests/d3d11_bridge_tests.cpp
+--- a/tests/d3d11_bridge_tests.cpp
++++ b/tests/d3d11_bridge_tests.cpp
+@@ -423,6 +423,163 @@ void test_resolve(const Devices& devices) {
+         "resolve: the runtime's single-sample image holds the resolved colour");
+ }
+ 
++// Copies into the runtime's images for a swapchain no frame names: DCS
++// through Quad Views releases four quad-view swapchains every frame that
++// only the layer above reads. The bridge stops copying them after
++// kUnsubmittedFramesBeforeSkip frames, and a frame that names one again gets
++// the image released last copied before it goes down, after which the
++// swapchain copies for good.
++struct UnsubmittedFixture {
++    std::array<ComPtr<ID3D12Resource>, 3> runtime;
++    xrfg::D3D11BridgeSwapchain bridge;
++};
++
++[[nodiscard]] bool create_unsubmitted_fixture(
++    const Devices& devices, UnsubmittedFixture* fixture, const char* name) {
++    std::vector<ID3D12Resource*> images;
++    for (auto& image : fixture->runtime) {
++        image = create_runtime_image(devices.d3d12.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, false, 1);
++        if (!image) {
++            expect(false, name);
++            return false;
++        }
++        images.push_back(image.Get());
++    }
++    xrfg::D3D11BridgeSwapchainDescription requested{};
++    requested.requested_format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    requested.requested_sample_count = 1;
++    std::uint32_t stage = 0;
++    const HRESULT init = fixture->bridge.initialize(
++        devices.d3d11.Get(), devices.context.Get(), devices.d3d12.Get(),
++        devices.queue.Get(), images, requested, &stage);
++    expect(SUCCEEDED(init), name);
++    return SUCCEEDED(init);
++}
++
++// Paints image `index` with `red` and releases it, as an application frame.
++// `release_result` receives what the release returned (S_FALSE: skipped).
++[[nodiscard]] bool render_and_release(
++    const Devices& devices, xrfg::D3D11BridgeSwapchain& bridge,
++    std::uint32_t index, std::uint8_t red, HRESULT* release_result = nullptr) {
++    std::vector<std::uint8_t> pixels(8 * 8 * 4, 0);
++    for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
++        pixels[offset] = red;
++        pixels[offset + 3] = 255;
++    }
++    if (FAILED(bridge.before_write(index))) return false;
++    devices.context->UpdateSubresource(
++        bridge.d3d11_images()[index], 0, nullptr, pixels.data(), 8 * 4, 0);
++    const HRESULT released = bridge.release(index);
++    if (release_result != nullptr) *release_result = released;
++    return SUCCEEDED(released) && SUCCEEDED(bridge.mark_read(index));
++}
++
++[[nodiscard]] int runtime_red(const Devices& devices, ID3D12Resource* image) {
++    std::vector<std::uint8_t> bytes;
++    UINT pitch = 0;
++    if (!read_back(devices, image, false, &bytes, &pitch) || bytes.empty()) {
++        return -1;
++    }
++    return bytes[0];
++}
++
++void test_unsubmitted_skip(const Devices& devices) {
++    UnsubmittedFixture fixture;
++    if (!create_unsubmitted_fixture(devices, &fixture, "unsubmitted: bridge initialised")) {
++        return;
++    }
++    xrfg::D3D11BridgeSwapchain& bridge = fixture.bridge;
++    constexpr std::uint32_t threshold = xrfg::D3D11BridgeSwapchain::kUnsubmittedFramesBeforeSkip;
++    // Frames that release nothing never count towards skipping.
++    for (std::uint32_t frame = 0; frame < threshold * 2; ++frame) {
++        expect(SUCCEEDED(bridge.frame_ended(false)), "unsubmitted: idle frame_ended");
++    }
++    expect(bridge.copies_on_release(), "unsubmitted: frames without releases do not count");
++
++    std::uint32_t frame = 0;
++    std::uint32_t index = 0;
++    std::uint8_t red = 0;
++    // Up to the threshold every release still copies.
++    bool copied_every_frame = true;
++    for (; frame < threshold; ++frame) {
++        index = frame % 3;
++        red = static_cast<std::uint8_t>(10 + frame);
++        expect(bridge.copies_on_release(), "unsubmitted: copies before the threshold");
++        HRESULT released = E_FAIL;
++        expect(render_and_release(devices, bridge, index, red, &released), "unsubmitted: release");
++        expect(released == S_OK, "unsubmitted: a copying release returns S_OK");
++        expect(SUCCEEDED(bridge.wait_for_idle()), "unsubmitted: idle");
++        copied_every_frame = copied_every_frame &&
++            runtime_red(devices, fixture.runtime[index].Get()) == red;
++        expect(SUCCEEDED(bridge.frame_ended(false)), "unsubmitted: frame_ended");
++    }
++    expect(copied_every_frame, "unsubmitted: every release before the threshold reached the runtime");
++    expect(!bridge.copies_on_release(), "unsubmitted: copies stop at the threshold");
++
++    // Skipping: the runtime's image keeps its old content.
++    for (std::uint32_t skipped = 0; skipped < 4; ++skipped, ++frame) {
++        index = frame % 3;
++        red = static_cast<std::uint8_t>(10 + frame);
++        // S_FALSE tells the layer to queue no read of the shared texture
++        // (no history capture) after it.
++        HRESULT released = E_FAIL;
++        expect(render_and_release(devices, bridge, index, red, &released),
++            "unsubmitted: skipped release");
++        expect(released == S_FALSE, "unsubmitted: a skipped release returns S_FALSE");
++        expect(SUCCEEDED(bridge.frame_ended(false)), "unsubmitted: skipped frame_ended");
++    }
++    expect(SUCCEEDED(bridge.wait_for_idle()), "unsubmitted: idle after skipping");
++    expect(runtime_red(devices, fixture.runtime[index].Get()) != red,
++        "unsubmitted: a skipped release leaves the runtime's image alone");
++
++    // Named again: the last released image is caught up before the frame
++    // goes down, and from then on every release copies.
++    expect(bridge.frame_ended(true) == S_FALSE, "unsubmitted: catch-up copy queued");
++    expect(SUCCEEDED(bridge.wait_for_idle()), "unsubmitted: idle after catch-up");
++    expect(runtime_red(devices, fixture.runtime[index].Get()) == red,
++        "unsubmitted: the catch-up copy holds the last released image");
++    expect(bridge.copies_on_release(), "unsubmitted: copies resume once named");
++    copied_every_frame = true;
++    for (std::uint32_t pinned = 0; pinned < threshold * 2; ++pinned, ++frame) {
++        index = frame % 3;
++        red = static_cast<std::uint8_t>(10 + frame);
++        HRESULT released = E_FAIL;
++        expect(render_and_release(devices, bridge, index, red, &released), "unsubmitted: pinned release");
++        expect(released == S_OK, "unsubmitted: a pinned release copies");
++        expect(SUCCEEDED(bridge.wait_for_idle()), "unsubmitted: pinned idle");
++        copied_every_frame = copied_every_frame &&
++            runtime_red(devices, fixture.runtime[index].Get()) == red;
++        expect(bridge.frame_ended(false) == S_OK, "unsubmitted: pinned frame_ended");
++    }
++    expect(copied_every_frame && bridge.copies_on_release(),
++        "unsubmitted: a swapchain named after skipping copies for good");
++}
++
++void test_submitted_never_skips(const Devices& devices) {
++    UnsubmittedFixture fixture;
++    if (!create_unsubmitted_fixture(devices, &fixture, "submitted: bridge initialised")) {
++        return;
++    }
++    xrfg::D3D11BridgeSwapchain& bridge = fixture.bridge;
++    bool copied_every_frame = true;
++    for (std::uint32_t frame = 0;
++         frame < xrfg::D3D11BridgeSwapchain::kUnsubmittedFramesBeforeSkip * 3; ++frame) {
++        const std::uint32_t index = frame % 3;
++        const auto red = static_cast<std::uint8_t>(20 + frame);
++        HRESULT released = E_FAIL;
++        expect(render_and_release(devices, bridge, index, red, &released), "submitted: release");
++        expect(released == S_OK, "submitted: every release copies");
++        expect(SUCCEEDED(bridge.wait_for_idle()), "submitted: idle");
++        copied_every_frame = copied_every_frame &&
++            runtime_red(devices, fixture.runtime[index].Get()) == red;
++        // Named every other frame, as a swapchain a slower layer submits:
++        // the run of unnamed frames never reaches the threshold.
++        expect(bridge.frame_ended(frame % 2 == 0) == S_OK, "submitted: frame_ended");
++    }
++    expect(copied_every_frame && bridge.copies_on_release(),
++        "submitted: a swapchain frames keep naming copies every release");
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -436,6 +593,8 @@ int main() {
+     test_depth(devices);
+     test_packed_depth(devices);
+     test_resolve(devices);
++    test_unsubmitted_skip(devices);
++    test_submitted_never_skips(devices);
+     if (g_failures != 0) {
+         std::cerr << g_failures << " D3D11 bridge check(s) failed\n";
+         return 1;
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -98,6 +98,16 @@ bool g_d3d11_bridge_mode = false;
+ // ahead of the one it renders, and the first acquire is outstanding across
+ // a session restart (Ready or Not's VR mod acquires before xrBeginSession).
+ bool g_acquire_ahead_mode = false;
++// d3d11-bridge-unsubmitted: the application keeps rendering and releasing its
++// swapchain through a stretch of frames that submit no layers (as DCS's
++// quad-view swapchains never reach the runtime behind Quad Views), then names
++// it again. The bridge stops copying, and the layer stops capturing history,
++// after kUnsubmittedFramesBeforeSkip such frames; the frame that names it
++// again carries the last release, and generation restarts from a prime
++// rather than from history older than the gap.
++bool g_unsubmitted_mode = false;
++// Frames ended with no layers at all (d3d11-bridge-unsubmitted).
++bool g_submit_no_layers = false;
+ std::atomic<bool> g_acquire_ahead_active{false};
+ std::atomic<std::uint32_t> g_acquire_ahead_calls{0};
+ std::atomic<bool> g_bridge_session_bound{false};
+@@ -2074,13 +2084,16 @@ int main(int argc, char** argv) {
+             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
+             "flight-simulator|uevr-pipelined-time|inverted-fov|"
+             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
+-            "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead]\n";
++            "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
++            "d3d11-bridge-unsubmitted]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+     g_acquire_ahead_mode =
+         argc == 4 && std::strcmp(argv[3], "d3d11-bridge-acquire-ahead") == 0;
+-    g_d3d11_bridge_mode = g_acquire_ahead_mode ||
++    g_unsubmitted_mode =
++        argc == 4 && std::strcmp(argv[3], "d3d11-bridge-unsubmitted") == 0;
++    g_d3d11_bridge_mode = g_acquire_ahead_mode || g_unsubmitted_mode ||
+         (argc == 4 && std::strcmp(argv[3], "d3d11-bridge") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -2904,7 +2917,8 @@ int main(int argc, char** argv) {
+         XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
+         frame_end_info.displayTime = display_time;
+         frame_end_info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+-        frame_end_info.layerCount = g_flight_simulator_mode ? 2 : 1;
++        frame_end_info.layerCount =
++            g_submit_no_layers ? 0 : (g_flight_simulator_mode ? 2 : 1);
+         frame_end_info.layers = layers;
+         // SteamVR throttles the *inline* second cycle, not the application's
+         // own wait. Mark the window so the fake runtime can tell them apart by
+@@ -3197,8 +3211,28 @@ int main(int argc, char** argv) {
+                     paint_d3d11_image(
+                         d3d11_swapchain_images[acquired_index].texture, red));
+         };
+-        for (int index = 0; index < 10; ++index) {
++        // d3d11-bridge-unsubmitted: 10 frames as usual, kUnsubmittedGap
++        // frames that end with no layers while the swapchain is still
++        // rendered and released, then kUnsubmittedAfter frames naming it again.
++        constexpr int kUnsubmittedBefore = 10;
++        constexpr int kUnsubmittedGap = 35;
++        constexpr int kUnsubmittedAfter = 12;
++        constexpr int kUnsubmittedSkipFrom = 30; // kUnsubmittedFramesBeforeSkip
++        const int frame_count = g_unsubmitted_mode
++            ? kUnsubmittedBefore + kUnsubmittedGap + kUnsubmittedAfter
++            : 10;
++        std::uint32_t synthetic_at_resume = 0;
++        int stale_checks = 0;
++        for (int index = 0; index < frame_count; ++index) {
+             const auto red = static_cast<std::uint8_t>(40 + index * 20);
++            const int gap_index = index - kUnsubmittedBefore;
++            const bool in_gap = g_unsubmitted_mode && gap_index >= 0 &&
++                gap_index < kUnsubmittedGap;
++            g_submit_no_layers = in_gap;
++            if (g_unsubmitted_mode && gap_index == kUnsubmittedGap) {
++                synthetic_at_resume =
++                    g_synthetic_acquire_calls.load(std::memory_order_relaxed);
++            }
+             frame_sequence_succeeded = frame_sequence_succeeded &&
+                 XR_SUCCEEDED(wait_frame(
+                     session, &frame_wait_info, &application_frame)) &&
+@@ -3219,14 +3253,20 @@ int main(int argc, char** argv) {
+                 ++pixel_failures;
+             }
+             // d3d11-bridge: what the application painted into the D3D11
+-            // texture is in the runtime's D3D12 image after the release.
++            // texture is in the runtime's D3D12 image after the release -
++            // except, in the unsubmitted mode, once the gap has run long
++            // enough for the bridge to stop copying: then the runtime's image
++            // must keep older content. The first frame after the gap names
++            // the swapchain again and has to find its last release there.
+             if (g_d3d11_bridge_mode && frame_sequence_succeeded) {
+                 std::uint8_t found = 0;
++                const bool skipped = in_gap && gap_index >= kUnsubmittedSkipFrom;
+                 if (!d3d12_image_first_red(
+                         g_application_swapchain_images[acquired_index].Get(), &found) ||
+-                    found != red) {
++                    (skipped ? found == red : found != red)) {
+                     ++pixel_failures;
+                 }
++                stale_checks += skipped ? 1 : 0;
+             }
+         }
+         const bool teardown_succeeded =
+@@ -3243,6 +3283,17 @@ int main(int argc, char** argv) {
+             g_off_thread_frame_calls.load(std::memory_order_relaxed);
+         const std::uint32_t synthetic_acquires =
+             g_synthetic_acquire_calls.load(std::memory_order_relaxed);
++        // d3d11-bridge-unsubmitted: after the gap the first frame has no
++        // capture (its release was not captured) and passes through, the
++        // next primes, every later one pairs - so at most kUnsubmittedAfter - 2
++        // synthetics, and at least one fewer for slack. More would mean a
++        // pair built on history from before the gap; none would mean the
++        // return was quarantined.
++        const std::uint32_t resumed_synthetics = synthetic_acquires - synthetic_at_resume;
++        const bool unsubmitted_valid = !g_unsubmitted_mode ||
++            (stale_checks == kUnsubmittedGap - kUnsubmittedSkipFrom &&
++             resumed_synthetics >= static_cast<std::uint32_t>(kUnsubmittedAfter - 4) &&
++             resumed_synthetics <= static_cast<std::uint32_t>(kUnsubmittedAfter - 2));
+         // swapchain-budget: exactly one refusal, the deeper attempt's fourth
+         // private swapchain, and every swapchain the layer got is given back.
+         const std::uint32_t refusals = g_budget_refusals.load(std::memory_order_relaxed);
+@@ -3254,7 +3305,7 @@ int main(int argc, char** argv) {
+         // inline here; only the single-threaded device forbids a presenter.
+         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
+             (off_thread == 0 || g_vulkan_mode) && pixel_failures == 0 &&
+-            budget_valid &&
++            budget_valid && unsubmitted_valid &&
+             (!g_d3d11_bridge_mode ||
+              g_bridge_session_bound.load(std::memory_order_acquire)) &&
+             // The private depth swapchain's information never reaches the
+@@ -3267,6 +3318,7 @@ int main(int argc, char** argv) {
+         if (!valid) {
+             std::cerr << (g_vulkan_mode ? "Vulkan"
+                           : g_acquire_ahead_mode ? "D3D11 bridge, acquire ahead"
++                          : g_unsubmitted_mode ? "D3D11 bridge, unsubmitted"
+                           : g_d3d11_bridge_mode ? "D3D11 bridge"
+                                                 : "single-threaded D3D11")
+                       << " validation failed: sequence="
+@@ -3274,6 +3326,8 @@ int main(int argc, char** argv) {
+                       << teardown_succeeded << " off-thread=" << off_thread
+                       << " synthetic=" << synthetic_acquires
+                       << " stale-pixels=" << pixel_failures
++                      << " skipped-checks=" << stale_checks
++                      << " resumed-synthetic=" << resumed_synthetics
+                       << " private-depth=" << private_depth
+                       << " budget-refusals=" << refusals
+                       << " creates=" << g_create_swapchain_calls.load()

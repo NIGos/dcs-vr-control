@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DcsVr.App/DcsVr.App.csproj" />
+    <Project Path="src/DcsVr.Cli/DcsVr.Cli.csproj" />
+    <Project Path="src/DcsVr.Core/DcsVr.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DcsVr.Tests/DcsVr.Tests.csproj" />
+  </Folder>
+</Solution>
