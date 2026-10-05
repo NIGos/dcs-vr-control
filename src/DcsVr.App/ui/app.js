@@ -1,14 +1,14 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const pages = [
-  ['overview','Overview','Launch status, the four features and your last flight at a glance.','Status at a glance','M10 1 13 8 19 12V15L12 12V18L10 20 8 18V12L1 15V12L7 8Z'],
-  ['foveation','Quad Views','Foveated rendering: high detail where you look, less in the periphery.','Foveated rendering','M1 5H19M1 15H19M5 2V8M13 12V18'],
-  ['dlss','DLSS 5','DLSS 5 neural rendering and Foveated DLSS.','Neural rendering','M3 3 10 1 17 3 19 10 17 17 10 19 3 17 1 10Z M3 3 10 10 17 3M10 10 17 17M10 10 3 17M10 1V19'],
-  ['framegen','Framegen','OFXR frame generation, the DCS frame limit and in-headset diagnostics.','Generation & limit','M10 1A9 9 0 1 1 1 10 M10 4V10L15 13 M1 1V7H7'],
-  ['boost','CPU Boost','Process priority, CPU cores and the DCS prefetch fix while DCS runs.','Processor scheduling','M5 5H15V15H5Z M8 1V5M12 1V5M8 15V19M12 15V19M1 8H5M1 12H5M15 8H19M15 12H19'],
-  ['setup','Game & headset','DCS files, the headset runtime and, on the Sboys route, its driver.','Paths & drivers','M1 1H8V8H1Z M12 1H19V8H12Z M1 12H8V19H1Z M12 12H19V19H12Z'],
-  ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M1 16V20H20M3 12 7 8 11 12 17 2M14 2H17V5'],
-  ['recovery','Recovery','Put back the original files DCS VR Control changed, in one step.','Original files','M3 7A8 8 0 1 1 2 14M1 1V8H8M10 6V11L14 13']
+  ['overview','Overview','Launch status, the four features and your last flight at a glance.','Status at a glance','M3.5 16.5a8.5 8.5 0 1 1 17 0 M12 16.5l4.2-5.8 M6.3 11.4l1.1.7 M12 8.2v1.3 M17.7 11.4l-1.1.7 M13.3 16.5a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0Z M5 20h14'],
+  ['foveation','Quad Views','Foveated rendering: high detail where you look, less in the periphery.','Foveated rendering','M3 8V5a2 2 0 0 1 2-2h3 M16 3h3a2 2 0 0 1 2 2v3 M21 16v3a2 2 0 0 1-2 2h-3 M8 21H5a2 2 0 0 1-2-2v-3 M6 12c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4s-4.4-1.3-6-4Z M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'],
+  ['dlss','DLSS 5','DLSS 5 neural rendering and Foveated DLSS.','Neural rendering','M10 3c.6 3.8 2.2 5.4 6 6-3.8.6-5.4 2.2-6 6-.6-3.8-2.2-5.4-6-6 3.8-.6 5.4-2.2 6-6Z M18 14c.3 1.8 1.1 2.6 3 3-1.9.4-2.7 1.2-3 3-.3-1.8-1.1-2.6-3-3 1.9-.4 2.7-1.2 3-3Z'],
+  ['framegen','Framegen','OFXR frame generation, the DCS frame limit and in-headset diagnostics.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
+  ['boost','CPU Boost','Process priority, CPU cores and the DCS prefetch fix while DCS runs.','Processor scheduling','M6 6h12v12H6Z M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3 M12.8 8.5 10.2 12.3h3.6l-2.6 3.7'],
+  ['setup','Game & headset','DCS files, the headset runtime and, on the Sboys route, its driver.','Paths & drivers','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
+  ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
+  ['recovery','Recovery','Put back the original files DCS VR Control changed, in one step.','Original files','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
 ];
 // The feature checklist in the right panel; each feature has its own page.
 const FEATURES = [
@@ -865,7 +865,7 @@ function revealSetting(f) {
   if (!f.element.hidden && !f.input.disabled) { if (!['INPUT','BUTTON','SELECT','TEXTAREA'].includes(f.input.tagName)) f.input.tabIndex = -1; f.input.focus({preventScroll:true}); }
 }
 async function initialize() {
-  pages.forEach((p,index) => { const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = p[1]+' (Ctrl '+(index+1)+')'; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 20 21" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
+  pages.forEach((p,index) => { const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = p[1]+' (Ctrl '+(index+1)+')'; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
   buildFields(); buildFeatureList(); navigate('overview');
   [['launch','launch'],['apply','apply'],['refresh','refresh'],['importProfile','import'],['saveProfile','save'],['resetNeural','resetNeural'],['export','export'],['prepareSboys','prepareSboys'],['importSboys','importSboys'],['openSboys','openSboys'],['checkReadiness','checkReadiness']].forEach(([id,action]) => $(id).addEventListener('click',() => run(action).catch(()=>{})));
   $('refreshBoostPlan').addEventListener('click',() => refreshBoostPlan(0));

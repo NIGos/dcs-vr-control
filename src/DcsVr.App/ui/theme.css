@@ -20,7 +20,7 @@ p{color:var(--muted)}
 .rail .brand img{width:34px;height:34px}
 nav{gap:4px;width:100%}
 .nav-item{justify-content:center;padding:11px 0;border-radius:6px;color:var(--accent);border:0}
-.nav-item svg{width:24px;height:24px;stroke-width:1.5}
+.nav-item svg{width:22px;height:22px;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .nav-item:hover{background:#ffffff0d}
 .nav-item.selected{background:var(--accent-dim);color:var(--accent-hi)}
 .nav-item.selected:before{left:-8px;width:3px;height:60%;top:20%;border-radius:2px;background:var(--accent);box-shadow:none}
