@@ -1150,4 +1150,14 @@ set_target_properties(CheekyFakeDcsLayer PROPERTIES PREFIX "" OUTPUT_NAME Cheeky
 add_dependencies(CheekyRuntimeHostTests CheekyFakeDcsLayer)
 """)
 
+# The transport's GPU-time readback polls its queries without flushing DCS's
+# immediate context (a result not ready yet is simply read on a later frame),
+# as the hooks' own timing already does.
+replace(transport, '''    if (context->GetData(slot.timing_disjoint, &disjoint, sizeof(disjoint), 0U) != S_OK ||
+        context->GetData(slot.timing_begin, &begin, sizeof(begin), 0U) != S_OK ||
+        context->GetData(slot.timing_end, &end, sizeof(end), 0U) != S_OK) {''', '''    constexpr UINT no_flush = D3D11_ASYNC_GETDATA_DONOTFLUSH;
+    if (context->GetData(slot.timing_disjoint, &disjoint, sizeof(disjoint), no_flush) != S_OK ||
+        context->GetData(slot.timing_begin, &begin, sizeof(begin), no_flush) != S_OK ||
+        context->GetData(slot.timing_end, &end, sizeof(end), no_flush) != S_OK) {''')
+
 print('Applied opt-in DCS quad focus adapter to the pinned Cheeky source.')

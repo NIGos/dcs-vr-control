@@ -1,8 +1,47 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4dfb4e9..dc6065d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -159,6 +159,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+     set(XRFG_CURSOR_SEARCH_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_search_shader.hpp")
+     set(XRFG_CURSOR_VERIFY_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_verify_shader.hpp")
+     set(XRFG_CURSOR_GATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_gate_shader.hpp")
++    set(XRFG_CURSOR_CAPTURE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_capture_shader.hpp")
+     set(XRFG_CURSOR_REGION_VERTEX_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_region_vertex_shader.hpp")
+     set(XRFG_CURSOR_COMPOSITE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_composite_pixel_shader.hpp")
+     add_custom_command(
+@@ -179,6 +180,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "${XRFG_CURSOR_SEARCH_HEADER}"
+             "${XRFG_CURSOR_VERIFY_HEADER}"
+             "${XRFG_CURSOR_GATE_HEADER}"
++            "${XRFG_CURSOR_CAPTURE_HEADER}"
+             "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
+             "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+@@ -247,6 +249,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_GATE_HEADER}" /Vn g_xrfg_cursor_gate_shader
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorCaptureCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_CAPTURE_HEADER}" /Vn g_xrfg_cursor_capture_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
+         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E CursorRegionVS
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_REGION_VERTEX_HEADER}" /Vn g_xrfg_cursor_region_vertex_shader
+@@ -285,6 +291,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         "${XRFG_CURSOR_SEARCH_HEADER}"
+         "${XRFG_CURSOR_VERIFY_HEADER}"
+         "${XRFG_CURSOR_GATE_HEADER}"
++        "${XRFG_CURSOR_CAPTURE_HEADER}"
+         "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
+         "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}")
+     target_include_directories(xrfg_d3d12_history
 diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
-index 8d6b94d..94eb1ed 100644
+index 8d6b94d..65845a1 100644
 --- a/include/xrfg/bridge_flight_logger.hpp
 +++ b/include/xrfg/bridge_flight_logger.hpp
-@@ -287,7 +287,20 @@ enum class BridgeFlightOperation : std::uint32_t {
+@@ -287,7 +287,23 @@ enum class BridgeFlightOperation : std::uint32_t {
      //     templates loaded, b= where from (1 DCS's Visualizer.dll in the
      //     process, 2 Visualizer.dll in cursor_templates, 3 the built-in
      //     arrow), c= the HRESULT of turning it on.
@@ -12,6 +51,9 @@ index 8d6b94d..94eb1ed 100644
 +    //     the latest one too weak or too close to a look-alike: template
 +    //     (bits 0-7), scale step (8-15), score x255 (16-23), look-alike x255
 +    //     (24-31).
++    //   result=4 (0011), per diagnostic capture written next to the log
++    //     (cursor-capture-<pid>-<a>-*.bmp/-info.txt): a= its number, b= the
++    //     current frame's detection status, c= the previous frame's.
      smooth_cursor,
 +    // DCS VR Control (0011). Video memory once a second with `[ofxr]
 +    // diag_vram` (what the panel shows), in MiB: a= this process's resident
@@ -24,10 +66,33 @@ index 8d6b94d..94eb1ed 100644
  
  struct BridgeFlightToken {
 diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
-index 53aec9f..f485c69 100644
+index 53aec9f..9631b9f 100644
 --- a/include/xrfg/d3d12_frame_synthesizer.hpp
 +++ b/include/xrfg/d3d12_frame_synthesizer.hpp
-@@ -131,6 +131,12 @@ struct D3D12SmoothCursorStats {
+@@ -9,6 +9,7 @@
+ 
+ #include <array>
+ #include <cstdint>
++#include <filesystem>
+ #include <limits>
+ #include <memory>
+ #include <mutex>
+@@ -113,6 +114,14 @@ struct D3D12SmoothCursorOptions {
+     // The detection runs only while the Windows cursor moved within this
+     // long; otherwise nothing of the feature runs at all.
+     std::uint32_t active_milliseconds{5000};
++    // (0011) Where to write diagnostic captures of what the detection sees
++    // (empty: none), at most capture_limit of them, capture_interval_ms
++    // apart, while the mouse moves: cursor-capture-<pid>-<n>-previous.bmp,
++    // -current.bmp (384x384 around each frame's detection), -overview.bmp
++    // (the first view at an eighth of its size) and -info.txt.
++    std::filesystem::path capture_directory;
++    std::uint32_t capture_limit{8};
++    std::uint32_t capture_interval_ms{5000};
+ };
+ 
+ // Running totals since set_smooth_cursor. The GPU counts are as of the latest
+@@ -131,6 +140,12 @@ struct D3D12SmoothCursorStats {
      std::uint64_t idle_pairs{};     // pairs with the mouse idle (nothing ran)
      std::uint64_t timed_pairs{};    // pairs whose detection was GPU-timed
      std::uint64_t detection_microseconds{}; // their summed GPU time
@@ -41,7 +106,7 @@ index 53aec9f..f485c69 100644
      std::uint32_t matchable_templates{};
  };
 diff --git a/include/xrfg/smooth_cursor_templates.hpp b/include/xrfg/smooth_cursor_templates.hpp
-index e0e939e..d81b7fe 100644
+index e0e939e..6d1ad5c 100644
 --- a/include/xrfg/smooth_cursor_templates.hpp
 +++ b/include/xrfg/smooth_cursor_templates.hpp
 @@ -30,10 +30,10 @@ struct CursorTemplateSet {
@@ -54,16 +119,34 @@ index e0e939e..d81b7fe 100644
 -// kD3D12MaxCursorTemplates of them.
 +// The cursor resources a VR pilot moves (by resource id in Visualizer.dll):
 +// the cockpit's yellow cross (147) and green sight (145), and the menus'
-+// white arrow (116). In the cockpit DCS draws them as a 2-degree spot
++// white dot (149). In the cockpit DCS draws them as a 2-degree spot
 +// projected into the scene (enlight's RayCursor; 0011).
  [[nodiscard]] std::span<const std::uint16_t> dcs_cockpit_cursor_ids() noexcept;
  
  // Decodes the bits of one RT_CURSOR resource (a hotspot, then a DIB with its
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
-index ac1ebe8..535a352 100644
+index ac1ebe8..94312ad 100644
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
-@@ -345,7 +345,8 @@ constexpr UINT kCursorStateWords = 1024;
+@@ -2,6 +2,9 @@
+ #include "xrfg/bridge_flight_logger.hpp"
+ 
+ #include <windows.h>
++#include <cstdio>
++#include <string>
++#include <thread>
+ #include <wrl/client.h>
+ 
+ #include <FidelityFX/host/backends/dx12/ffx_dx12.h>
+@@ -23,6 +26,7 @@
+ #include "cursor_begin_shader.hpp"
+ #include "cursor_composite_pixel_shader.hpp"
+ #include "cursor_gate_shader.hpp"
++#include "cursor_capture_shader.hpp"
+ #include "cursor_motion_shader.hpp"
+ #include "cursor_region_vertex_shader.hpp"
+ #include "cursor_search_shader.hpp"
+@@ -345,8 +349,15 @@ constexpr UINT kCursorStateWords = 1024;
  // each with a candidate per template.
  constexpr UINT kCursorListEntries = 400;
  constexpr UINT kCursorStatsBase = 192;
@@ -71,9 +154,233 @@ index ac1ebe8..535a352 100644
 +constexpr UINT kCursorStatsWords = 13;
 +static_assert(kCursorStatsWords * sizeof(std::uint32_t) <= 64U); // one slot's readback region
  constexpr UINT kCursorTileSize = 32;
++// (0011) The diagnostic capture's layout (smooth_cursor.hlsl CursorCaptureCS).
++constexpr UINT kCaptureHeaderWords = 64;
++constexpr UINT kCaptureCrop = 384;
++constexpr UINT kCaptureOverviewMax = 720;
++constexpr UINT kCaptureWords =
++    kCaptureHeaderWords + 2U * kCaptureCrop * kCaptureCrop + kCaptureOverviewMax * kCaptureOverviewMax;
  constexpr UINT kCursorNoEntry = 2;
  
-@@ -2483,6 +2484,9 @@ struct D3D12FrameSynthesizer::Impl {
+ struct CursorParameters {
+@@ -484,6 +495,91 @@ constexpr UINT kCursorFlagMouseKnown = 4U;
+     return words;
+ }
+ 
++// DCS VR Control (0011): one diagnostic capture's files (see
++// D3D12SmoothCursorOptions::capture_directory).
++void write_cursor_capture_files(
++    const std::vector<std::uint32_t>& capture,
++    const std::filesystem::path& directory,
++    std::uint32_t index) noexcept {
++    try {
++        const std::uint32_t* words = capture.data();
++        if (words[0] == 0x43535243U) {
++            const std::wstring stem = L"cursor-capture-" + std::to_wstring(GetCurrentProcessId()) +
++                L"-" + std::to_wstring(index);
++            const auto bmp = [&](const wchar_t* suffix, const std::uint32_t* pixels,
++                                 UINT width, UINT height, UINT stride) {
++                const UINT row = (width * 3U + 3U) & ~3U;
++                std::vector<std::uint8_t> file(54U + static_cast<std::size_t>(row) * height, 0U);
++                const auto put32 = [&](std::size_t at, std::uint32_t value) {
++                    for (int b = 0; b < 4; ++b) file[at + b] = static_cast<std::uint8_t>(value >> (8 * b));
++                };
++                file[0] = 'B'; file[1] = 'M';
++                put32(2, static_cast<std::uint32_t>(file.size())); put32(10, 54); put32(14, 40);
++                put32(18, width); put32(22, height);
++                file[26] = 1; file[28] = 24;
++                put32(34, row * height);
++                for (UINT y = 0; y < height; ++y) {
++                    std::uint8_t* out = file.data() + 54 + static_cast<std::size_t>(height - 1U - y) * row;
++                    for (UINT x = 0; x < width; ++x) {
++                        const std::uint32_t rgba = pixels[static_cast<std::size_t>(y) * stride + x];
++                        out[x * 3U] = static_cast<std::uint8_t>(rgba >> 16U);
++                        out[x * 3U + 1U] = static_cast<std::uint8_t>(rgba >> 8U);
++                        out[x * 3U + 2U] = static_cast<std::uint8_t>(rgba);
++                    }
++                }
++                HANDLE handle = CreateFileW((directory / (stem + suffix)).c_str(),
++                    GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++                if (handle != INVALID_HANDLE_VALUE) {
++                    DWORD written = 0;
++                    WriteFile(handle, file.data(), static_cast<DWORD>(file.size()), &written, nullptr);
++                    CloseHandle(handle);
++                }
++            };
++            const std::uint32_t* crops = words + kCaptureHeaderWords;
++            bmp(L"-previous.bmp", crops, kCaptureCrop, kCaptureCrop, kCaptureCrop);
++            bmp(L"-current.bmp", crops + kCaptureCrop * kCaptureCrop, kCaptureCrop, kCaptureCrop, kCaptureCrop);
++            const UINT overview_width = std::min<UINT>(words[2] & 0xffffU, kCaptureOverviewMax);
++            const UINT overview_height = std::min<UINT>(words[2] >> 16U, kCaptureOverviewMax);
++            if (overview_width != 0U && overview_height != 0U) {
++                bmp(L"-overview.bmp", crops + 2U * kCaptureCrop * kCaptureCrop,
++                    overview_width, overview_height, kCaptureOverviewMax);
++            }
++            float values[8]{};
++            std::memcpy(values, words + 6, sizeof(values));
++            float rect[4]{};
++            std::memcpy(rect, words + 48, sizeof(rect));
++            std::string text;
++            char line[256]{};
++            std::snprintf(line, sizeof(line),
++                "image %ux%u flags %u view0 rect %.0f,%.0f %.0fx%.0f overview step %u\n"
++                "mouse delta %.1f,%.1f\nprevious crop centre %.1f,%.1f\ncurrent crop centre %.1f,%.1f\n",
++                words[4] & 0xffffU, words[4] >> 16U, words[5], rect[0], rect[1], rect[2], rect[3], words[3],
++                values[0], values[1], values[2], values[3], values[4], values[5]);
++            text += line;
++            for (int frame = 0; frame < 2; ++frame) {
++                const std::uint32_t* entry = words + (frame == 0 ? 16 : 32);
++                float score = 0.0F;
++                float second = 0.0F;
++                std::memcpy(&score, entry + 5, sizeof(score));
++                std::memcpy(&second, entry + 6, sizeof(second));
++                std::snprintf(line, sizeof(line),
++                    "%s: status %u at %d,%d template %u scale step %u score %.3f look-alike %.3f mode %u\n",
++                    frame == 0 ? "previous" : "current", entry[0], static_cast<std::int32_t>(entry[1]),
++                    static_cast<std::int32_t>(entry[2]), entry[3], entry[4], score, second, entry[9]);
++                text += line;
++            }
++            HANDLE handle = CreateFileW((directory / (stem + L"-info.txt")).c_str(),
++                GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++            if (handle != INVALID_HANDLE_VALUE) {
++                DWORD written = 0;
++                WriteFile(handle, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
++                CloseHandle(handle);
++            }
++        }
++    } catch (...) {
++    }
++}
++
+ [[nodiscard]] bool finite(float value) noexcept {
+     return std::isfinite(value);
+ }
+@@ -865,6 +961,8 @@ struct D3D12FrameSynthesizer::Impl {
+         ComPtr<ID3D12GraphicsCommandList> cursor_command_list;
+         bool cursor_recorded{};
+         bool cursor_timed{};
++        // (0011) This slot's list took the diagnostic capture.
++        bool cursor_capture{};
+         // Nonzero while this slot's copy of the cursor counters waits to be
+         // read: the order it was submitted in.
+         std::uint64_t cursor_order{};
+@@ -1039,6 +1137,20 @@ struct D3D12FrameSynthesizer::Impl {
+     ComPtr<ID3D12PipelineState> cursor_search_pipeline;
+     ComPtr<ID3D12PipelineState> cursor_verify_pipeline;
+     ComPtr<ID3D12PipelineState> cursor_gate_pipeline;
++    // (0011) The diagnostic capture: its pipeline, its buffer and readback,
++    // and how many were taken.
++    ComPtr<ID3D12PipelineState> cursor_capture_pipeline;
++    ComPtr<ID3D12Resource> cursor_capture;
++    ComPtr<ID3D12Resource> cursor_capture_readback;
++    std::filesystem::path cursor_capture_directory;
++    std::uint32_t cursor_capture_limit{};
++    std::uint32_t cursor_capture_interval_ms{};
++    std::uint32_t cursor_captures{};
++    std::uint64_t cursor_capture_last_ms{};
++    // The slot whose list holds the capture not yet written, or none.
++    std::uint64_t cursor_capture_fence{};
++    bool cursor_capture_pending{};
++    bool cursor_capture_now{};
+     // The pass that redraws the pixels around the cursor after the
+     // composition (frame_synthesis.hlsl CursorRegionVS/CursorCompositePS).
+     ComPtr<ID3D12PipelineState> cursor_composite_pipeline;
+@@ -2058,6 +2170,10 @@ struct D3D12FrameSynthesizer::Impl {
+             result = pipeline(g_xrfg_cursor_gate_shader,
+                 sizeof(g_xrfg_cursor_gate_shader), &cursor_gate_pipeline);
+         }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_capture_shader,
++                sizeof(g_xrfg_cursor_capture_shader), &cursor_capture_pipeline);
++        }
+         if (SUCCEEDED(result)) {
+             D3D12_INDIRECT_ARGUMENT_DESC dispatch{};
+             dispatch.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+@@ -2241,6 +2357,30 @@ struct D3D12FrameSynthesizer::Impl {
+             }
+             ID3D12CommandList* lists[] = {cursor_upload_list.Get()};
+             queue->ExecuteCommandLists(1, lists);
++            // (0011) The diagnostic capture, only when asked for.
++            if (!options.capture_directory.empty() && options.capture_limit != 0U) {
++                description = buffer_description(
++                    static_cast<UINT64>(kCaptureWords) * sizeof(std::uint32_t),
++                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++                if (SUCCEEDED(device->CreateCommittedResource(
++                        &heap, D3D12_HEAP_FLAG_NONE, &description,
++                        D3D12_RESOURCE_STATE_COMMON, nullptr,
++                        IID_PPV_ARGS(cursor_capture.GetAddressOf())))) {
++                    description = buffer_description(
++                        static_cast<UINT64>(kCaptureWords) * sizeof(std::uint32_t),
++                        D3D12_RESOURCE_FLAG_NONE);
++                    if (SUCCEEDED(device->CreateCommittedResource(
++                            &readback_heap, D3D12_HEAP_FLAG_NONE, &description,
++                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++                            IID_PPV_ARGS(cursor_capture_readback.GetAddressOf())))) {
++                        cursor_capture_directory = options.capture_directory;
++                        cursor_capture_limit = options.capture_limit;
++                        cursor_capture_interval_ms = options.capture_interval_ms;
++                    } else {
++                        cursor_capture.Reset();
++                    }
++                }
++            }
+             cursor_tiles_x = tiles_x;
+             cursor_tiles_y = tiles_y;
+             cursor_template_count = static_cast<UINT>(options.templates.size());
+@@ -2293,6 +2433,11 @@ struct D3D12FrameSynthesizer::Impl {
+             }
+         }
+         cursor_plan.current_entry = 1U - cursor_plan.previous_entry;
++        // (0011) A diagnostic capture with this pair, now and then.
++        cursor_capture_now = cursor_capture != nullptr && !cursor_capture_pending &&
++            cursor_captures < cursor_capture_limit &&
++            (cursor_capture_last_ms == 0 ||
++                cursor_now_milliseconds - cursor_capture_last_ms >= cursor_capture_interval_ms);
+         cursor_plan.mouse_known =
+             previous_serial != 0 && cursor_pointer_serial == previous_serial;
+         if (cursor_plan.mouse_known) {
+@@ -2314,10 +2459,17 @@ struct D3D12FrameSynthesizer::Impl {
+                 cursor_entry_serial[cursor_plan.previous_entry] = previous_serial;
+                 cursor_entry_serial[cursor_plan.current_entry] = current_serial;
+                 slot.cursor_order = cursor_next_order++;
++                if (slot.cursor_capture) {
++                    cursor_capture_pending = true;
++                    cursor_capture_fence = slot.fence_value;
++                    cursor_capture_last_ms = cursor_now_milliseconds;
++                }
+             } else {
+                 cursor_entry_serial = {};
+             }
+         }
++        slot.cursor_capture = false;
++        cursor_capture_now = false;
+         if (cursor_position_known) {
+             cursor_pointer_serial = current_serial;
+             cursor_pointer_x = cursor_x;
+@@ -2424,6 +2576,22 @@ struct D3D12FrameSynthesizer::Impl {
+         list->SetComputeRoot32BitConstants(5, kCursorConstantCount, &parameters, 0);
+         list->SetPipelineState(cursor_gate_pipeline.Get());
+         list->Dispatch(1, 1, 1);
++        if (cursor_capture_now) {
++            // (0011) The capture reads the entries the gate just used: the
++            // capture buffer stands in for the candidates for one dispatch.
++            list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
++            list->SetComputeRootUnorderedAccessView(3, cursor_capture->GetGPUVirtualAddress());
++            list->SetPipelineState(cursor_capture_pipeline.Get());
++            list->Dispatch((kCaptureOverviewMax + 7U) / 8U, (kCaptureOverviewMax + 7U) / 8U, 3);
++            const D3D12_RESOURCE_BARRIER capture_to_copy = transition_barrier(
++                cursor_capture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                D3D12_RESOURCE_STATE_COPY_SOURCE);
++            list->ResourceBarrier(1, &capture_to_copy);
++            list->CopyBufferRegion(cursor_capture_readback.Get(), 0, cursor_capture.Get(), 0,
++                static_cast<UINT64>(kCaptureWords) * sizeof(std::uint32_t));
++            list->SetComputeRootUnorderedAccessView(3, cursor_candidates->GetGPUVirtualAddress());
++            slot.cursor_capture = true;
++        }
+         // The counters go to this slot's readback region, read when the slot
+         // is next taken.
+         const D3D12_RESOURCE_BARRIER to_copy = transition_barrier(
+@@ -2483,6 +2651,9 @@ struct D3D12FrameSynthesizer::Impl {
                  cursor_stats.busy = values[7];
                  cursor_stats.acquired = values[8];
                  cursor_stats.tracked = values[9];
@@ -83,7 +390,52 @@ index ac1ebe8..535a352 100644
              }
          }
          slot.cursor_order = 0;
-@@ -2530,6 +2534,17 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2492,6 +2663,44 @@ struct D3D12FrameSynthesizer::Impl {
+         for (WorkSlot& slot : work_slots) {
+             harvest_cursor_stats(slot);
+         }
++        write_cursor_capture();
++    }
++
++    // (0011) The pending diagnostic capture, once its list has run: copied
++    // out of the readback buffer here, written as three 24-bit BMPs and the
++    // detection's figures as text on a thread of its own, so the frame that
++    // finds it ready does not wait for the files.
++    void write_cursor_capture() noexcept {
++        if (!cursor_capture_pending || cursor_capture_readback == nullptr ||
++            fence_status(fence.Get(), cursor_capture_fence) != S_OK) {
++            return;
++        }
++        cursor_capture_pending = false;
++        const std::uint32_t index = ++cursor_captures;
++        void* mapped = nullptr;
++        const D3D12_RANGE read_range{0, static_cast<SIZE_T>(kCaptureWords) * sizeof(std::uint32_t)};
++        if (FAILED(cursor_capture_readback->Map(0, &read_range, &mapped)) || mapped == nullptr) {
++            return;
++        }
++        std::shared_ptr<std::vector<std::uint32_t>> copy;
++        try {
++            const auto* source = static_cast<const std::uint32_t*>(mapped);
++            copy = std::make_shared<std::vector<std::uint32_t>>(source, source + kCaptureWords);
++        } catch (...) {
++        }
++        const D3D12_RANGE no_write{0, 0};
++        cursor_capture_readback->Unmap(0, &no_write);
++        if (!copy || (*copy)[0] != 0x43535243U) {
++            return;
++        }
++        bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 4, index,
++            (*copy)[32], (*copy)[16]);
++        try {
++            std::thread([copy, directory = cursor_capture_directory, index] {
++                write_cursor_capture_files(*copy, directory, index);
++            }).detach();
++        } catch (...) {
++        }
+     }
+ 
+     // Once a second while the feature is on, into the flight log
+@@ -2530,6 +2739,17 @@ struct D3D12FrameSynthesizer::Impl {
          if (a != 0U || b != 0U || d != 0U) {
              bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 1, a, b, d);
          }
@@ -101,8 +453,51 @@ index ac1ebe8..535a352 100644
          cursor_logged = cursor_stats;
      }
      // ---------------------------------------------------------------------
+@@ -5714,6 +5934,7 @@ struct D3D12FrameSynthesizer::Impl {
+             previous.producer_fence.Get(),
+             previous.ticket.fence_value);
+         if (FAILED(result)) {
++            finish_cursor_pair(slot, cursor_previous_serial, current.serial, false); // 0011
+             cancel_next();
+             return result;
+         }
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index ec9c3df..28e9776 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -224,15 +224,21 @@ float4 bilinear_current_source(float2 coordinate, uint slice) {
+         top_left + int2(1, 1),
+         int2(int(Width) - 1, int(Height) - 1));
+     float2 fraction = bounded - float2(top_left);
+-    float4 top = lerp(
+-        CurrentFrame.Load(int4(top_left, int(slice), 0)),
+-        CurrentFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
+-        fraction.x);
+-    float4 bottom = lerp(
+-        CurrentFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
+-        CurrentFrame.Load(int4(bottom_right, int(slice), 0)),
+-        fraction.x);
+-    return lerp(top, bottom, fraction.y);
++    // DCS VR Control (0011): on a pixel centre (the composition's own
++    // fallback sample) the weights are 1, 0, 0, 0: one texel, the same bits.
++    float4 result = CurrentFrame.Load(int4(top_left, int(slice), 0));
++    [branch] if (any(fraction != float2(0.0, 0.0))) {
++        float4 top = lerp(
++            result,
++            CurrentFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
++            fraction.x);
++        float4 bottom = lerp(
++            CurrentFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
++            CurrentFrame.Load(int4(bottom_right, int(slice), 0)),
++            fraction.x);
++        result = lerp(top, bottom, fraction.y);
++    }
++    return result;
+ }
+ 
+ // The ratio the flow input was packed at, relative to the source image.
 diff --git a/src/d3d12/smooth_cursor.hlsl b/src/d3d12/smooth_cursor.hlsl
-index ddd6bad..f10f98f 100644
+index ddd6bad..51c1db1 100644
 --- a/src/d3d12/smooth_cursor.hlsl
 +++ b/src/d3d12/smooth_cursor.hlsl
 @@ -23,7 +23,7 @@
@@ -245,8 +640,116 @@ index ddd6bad..f10f98f 100644
          } else if (reason == kReasonStereo) {
              counter = kStatStereo;
          } else if (reason == kReasonJump) {
+@@ -904,3 +968,107 @@ void CursorGateCS() {
+         CursorState[kStatsBase + counter] += 1u;
+     }
+ }
++
++// DCS VR Control (0011): a diagnostic capture of what the detection sees, a
++// few times a flight while the mouse moves (D3D12SmoothCursorOptions::
++// capture_directory). Written into the buffer bound as CursorCandidates for
++// this dispatch alone: a header, then two 384x384 crops of the first view
++// around each frame's detection (previous, then current; the other frame's
++// place, or the view's centre, where a frame found nothing), then the first
++// view of the current frame at an eighth of its size. RGBA8, red in the low
++// byte, as the image's bytes (sRGB-encoded again where read linear).
++static const uint kCaptureHeaderWords = 64;
++static const uint kCaptureCrop = 384;
++static const uint kCaptureOverviewMax = 720;
++static const uint kCaptureOverviewStep = 8;
++
++float linear_to_srgb(float value) {
++    value = saturate(value);
++    return value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
++}
++
++uint pack_capture(float4 colour) {
++    float3 c = colour.rgb;
++    if ((Flags & 1u) != 0u) {
++        c = float3(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
++    }
++    uint3 bytes = uint3(saturate(c) * 255.0 + 0.5);
++    return bytes.r | (bytes.g << 8) | (bytes.b << 16) | 0xff000000u;
++}
++
++// The centre of a frame's detection box in its own image, or false.
++bool capture_centre(uint ring, out float2 centre) {
++    uint entry = entry_base(ring, 0u);
++    uint status = CursorState[entry + kEntryStatus];
++    float scale = kScales[min(CursorState[entry + kEntryScale], kScaleCount - 1u)];
++    centre = float2(float(asint(CursorState[entry + kEntryX])), float(asint(CursorState[entry + kEntryY]))) +
++        0.5 * float(kTemplateSize) * scale;
++    return status == kStatusFound;
++}
++
++[numthreads(8, 8, 1)]
++void CursorCaptureCS(uint3 id : SV_DispatchThreadID) {
++    uint slice = view_slice(0u);
++    float4 target_rect = Mappings[0].TargetRect;
++    float4 source_rect = Mappings[0].SourceRect;
++    uint overview_width = min(uint(target_rect.z) / kCaptureOverviewStep, kCaptureOverviewMax);
++    uint overview_height = min(uint(target_rect.w) / kCaptureOverviewStep, kCaptureOverviewMax);
++    float2 previous_centre;
++    float2 current_centre;
++    bool previous_found = TrackIndex < 2u && capture_centre(TrackIndex, previous_centre);
++    bool current_found = capture_centre(EntryIndex, current_centre);
++    if (!previous_found) {
++        previous_centre = current_found
++            ? current_centre - target_rect.xy + source_rect.xy
++            : source_rect.xy + 0.5 * source_rect.zw;
++    }
++    if (!current_found) {
++        current_centre = previous_found
++            ? previous_centre - source_rect.xy + target_rect.xy
++            : target_rect.xy + 0.5 * target_rect.zw;
++    }
++    if (all(id == uint3(0, 0, 0))) {
++        CursorCandidates[0] = 0x43535243u; // "CRSC"
++        CursorCandidates[1] = kCaptureCrop;
++        CursorCandidates[2] = overview_width | (overview_height << 16);
++        CursorCandidates[3] = kCaptureOverviewStep;
++        CursorCandidates[4] = Width | (Height << 16);
++        CursorCandidates[5] = Flags;
++        CursorCandidates[6] = asuint(MouseDelta.x);
++        CursorCandidates[7] = asuint(MouseDelta.y);
++        CursorCandidates[8] = asuint(previous_centre.x);
++        CursorCandidates[9] = asuint(previous_centre.y);
++        CursorCandidates[10] = asuint(current_centre.x);
++        CursorCandidates[11] = asuint(current_centre.y);
++        // Both frames' first-view entries as the detection left them.
++        for (uint word = 0; word < 16u; ++word) {
++            CursorCandidates[16u + word] = TrackIndex < 2u ? CursorState[entry_base(TrackIndex, 0u) + word] : 0u;
++            CursorCandidates[32u + word] = CursorState[entry_base(EntryIndex, 0u) + word];
++        }
++        CursorCandidates[48] = asuint(target_rect.x);
++        CursorCandidates[49] = asuint(target_rect.y);
++        CursorCandidates[50] = asuint(target_rect.z);
++        CursorCandidates[51] = asuint(target_rect.w);
++    }
++    uint base = kCaptureHeaderWords;
++    if (id.z < 2u) {
++        if (id.x >= kCaptureCrop || id.y >= kCaptureCrop) {
++            return;
++        }
++        bool previous = id.z == 0u;
++        float2 centre = previous ? previous_centre : current_centre;
++        int2 pixel = int2(floor(centre)) - int2(kCaptureCrop / 2u, kCaptureCrop / 2u) + int2(id.xy);
++        bool inside = all(pixel >= int2(0, 0)) && pixel.x < int(Width) && pixel.y < int(Height);
++        float4 colour = inside
++            ? (previous ? PreviousFrame.Load(int4(pixel, int(slice), 0)) : CurrentFrame.Load(int4(pixel, int(slice), 0)))
++            : float4(0.0, 0.0, 0.0, 1.0);
++        CursorCandidates[base + id.z * kCaptureCrop * kCaptureCrop + id.y * kCaptureCrop + id.x] = pack_capture(colour);
++    } else {
++        if (id.x >= overview_width || id.y >= overview_height) {
++            return;
++        }
++        int2 pixel = int2(target_rect.xy) + int2(id.xy) * int(kCaptureOverviewStep);
++        float4 colour = CurrentFrame.Load(int4(pixel, int(slice), 0));
++        CursorCandidates[base + 2u * kCaptureCrop * kCaptureCrop + id.y * kCaptureOverviewMax + id.x] = pack_capture(colour);
++    }
++}
 diff --git a/src/d3d12/smooth_cursor_templates.cpp b/src/d3d12/smooth_cursor_templates.cpp
-index f15ae66..318b248 100644
+index f15ae66..2b65466 100644
 --- a/src/d3d12/smooth_cursor_templates.cpp
 +++ b/src/d3d12/smooth_cursor_templates.cpp
 @@ -8,10 +8,12 @@
@@ -258,16 +761,16 @@ index f15ae66..318b248 100644
 -    301, 302, 303, 306, 307, 308, 309, 310,
 -};
 +// (0011) The cursors a VR pilot moves: the yellow cross (147) and the green
-+// sight (145) DCS swaps between in the cockpit, and the white arrow (116) of
-+// the menus and the map. The control markers DCS shows over a switch last
-+// only while the mouse rests on it, when there is nothing to smooth, and
-+// every image searched costs a pass and is one more look-alike.
-+constexpr std::array<std::uint16_t, 3> kCockpitCursorIds{147, 145, 116};
++// sight (145) DCS swaps between in the cockpit, and the white dot (149) of
++// the menus (as seen in the headset). The control markers DCS shows over a
++// switch last only while the mouse rests on it, when there is nothing to
++// smooth, and every image searched costs a pass and is one more look-alike.
++constexpr std::array<std::uint16_t, 3> kCockpitCursorIds{147, 145, 149};
  
  [[nodiscard]] std::uint32_t read_u32(std::span<const std::uint8_t> bytes, std::size_t at) noexcept {
      return static_cast<std::uint32_t>(bytes[at]) |
 diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
-index 262621e..0b434d1 100644
+index 262621e..1779b4a 100644
 --- a/src/layer/bridge_flight_logger.cpp
 +++ b/src/layer/bridge_flight_logger.cpp
 @@ -112,6 +112,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
@@ -279,8 +782,60 @@ index 262621e..0b434d1 100644
      case BridgeFlightOperation::synthesis_frame_start_wait:
          return "synthesis_frame_start_wait";
      case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+@@ -435,6 +437,28 @@ std::filesystem::path BridgeFlightLogger::log_path() const {
+     return impl_ ? impl_->path : std::filesystem::path{};
+ }
+ 
++namespace {
++// DCS VR Control (0011): the swapchain calls the layer makes for every image of
++// every frame (about 50 lines per DCS frame, two thirds of a flight log, each
++// a synchronous write on the game's render thread). They are logged only when
++// they took kQuietThresholdMicroseconds or longer or failed: one end line
++// then, with the duration.
++constexpr std::uint64_t kQuietThresholdMicroseconds = 250;
++[[nodiscard]] bool quiet_operation(BridgeFlightOperation operation) noexcept {
++    switch (operation) {
++    case BridgeFlightOperation::application_swapchain_acquire:
++    case BridgeFlightOperation::application_swapchain_wait:
++    case BridgeFlightOperation::application_swapchain_release:
++    case BridgeFlightOperation::private_swapchain_acquire:
++    case BridgeFlightOperation::private_swapchain_wait:
++    case BridgeFlightOperation::private_swapchain_release:
++        return true;
++    default:
++        return false;
++    }
++}
++}  // namespace
++
+ BridgeFlightToken BridgeFlightLogger::begin(
+     BridgeFlightOperation operation,
+     std::uint64_t a,
+@@ -450,8 +474,10 @@ BridgeFlightToken BridgeFlightLogger::begin(
+     const BridgeFlightToken token{
+         impl_->next_sequence.fetch_add(1, std::memory_order_relaxed),
+         now.QuadPart};
+-    impl_->write(
+-        token.sequence, token.start_counter, 'B', operation, 0, 0, a, b, c);
++    if (!quiet_operation(operation)) {
++        impl_->write(
++            token.sequence, token.start_counter, 'B', operation, 0, 0, a, b, c);
++    }
+     return token;
+ }
+ 
+@@ -475,6 +501,9 @@ void BridgeFlightLogger::end(
+               (now.QuadPart - token.start_counter) * 1000000ll /
+               impl_->frequency.QuadPart)
+         : 0;
++    if (quiet_operation(operation) && result >= 0 && duration < kQuietThresholdMicroseconds) {
++        return;
++    }
+     impl_->write(
+         token.sequence, now.QuadPart, 'E', operation, result, duration, a, b, c);
+ }
 diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
-index 028c92c..c4ae53d 100644
+index 028c92c..1638f40 100644
 --- a/src/layer/openxr_layer.cpp
 +++ b/src/layer/openxr_layer.cpp
 @@ -1696,6 +1696,8 @@ struct SessionState {
@@ -292,7 +847,19 @@ index 028c92c..c4ae53d 100644
      // When the application's thread last entered xrBeginFrame, for the
      // blocked-interval attribution (sample_application_throughput).
      std::atomic<std::int64_t> application_begin_entered_ns{0};
-@@ -13959,6 +13961,43 @@ void ensure_gpu_stats(SessionState& state) noexcept {
+@@ -3022,6 +3024,11 @@ void configure_smooth_cursor(
+             source = session.cursor_templates->source;
+         }
+         options.enabled = !options.templates.empty();
++        // DCS VR Control (0011): with the flight log on, a few captures of
++        // what the detection sees go next to it.
++        if (xrfg::bridge_flight_logger().enabled()) {
++            options.capture_directory = xrfg::bridge_flight_logger().log_path().parent_path();
++        }
+         const HRESULT result = synthesizer.set_smooth_cursor(options);
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::smooth_cursor,
+@@ -13959,6 +13966,43 @@ void ensure_gpu_stats(SessionState& state) noexcept {
      }
  }
  
@@ -336,7 +903,7 @@ index 028c92c..c4ae53d 100644
  // DCS VR Control (0004): one application frame's throughput evidence, taken
  // as its xrEndFrame is entered: the CPU time since the previous one less what
  // this thread spent blocked in the layer (ApplicationBlockedScope), and the
-@@ -14213,6 +14252,7 @@ XrResult layer_end_frame_impl(
+@@ -14213,6 +14257,7 @@ XrResult layer_end_frame_impl(
      apply_scene_change(state); // DCS VR Control (0009)
      apply_live_frame_multiplier(state, use_continuous_presenter);
      apply_embedded_control(state);
@@ -345,10 +912,10 @@ index 028c92c..c4ae53d 100644
      if (manually_disarmed && !state->manual_stop_applied) {
          // The existing queue has been drained before taking the content lock.
 diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
-index ddfb55b..4ab65ab 100644
+index ddfb55b..1cb3571 100644
 --- a/tests/bridge_flight_logger_tests.cpp
 +++ b/tests/bridge_flight_logger_tests.cpp
-@@ -230,6 +230,19 @@ int main(int argc, char** argv) {
+@@ -230,6 +230,25 @@ int main(int argc, char** argv) {
              45ULL | (44ULL << 16),
              1ULL << 16,
              7ULL << 48);
@@ -359,6 +926,12 @@ index ddfb55b..4ab65ab 100644
 +            612,
 +            750,
 +            0xa1be0802ULL);
++        // DCS VR Control (0011): a quick swapchain call leaves no line, a
++        // failed one its end line.
++        const auto quick = enabled.begin(xrfg::BridgeFlightOperation::application_swapchain_acquire, 7, 0, 0);
++        enabled.end(quick, xrfg::BridgeFlightOperation::application_swapchain_acquire, 0, 7, 0, 0);
++        const auto failed = enabled.begin(xrfg::BridgeFlightOperation::private_swapchain_wait, 8, 0, 0);
++        enabled.end(failed, xrfg::BridgeFlightOperation::private_swapchain_wait, -1, 8, 0, 0);
 +        enabled.event(
 +            xrfg::BridgeFlightOperation::vram_status,
 +            1,
@@ -368,7 +941,7 @@ index ddfb55b..4ab65ab 100644
          enabled.shutdown();
  
          const std::string log = read(log_path);
-@@ -293,6 +306,14 @@ int main(int argc, char** argv) {
+@@ -293,6 +312,18 @@ int main(int argc, char** argv) {
              log.find("op=smooth_cursor result=1 dur_us=0 a=2883629 b=65536 c=1970324836974592") !=
                  std::string::npos,
              "bridge log is missing the 0010 smooth cursor record");
@@ -380,14 +953,26 @@ index ddfb55b..4ab65ab 100644
 +            log.find("op=vram_status result=1 dur_us=0 a=134943577490772 b=140045998649672 c=0") !=
 +                std::string::npos,
 +            "bridge log is missing the 0011 video memory record");
++        require(log.find("op=app_swapchain_acquire") == std::string::npos &&
++                    log.find("phase=B op=private_swapchain_wait") == std::string::npos &&
++                    log.find("phase=E op=private_swapchain_wait result=-1") != std::string::npos,
++            "bridge log: quick swapchain calls must be quiet and failed ones logged");
  
          std::cout << "Bridge flight logger tests passed.\n";
          return 0;
 diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
-index d9e18fa..5aa29aa 100644
+index d9e18fa..1420997 100644
 --- a/tests/d3d12_history_tests.cpp
 +++ b/tests/d3d12_history_tests.cpp
-@@ -4348,6 +4348,19 @@ using CursorPosition = std::array<int, 2>;
+@@ -3,6 +3,7 @@
+ #include "xrfg/dlss_motion_vectors.hpp"
+ #include <filesystem>
+ #include <fstream>
++#include <iterator>
+ #include "xrfg/d3d12_frame_synthesizer.hpp"
+ #include "xrfg/smooth_cursor_templates.hpp"
+ 
+@@ -4348,6 +4349,19 @@ using CursorPosition = std::array<int, 2>;
      return marker;
  }
  
@@ -407,7 +992,7 @@ index d9e18fa..5aa29aa 100644
  // A cursor image as drawn: the template resized by nearest texel, the way
  // the detection and the composition map pixels to texels.
  struct Sprite {
-@@ -4402,6 +4415,37 @@ void draw_cursor(StereoPattern* pattern, UINT eye, CursorPosition at, const Spri
+@@ -4402,6 +4416,37 @@ void draw_cursor(StereoPattern* pattern, UINT eye, CursorPosition at, const Spri
      draw_cursor_sized(pattern, eye, kCursorWidth, kCursorHeight, at, sprite);
  }
  
@@ -445,16 +1030,18 @@ index d9e18fa..5aa29aa 100644
  void draw_cursor_into(StereoPattern* pattern, UINT width, UINT height, CursorPosition at,
      const Sprite& sprite) {
      for (UINT eye = 0; eye < kEyeCount; ++eye) {
-@@ -4426,6 +4470,8 @@ struct CursorScenario {
+@@ -4426,6 +4471,10 @@ struct CursorScenario {
      bool marker{false};
      // How large DCS draws it against the 32x32 image.
      float scale{1.0F};
 +    // (0011) DCS's cockpit spot: the yellow cross drawn as draw_ray_cursor.
 +    bool ray{false};
++    // (0011) Where the diagnostic capture goes (empty: none).
++    std::filesystem::path capture;
      // Head yaw between the two frames (radians): the scene turns past the
      // view-locked cursor and the previous frame is warped into the current
      // camera.
-@@ -4449,8 +4495,15 @@ struct CursorRun {
+@@ -4449,8 +4498,15 @@ struct CursorRun {
      xrfg::D3D12OpticalFlowBackend backend,
      xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options,
      const CursorScenario& scenario) {
@@ -472,7 +1059,7 @@ index d9e18fa..5aa29aa 100644
      CursorRun run;
      const ReprojectionViews previous_views = make_reprojection_views();
      const ReprojectionViews current_views = make_reprojection_views(scenario.yaw);
-@@ -4466,12 +4519,12 @@ struct CursorRun {
+@@ -4466,12 +4522,12 @@ struct CursorRun {
          const CursorPosition to{from[0] + scenario.motion[0], from[1] + scenario.motion[1]};
          if (scenario.distractor) {
              const CursorPosition still{from[0] + (*scenario.distractor)[0], from[1] + (*scenario.distractor)[1]};
@@ -489,15 +1076,18 @@ index d9e18fa..5aa29aa 100644
          }
      }
      std::array<ComPtr<ID3D12Resource>, 2> sources{
-@@ -4506,6 +4559,7 @@ struct CursorRun {
+@@ -4506,6 +4562,10 @@ struct CursorRun {
          options.enabled = true;
          options.templates.push_back(xrfg::built_in_arrow_template());
          options.templates.push_back(marker_template());
 +        options.templates.push_back(yellow_cross_template());
++        options.capture_directory = scenario.capture;
++        options.capture_limit = 1;
++        options.capture_interval_ms = 0;
          require(synthesizer.set_smooth_cursor(options) == S_OK, "cursor: set_smooth_cursor");
      }
      synthesizer.note_cursor_position(1200, 700, 100'000);
-@@ -4550,9 +4604,10 @@ struct CursorRun {
+@@ -4550,9 +4610,10 @@ struct CursorRun {
  }
  
  struct CursorMeasure {
@@ -511,7 +1101,7 @@ index d9e18fa..5aa29aa 100644
      std::size_t cursor_mismatches{};
      CursorPosition best_offset{};
      // Pixels near either real frame's position (but away from the expected
-@@ -4566,8 +4621,8 @@ struct CursorMeasure {
+@@ -4566,8 +4627,8 @@ struct CursorMeasure {
  };
  
  [[nodiscard]] CursorMeasure measure_cursor(
@@ -522,7 +1112,7 @@ index d9e18fa..5aa29aa 100644
      const int kSize = sprite.size;
      const auto pixel = [&](const StereoPattern& pattern, int x, int y, UINT channel) {
          return static_cast<int>(pattern[eye][(static_cast<std::size_t>(y) * kCursorWidth +
-@@ -4601,7 +4656,7 @@ struct CursorMeasure {
+@@ -4601,7 +4662,7 @@ struct CursorMeasure {
                      const int y = expected[1] + oy + ty;
                      for (UINT channel = 0; channel < 3U; ++channel) {
                          if (std::abs(pixel(output, x, y, channel) -
@@ -531,7 +1121,7 @@ index d9e18fa..5aa29aa 100644
                              ++mismatches;
                              break;
                          }
-@@ -4653,17 +4708,25 @@ void test_smooth_cursor(
+@@ -4653,17 +4714,25 @@ void test_smooth_cursor(
      xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
      xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options = {}) {
      const char* label = backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "NVIDIA" : "FidelityFX";
@@ -563,7 +1153,7 @@ index d9e18fa..5aa29aa 100644
          CursorScenario off = on;
          off.feature = false;
          const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, on);
-@@ -4679,7 +4742,8 @@ void test_smooth_cursor(
+@@ -4679,7 +4748,8 @@ void test_smooth_cursor(
                  std::to_string(with.stats.low_score) + ", margin " +
                  std::to_string(with.stats.ambiguous) + ", stereo " +
                  std::to_string(with.stats.stereo) + ", jump " + std::to_string(with.stats.jump) +
@@ -573,7 +1163,7 @@ index d9e18fa..5aa29aa 100644
          for (UINT output = 0; output < (triple ? 2U : 1U); ++output) {
              const float t = with.fractions[output];
              for (UINT eye = 0; eye < kEyeCount; ++eye) {
-@@ -4688,12 +4752,13 @@ void test_smooth_cursor(
+@@ -4688,12 +4758,13 @@ void test_smooth_cursor(
                  const CursorPosition expected{
                      to[0] + static_cast<int>(std::lround((from[0] - to[0]) * (1.0F - t))),
                      to[1] + static_cast<int>(std::lround((from[1] - to[1]) * (1.0F - t)))};
@@ -591,3 +1181,57 @@ index d9e18fa..5aa29aa 100644
                            << (on.scale != 1.0F ? " scale=" + std::to_string(on.scale) : std::string())
                            << " t=" << t
                            << " eye=" << eye << ": on mismatches=" << good.cursor_mismatches
+@@ -4712,6 +4783,53 @@ void test_smooth_cursor(
+         }
+     }
+ 
++    // (0011) The diagnostic capture: the cockpit spot's pair writes both
++    // crops, centred on each frame's detection, the overview and the figures.
++    {
++        const std::filesystem::path directory =
++            std::filesystem::temp_directory_path() / ("xrfg-cursor-capture-" + std::to_string(GetCurrentProcessId()));
++        std::filesystem::remove_all(directory);
++        std::filesystem::create_directories(directory);
++        CursorScenario on{};
++        on.ray = true;
++        on.scale = 2.0F;
++        on.previous = {CursorPosition{40, 50}, CursorPosition{28, 50}};
++        on.motion = {70, 16};
++        on.capture = directory;
++        const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, on);
++        const std::wstring stem = L"cursor-capture-" + std::to_wstring(GetCurrentProcessId()) + L"-1";
++        const auto read_file = [&](const wchar_t* suffix) {
++            std::ifstream file(directory / (stem + suffix), std::ios::binary);
++            return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
++        };
++        // Written on a thread of their own, the figures last.
++        for (int wait = 0; wait < 100; ++wait) {
++            const std::vector<std::uint8_t> figures = read_file(L"-info.txt");
++            if (std::string(figures.begin(), figures.end()).find("current:") != std::string::npos) {
++                break;
++            }
++            Sleep(50);
++        }
++        const std::vector<std::uint8_t> current = read_file(L"-current.bmp");
++        const std::vector<std::uint8_t> overview = read_file(L"-overview.bmp");
++        const std::vector<std::uint8_t> info = read_file(L"-info.txt");
++        require(with.stats.drawn == 1 && current.size() == 54U + 384U * 384U * 3U &&
++                    read_file(L"-previous.bmp").size() == current.size() && !overview.empty() && !info.empty(),
++            "cursor capture: the files were not written");
++        // The crop is centred on the current detection: its centre pixel is
++        // the cross's centre (the lit orange, not the panel).
++        const std::size_t row = 384U * 3U;
++        const std::size_t centre = 54U + (384U - 1U - 192U) * row + 192U * 3U;
++        const int blue = current[centre], green = current[centre + 1U], red = current[centre + 2U];
++        require(red > 200 && green > 100 && blue < 120,
++            "cursor capture: the current crop is not centred on the cursor (" + std::to_string(red) + "," +
++                std::to_string(green) + "," + std::to_string(blue) + ")");
++        const std::string text(info.begin(), info.end());
++        require(text.find("current: status 1") != std::string::npos, "cursor capture: the figures are missing");
++        std::filesystem::remove_all(directory);
++        std::cout << "smooth cursor " << label << ": diagnostic capture written and centred\n";
++    }
++
+     // A second identical arrow that stays still 34 px below: either could be
+     // the cursor, so the gate must leave the frame exactly as without.
+     {

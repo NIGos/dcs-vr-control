@@ -74,7 +74,7 @@ public static class ConfigurationWriters
 
         [diagnostics]
         logging_enabled={(p.DiagnosticRecorder ? 1 : 0)}
-        max_file_mb=128
+        max_file_mb=256
         flush_each_event=0
 
         [overlay]
@@ -99,6 +99,7 @@ public static class ConfigurationWriters
         stereo_output_multiplier=1
         sharpen_focus_view={Number(p.QuadSharpening)}
         smoothen_focus_view_edges={Number(p.QuadEdgeBlend)}
+        focus_view_shape={(p.QuadRoundFocus ? 2 : 0)}
         horizontal_fixed_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_fixed_section={Number(Math.Min(p.FoveaHeight, .9))}
         horizontal_focus_section={Number(Math.Min(p.FoveaWidth, .9))}

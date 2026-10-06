@@ -405,7 +405,8 @@ function buildFields() {
   field(c,'foveaHeight','Focus height','Without Quad Views: vertical share of the view in high detail.','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
   field(c,'peripheralScale','Peripheral resolution','Foveated Super Resolution without Quad Views: lower values save GPU outside the focus area.','number',[.15,1,.01],foveatedSr,'ratio',stereoHidden);
   field(c,'quadSharpening','Focus sharpening','Extra sharpening of the focus area.','number',[0,1,.01],quad,'ratio');
-  field(c,'quadEdgeBlend','Focus edge blending','Softens the border between focus and periphery. Following Pimax Play, 0 when its Transition Mode is Off.','number',[0,.5,.01],quad,'ratio');
+  field(c,'quadRoundFocus','Round focus area','The sharp area is a circle that fades into the periphery down to nothing, instead of the rectangle Quad Views uses, whose edge stays visible.','toggle',null,quad);
+  field(c,'quadEdgeBlend','Focus edge blending','How wide the focus area fades into the periphery: wider is softer, with a little less fully sharp area. Following Pimax Play, 0 (a sharp edge) when its Transition Mode is Off.','number',[0,.5,.01],quad,'ratio');
   // DLSS 5 page: on/off and the runtime file first, Foveated Super Resolution (stereo only) on its own, then the image controls.
   c = card('dlssControls','DLSS 5','Neural rendering with your own NVIDIA runtime file, which is not included with this app.');
   field(c,'neuralRendering','Neural rendering','Turns the neural image stage on. With Quad Views it runs on the focus views through the focus adapter.','toggle');

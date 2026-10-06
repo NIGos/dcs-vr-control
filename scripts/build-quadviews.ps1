@@ -187,5 +187,63 @@ if (-not $layerText.Contains('DCSVR direct source view')) {
     }
     [IO.File]::WriteAllText($layerSource, $layerText)
 }
+# focus_view_shape: upstream blends the focus view in over a rectangular band whose alpha never drops below 0.5
+# (max(0.5, s.x * s.y)), so the focus area always ends in a 50 % step that stays visible against the much softer
+# periphery. focus_view_shape=2 makes the focus area the ellipse inscribed in the focus view (a circle for a square
+# focus view) and fades it out radially with smoothstep over the same width smoothen_focus_view_edges gives the
+# rectangle (2 x its value in normalized view coordinates), down to exactly 0 at the edge. Other values (or none)
+# keep upstream behaviour. Larger exponents round a square instead (4: a rounded square).
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('m_focusViewShape')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @(
+            (('        alignas(4) bool debugFocusView;', '    };') -join $nl),
+            (('        alignas(4) bool debugFocusView;',
+             '        alignas(4) float focusViewShape;',
+             '        alignas(4) float padding[3];',
+             '    };') -join $nl)
+        ),
+        @('        float m_smoothenFocusViewEdges{0.2f};', "        float m_smoothenFocusViewEdges{0.2f};$($nl)        float m_focusViewShape{0.f};"),
+        @('                    } else if (name == "smoothen_focus_view_edges") {',
+          (('                    } else if (name == "focus_view_shape") {',
+            '                        m_focusViewShape = std::clamp(std::stof(value), 0.f, 16.f);',
+            '                        parsed = true;',
+            '                    } else if (name == "smoothen_focus_view_edges") {') -join $nl)),
+        @('                drawing.smoothingArea = m_smoothenFocusViewEdges;',
+          "                drawing.smoothingArea = m_smoothenFocusViewEdges;$($nl)                drawing.focusViewShape = m_focusViewShape;"),
+        @('                            Log(fmt::format("Edge smoothing: {:.2f}\n", m_smoothenFocusViewEdges));',
+          (('                            Log(fmt::format("Edge smoothing: {:.2f}\n", m_smoothenFocusViewEdges));',
+            '                            if (m_focusViewShape >= 1.f) {',
+            '                                Log(fmt::format("Focus view shape: rounded, exponent {:.1f}\n", m_focusViewShape));',
+            '                            }') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
+$pixelShaderSource = Join-Path $quadRoot 'openxr-api-layer/ProjectionPS.hlsl'
+$pixelShaderText = [IO.File]::ReadAllText($pixelShaderSource)
+if (-not $pixelShaderText.Contains('focusViewShape')) {
+    $nl = if ($pixelShaderText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @('    bool debugFocusView;', "    bool debugFocusView;$($nl)    float focusViewShape;"),
+        @('    if (smoothingArea) {',
+          (('    if (focusViewShape >= 1) {',
+            '        // DCS VR Control: a rounded focus area fading out radially to exactly 0 at its edge.',
+            '        float2 d = abs(layer1ProjectedCoordNdc);',
+            '        float r = pow(pow(d.x, focusViewShape) + pow(d.y, focusViewShape), 1 / focusViewShape);',
+            '        float width = clamp(2 * smoothingArea, 0.01, 0.95);',
+            '        color1.a = isInside * (1 - smoothstep(1 - width, 1, r));',
+            '    } else if (smoothingArea) {') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($pixelShaderText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views shader changed: $(($edit[0] -split "`n")[0])" }
+        $pixelShaderText = $pixelShaderText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($pixelShaderSource, $pixelShaderText)
+}
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }

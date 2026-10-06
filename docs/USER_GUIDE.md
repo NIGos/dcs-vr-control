@@ -104,7 +104,7 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
   - The app follows whichever tab is active in Pimax Play. **Note:** in Pimax Play, simply clicking the *Fine* tab switches Pimax to Fine mode, so the app will read the Fine values from then on. Go back to *Quick* in Pimax Play if that is the one you want.
   - If you change the values in Pimax Play, you don't need to do anything else: the next **Launch DCS** updates the focus area ("Pimax Play changed: focus updated to …").
   - With **This profile**, you set the values in the app, in the same Quick units as Pimax Play.
-- **Focus sharpening**, **edge blending**, **turbo mode** — fine-tuning. Turbo is off by default: in flight it caused a visible "old frames" effect when turning the head.
+- **Focus sharpening**, **edge blending**, **turbo mode** — fine-tuning. The focus area is round; edge blending is how wide its edge fades into the periphery (wider is softer, a little less fully sharp area). Turbo is off by default: in flight it caused a visible "old frames" effect when turning the head.
 - **How bundled Quad Views reproduces this** (folded) shows the conversion and, once DCS has run, the focus size in pixels per eye.
 
 **Cost/benefit, measured on the test PC (Crystal Super, RTX 5090):** with Pimax Play's own Quad View values, bundled Quad Views ran at about **78 FPS** with working eye tracking, against about 37 FPS with the much larger old defaults. At the same Pimax percentages, bundled Quad Views draws a smaller focus than Pimax's own runtime does, so it is roughly three times cheaper. The bundled provider is limited to 90% of the view per axis.

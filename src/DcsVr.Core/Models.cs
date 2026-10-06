@@ -60,6 +60,9 @@ public sealed record VrProfile
     public double QuadFocusScale { get; init; } = 1.125;
     public double QuadSharpening { get; init; } = 0.7;
     public double QuadEdgeBlend { get; init; } = 0.2;
+    /// <summary>Quad Views focus area as the circle inscribed in the focus view, fading out radially over QuadEdgeBlend down
+    /// to nothing (focus_view_shape=2); off keeps Quad Views' rectangle, whose fade stops at 50 % and leaves a visible step.</summary>
+    public bool QuadRoundFocus { get; init; } = true;
     /// <summary>Quad Views turbo: DCS starts the next frame while the runtime still holds the previous one. Quad Views itself
     /// enables it on most runtimes and disables it on SteamVR; off by default until measured in the headset.</summary>
     public bool QuadTurbo { get; init; }

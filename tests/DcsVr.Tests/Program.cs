@@ -339,6 +339,7 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(new VrProfile().FrameGenFactor == VrProfile.FrameGenAuto && ConfigurationWriters.Ofxr(auto).Contains("adaptive_frame_gen=1") && ConfigurationWriters.Ofxr(auto).Contains("triple_frame_gen=0") && ConfigurationWriters.Ofxr(triple).Contains("adaptive_frame_gen=0"));
     Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
     Require(ConfigurationWriters.QuadViews(new VrProfile { QuadTurbo = true }).Contains("turbo_mode=1") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("turbo_mode=0"));
+    Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("focus_view_shape=2") && ConfigurationWriters.QuadViews(new VrProfile { QuadRoundFocus = false }).Contains("focus_view_shape=0"));
 });
 Test("The smoothness buffer writes OFXR's deep_pipeline in 2x, 3x and Auto, on unless the profile turns it off", () =>
 {
@@ -920,7 +921,7 @@ Test("Custom quality controls target supported provider fields", () =>
 {
     var p = new VrProfile { QuadFocusScale = 1.25, QuadSharpening = .45, QuadEdgeBlend = .15, FlowPreset = NvidiaFlowPreset.Slow, BidirectionalFlow = true, NvidiaFlowScale = 100 };
     var quad = ConfigurationWriters.QuadViews(p); var flow = ConfigurationWriters.Ofxr(p);
-    Require(quad.Contains("focus_multiplier=1.25") && quad.Contains("sharpen_focus_view=0.45") && quad.Contains("smoothen_focus_view_edges=0.15"));
+    Require(quad.Contains("focus_multiplier=1.25") && quad.Contains("sharpen_focus_view=0.45") && quad.Contains("smoothen_focus_view_edges=0.15") && quad.Contains("focus_view_shape=2"));
     Require(flow.Contains("nvidia_preset=slow") && flow.Contains("nvidia_bidirectional=1") && flow.Contains("nvidia_input_scale=100"));
     Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(p)) == p);
 });
