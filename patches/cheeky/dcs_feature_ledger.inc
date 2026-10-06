@@ -192,3 +192,21 @@ thread_local bool dcs_materializing_feature{};
     NgxParameters* parameters, NgxHandle** handle, NgxResult& result) noexcept;
 [[nodiscard]] bool dcs_release_deferred_d3d11(NgxHandle* handle, NgxResult& result) noexcept;
 [[nodiscard]] bool dcs_is_deferred_d3d11(const NgxHandle* handle) noexcept;
+[[nodiscard]] bool dcs_deferred_unmaterialized(const NgxHandle* handle) noexcept;
+// DCS's creation-time DLSS parameters on its shared bag while a deferred view's
+// private SR evaluates (restored afterwards); no-op for every other handle.
+[[nodiscard]] bool dcs_deferred_push_create_values(const NgxHandle* handle, const NgxParameters* parameters) noexcept;
+void dcs_deferred_pop_create_values() noexcept;
+struct DcsDeferredCreateValuesScope {
+    bool active{};
+    DcsDeferredCreateValuesScope(const NgxHandle* handle, const NgxParameters* parameters) noexcept
+        : active(dcs_deferred_push_create_values(handle, parameters)) {}
+    ~DcsDeferredCreateValuesScope() { if (active) dcs_deferred_pop_create_values(); }
+    DcsDeferredCreateValuesScope(const DcsDeferredCreateValuesScope&) = delete;
+    DcsDeferredCreateValuesScope& operator=(const DcsDeferredCreateValuesScope&) = delete;
+};
+// Frames of a deferred view produced without DCS's own feature (see dcs_deferred_feature.inc).
+[[nodiscard]] bool dcs_deferred_hold_unproven(const D3D11RuntimeCallbacks& runtime, ID3D11DeviceContext* context,
+    const NgxHandle* handle, const NgxParameters* parameters, NgxResult& result) noexcept;
+[[nodiscard]] bool dcs_deferred_keep_transport(const D3D11RuntimeCallbacks& runtime, ID3D11DeviceContext* context,
+    const NgxHandle* handle, const NgxParameters* parameters, const Settings& settings, NgxResult& result) noexcept;

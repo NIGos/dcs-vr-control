@@ -41,6 +41,9 @@ public sealed record VrProfile
     /// to 2×, 3× and Auto (fork patch 0007); in 3× the extra slot is taken only under sustained lateness.</summary>
     public bool FrameGenDeepPipeline { get; init; } = true;
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
+    /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
+    /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored
+    /// there (<see cref="UsesFoveatedDlss"/>) and cleared by <see cref="ProfileValidation.ResolveFeatures"/>.</summary>
     public bool FoveatedDlss { get; init; }
     public bool NeuralRendering { get; init; }
     public bool QuadFocusAdapter { get; init; }
@@ -163,7 +166,9 @@ public sealed record VrProfile
     public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>
     public bool UsesBoostHelper => CpuBoost || FreeVram || LowerMonitor;
-    public bool UsesCheeky => FoveatedDlss || NeuralRendering;
+    /// <summary>Foveated Super Resolution actually runs: only in stereo, without Quad Views.</summary>
+    public bool UsesFoveatedDlss => FoveatedDlss && QuadViews == QuadProvider.None;
+    public bool UsesCheeky => UsesFoveatedDlss || NeuralRendering;
     public bool UsesQuadFocus => UsesCheeky && QuadViews == QuadProvider.QuadViewsFoveated && QuadFocusAdapter;
     /// <summary>Central DLSS 5 area actually written to Cheeky: only with the focus adapter and DLSS 5 on.</summary>
     public bool UsesCentralNeuralArea => UsesQuadFocus && NeuralRendering && NeuralFocusArea < 100;

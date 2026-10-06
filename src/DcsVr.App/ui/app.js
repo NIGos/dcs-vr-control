@@ -98,17 +98,22 @@ function sync(next) {
   renderDiagnostics(); renderOriginals(); updateControls();
 }
 // ---- Features: what the checklist turns on, and what follows from it -------------------------------------------
-// The DLSS row stands for any DLSS processing: DLSS 5 neural rendering or Foveated DLSS on its own.
-const featureState = p => ({quad:p.quadViews !== 'None', dlss:Boolean(p.neuralRendering || p.foveatedDlss), framegen:p.frameGen !== 'Off', boost:Boolean(p.cpuBoost)});
-/** Pimax native Quad Views exists only on the Pimax route and cannot host the focus adapter DLSS needs. */
-const nativeAllowed = p => p.runtime !== 'SboysSteamVr' && !(p.neuralRendering || p.foveatedDlss);
+/** Foveated Super Resolution runs only in stereo: with Quad Views it would redo DCS's DLSS of the focus views instead of
+ *  DLSS 5 building on it, so Quad Views turns it off (resolveFeatures) and hides it. */
+const foveatedSr = p => Boolean(p.foveatedDlss) && p.quadViews === 'None';
+// The DLSS row stands for any DLSS processing: DLSS 5 neural rendering or, in stereo, Foveated Super Resolution on its own.
+const featureState = p => ({quad:p.quadViews !== 'None', dlss:Boolean(p.neuralRendering || foveatedSr(p)), framegen:p.frameGen !== 'Off', boost:Boolean(p.cpuBoost)});
+/** Pimax native Quad Views exists only on the Pimax route and cannot host the focus adapter DLSS 5 needs. */
+const nativeAllowed = p => p.runtime !== 'SboysSteamVr' && !p.neuralRendering;
 /** Cheeky without Quad Views (stereo): it clamps the focus and periphery ratios to at least 0.2. */
 const stereoCheeky = p => Boolean(p.neuralRendering || p.foveatedDlss) && p.quadViews === 'None';
 const CHEEKY_MIN = .2;
 /** Settles combinations that cannot run, so a draft is always deployable as far as the features go. */
 function resolveFeatures(p) {
+  // Foveated Super Resolution is for stereo only (same rule as ProfileValidation.ResolveFeatures).
+  if (p.quadViews !== 'None') p.foveatedDlss = false;
   const cheeky = p.neuralRendering || p.foveatedDlss;
-  // Pimax native Quad Views exists only in Pimax Play, and it cannot host the focus adapter that DLSS needs.
+  // Pimax native Quad Views exists only in Pimax Play, and it cannot host the focus adapter that DLSS 5 needs.
   if (p.quadViews === 'PimaxNative' && (p.runtime === 'SboysSteamVr' || cheeky)) p.quadViews = 'QuadViewsFoveated';
   // With Quad Views, Cheeky always runs on the focus views through the adapter.
   p.quadFocusAdapter = Boolean(cheeky && p.quadViews === 'QuadViewsFoveated');
@@ -116,7 +121,7 @@ function resolveFeatures(p) {
 }
 function setFeature(p, key, on) {
   if (key === 'quad') p.quadViews = on ? (p.quadViews !== 'None' ? p.quadViews : lastProvider) : 'None';
-  // Checking it turns DLSS 5 on unless Foveated DLSS already runs; unchecking turns both off.
+  // Checking it turns DLSS 5 on unless Foveated Super Resolution already runs; unchecking turns both off.
   if (key === 'dlss') { if (!on) { p.neuralRendering = false; p.foveatedDlss = false; } else if (!p.neuralRendering && !p.foveatedDlss) p.neuralRendering = true; }
   if (key === 'framegen') p.frameGen = on ? (p.frameGen !== 'Off' ? p.frameGen : lastFrameGen) : 'Off';
   if (key === 'boost') p.cpuBoost = on;
@@ -126,7 +131,7 @@ function setFeature(p, key, on) {
 function deriveIdentity(p) {
   const route = p.runtime === 'SboysSteamVr' ? 'Sboys' : 'Pimax', parts = [];
   if (p.quadViews === 'PimaxNative') parts.push(['nativeqv','Pimax Quad Views']); else if (p.quadViews !== 'None') parts.push(['qv','Quad Views']);
-  if (p.neuralRendering) parts.push(['dlss5','DLSS 5']); else if (p.foveatedDlss) parts.push(['fdlss','Foveated DLSS']);
+  if (p.neuralRendering) parts.push(['dlss5','DLSS 5']); else if (foveatedSr(p)) parts.push(['fdlss','Foveated DLSS']);
   if (p.frameGen !== 'Off') parts.push(['fg','Frame generation']);
   if (p.cpuBoost) parts.push(['boost','CPU Boost']);
   return {id:route.toLowerCase()+'-'+(parts.length ? parts.map(x => x[0]).join('-') : 'original'), name:route+' · '+(parts.length ? parts.map(x => x[1]).join(' + ') : 'Original rendering')};
@@ -160,9 +165,9 @@ function featureSummary(key, p) {
     return `Bundled · ${gaze} · profile ${profileQuick(p)}`;
   }
   if (key === 'dlss') {
-    if (!p.neuralRendering) return p.foveatedDlss ? 'Foveated DLSS on' + (p.quadFocusAdapter ? ' · focus views' : '') + ' · DLSS 5 off' : 'Off · original image';
+    if (!p.neuralRendering) return foveatedSr(p) ? 'Foveated Super Resolution on · DLSS 5 off' : 'Off · original image';
     const area = p.quadFocusAdapter ? (p.neuralFocusArea < 100 ? 'Central '+p.neuralFocusArea+'%' : 'Whole focus area') : 'Whole view';
-    return [area, p.neuralStyle, p.foveatedDlss ? 'Foveated DLSS' : null, p.neuralRuntimePath || state?.savedRuntime ? null : 'runtime file missing'].filter(Boolean).join(' · ');
+    return [area, p.neuralStyle, foveatedSr(p) ? 'Foveated SR' : null, p.neuralRuntimePath || state?.savedRuntime ? null : 'runtime file missing'].filter(Boolean).join(' · ');
   }
   if (key === 'framegen') {
     if (p.frameGen === 'Off') return 'Off · rendered frames only';
@@ -180,8 +185,8 @@ function featureNotes(p) {
   const notes = {quad:[],dlss:[],framegen:[],boost:[]}, cheeky = p.neuralRendering || p.foveatedDlss;
   // Only when the provider the user picked (Pimax native) was replaced.
   if (p.quadViews === 'QuadViewsFoveated' && lastProvider === 'PimaxNative' && !nativeAllowed(p))
-    notes.quad.push(['info',cheeky ? "Bundled: Pimax native can't host DLSS." : 'Bundled: Pimax native is Pimax-route only.']);
-  if (p.quadViews === 'QuadViewsFoveated' && cheeky && p.quadViewsLayerDirectory) notes.quad.push(['needs','DLSS needs the bundled provider.','quadViewsLayerDirectory','Open']);
+    notes.quad.push(['info',cheeky ? "Bundled: Pimax native can't host DLSS 5." : 'Bundled: Pimax native is Pimax-route only.']);
+  if (p.quadViews === 'QuadViewsFoveated' && cheeky && p.quadViewsLayerDirectory) notes.quad.push(['needs','DLSS 5 needs the bundled provider.','quadViewsLayerDirectory','Open']);
   if (pimaxSource(p) && state?.pimax && !state.pimax.found) notes.quad.push(['needs','Pimax Play values not found.','foveaSource','Open']);
   // The app keeps a verified copy of the runtime file, so it is asked for only when there is neither that copy nor a file of the profile's own.
   if (p.neuralRendering && !p.neuralRuntimePath && !state?.savedRuntime) notes.dlss.push(['needs','Needs nvngx_dlssnr.dll.','neuralRuntimePath','Select file']);
@@ -361,7 +366,7 @@ function captureHotkey(f) {
   button.addEventListener('blur',() => { if (button.classList.contains('capturing')) stop(); });
 }
 const nr = p => p.neuralRendering, flow = p => p.frameGen === 'Nvidia', quad = p => p.quadViews === 'QuadViewsFoveated' && !p.quadViewsLayerDirectory;
-const coverageOwned = p => quad(p) || (p.quadViews === 'None' && (p.foveatedDlss || p.neuralRendering));
+const coverageOwned = p => quad(p) || stereoCheeky(p);
 const boost = p => p.cpuBoost;
 // Monitor modes as "1920x1080@60" in the select; the profile keeps width, height and refresh.
 const profileDefaults = {flightDisplayWidth:1920, flightDisplayHeight:1080, flightDisplayRefresh:60};
@@ -380,11 +385,11 @@ function fillDisplayModes(monitor) {
 function buildFields() {
   // Quad Views page: provider and focus movement first, then where the focus area comes from.
   let c = card('foveationControls','Foveated rendering','DCS renders a sharp focus area and a lower-resolution periphery.');
-  field(c,'quadViews','Quad Views provider','Bundled works with DLSS 5 and frame generation. Pimax native uses Pimax Play\'s own Quad Views: Pimax route only, without DLSS.','select',[['None','Off · normal stereo'],['QuadViewsFoveated','Bundled Quad Views (recommended)'],['PimaxNative','Pimax native Quad Views']]);
+  field(c,'quadViews','Quad Views provider','Bundled works with DLSS 5 and frame generation. Pimax native uses Pimax Play\'s own Quad Views: Pimax route only, without DLSS 5.','select',[['None','Off · normal stereo'],['QuadViewsFoveated','Bundled Quad Views (recommended)'],['PimaxNative','Pimax native Quad Views']]);
   field(c,'gaze','Focus movement','Follow your eyes, or keep the focus area centred.','select',[['EyeTracked','Eye tracked'],['Fixed','Fixed (centred)']],p => p.quadViews !== 'None');
   field(c,'quadTurbo','Turbo mode','DCS starts the next frame while the headset still shows the previous one. Can help when the CPU limits FPS.','toggle',null,quad);
   let more = disclosure(c,'Alternative provider','Only to test another Quad Views build.');
-  field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 and Foveated DLSS need.','path',null,p => p.quadViews === 'QuadViewsFoveated');
+  field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 needs.','path',null,p => p.quadViews === 'QuadViewsFoveated');
   c = card('focusControls','Focus area','Size and sharpness of the high-detail area, in Pimax Play\'s own units.');
   field(c,'foveaSource','Focus area source','From Pimax Play\'s settings: the Quad View values set in Pimax Play, read again at every launch, on the Pimax and the Sboys route alike; nothing is written to Pimax. This profile: set them below, in Pimax Play\'s Quick units.','select',[['PimaxPlay','From Pimax Play\'s settings'],['Profile','This profile']],quad);
   const pimaxBox = document.createElement('div'); pimaxBox.id = 'pimaxFovea'; pimaxBox.className = 'pimax-fovea'; pimaxBox.hidden = true; c.append(pimaxBox);
@@ -394,20 +399,21 @@ function buildFields() {
   field(c,'pimaxPeripheral','Peripheral resolution','As in Pimax Play: 20% renders the periphery at 0.1919 of full resolution. Lower values save GPU outside the focus; bundled Quad Views needs at least 16%.','number',[16,100,1],quad,'%',ownFocusHidden,{prop:'peripheralScale',get:p => whole(PIMAX.peripheralPercent(p.peripheralScale)),set:(p,v) => p.peripheralScale = PIMAX.peripheryFromPercent(v)});
   field(c,'pimaxHorizontalFov','Horizontal FOV','As Pimax Play\'s Quick Horizontal FOV: the share of the view left outside the focus, so 33% renders a focus 67% of the view wide.','number',[5,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
   field(c,'pimaxVerticalFov','Vertical FOV','As Pimax Play\'s Quick Vertical FOV: 33% renders a focus 67% of the view tall.','number',[5,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
-  // Foveated DLSS without Quad Views (stereo Cheeky) sizes its own focus as fractions of the view.
+  // Stereo Cheeky (DLSS 5 or Foveated Super Resolution without Quad Views) sizes its own focus as fractions of the view.
   const stereoHidden = p => p.quadViews !== 'None';
-  field(c,'foveaWidth','Focus width','Foveated DLSS without Quad Views: horizontal share of the view in high detail.','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
-  field(c,'foveaHeight','Focus height','Foveated DLSS without Quad Views: vertical share of the view in high detail.','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
-  field(c,'peripheralScale','Peripheral resolution','Foveated DLSS without Quad Views: lower values save GPU outside the focus area.','number',[.15,1,.01],p => p.quadViews === 'None' && p.foveatedDlss,'ratio',stereoHidden);
+  field(c,'foveaWidth','Focus width','Without Quad Views: horizontal share of the view in high detail.','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
+  field(c,'foveaHeight','Focus height','Without Quad Views: vertical share of the view in high detail.','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
+  field(c,'peripheralScale','Peripheral resolution','Foveated Super Resolution without Quad Views: lower values save GPU outside the focus area.','number',[.15,1,.01],foveatedSr,'ratio',stereoHidden);
   field(c,'quadSharpening','Focus sharpening','Extra sharpening of the focus area.','number',[0,1,.01],quad,'ratio');
   field(c,'quadEdgeBlend','Focus edge blending','Softens the border between focus and periphery. Following Pimax Play, 0 when its Transition Mode is Off.','number',[0,.5,.01],quad,'ratio');
-  // DLSS 5 page: on/off and the runtime file first, Foveated DLSS on its own, then the image controls.
+  // DLSS 5 page: on/off and the runtime file first, Foveated Super Resolution (stereo only) on its own, then the image controls.
   c = card('dlssControls','DLSS 5','Neural rendering with your own NVIDIA runtime file, which is not included with this app.');
   field(c,'neuralRendering','Neural rendering','Turns the neural image stage on. With Quad Views it runs on the focus views through the focus adapter.','toggle');
   field(c,'neuralRuntimePath','Runtime file','Your nvngx_dlssnr.dll (tested version 310.8). Selected once: the app keeps a verified copy and uses it whenever this field is empty.','path',null,nr);
   const savedBox = document.createElement('div'); savedBox.id = 'savedRuntime'; savedBox.className = 'saved-runtime'; savedBox.hidden = true; $('setting-neuralRuntimePath').append(savedBox);
-  c = card('foveatedDlssControls','Foveated DLSS','DLSS Super Resolution with more detail where you look. Works with or without DLSS 5.');
-  field(c,'foveatedDlss','Foveated Super Resolution','Without Quad Views it foveates the stereo view; with Quad Views it works on the focus views.','toggle');
+  // Hidden with Quad Views (updateControls): there DLSS 5 builds on DCS's own DLSS of the focus views.
+  c = card('foveatedDlssControls','Foveated DLSS','Stereo only. Works with or without DLSS 5.');
+  field(c,'foveatedDlss','Foveated Super Resolution','Performance: DLSS at full quality only where you look, lighter in the periphery. For stereo without Quad Views.','toggle',null,null,'',p => p.quadViews !== 'None');
   c = card('dlssProcessing','DLSS 5 image','Working scale and area set the GPU cost; intensity and style set the look.');
   field(c,'neuralWorkingScale','Working scale','Lower scale reduces GPU work and neural detail.','number',[.1,1,.01],nr,'ratio');
   field(c,'neuralFocusArea','DLSS 5 area','Part of each focus view DLSS 5 processes; the edge fades into normal DLSS. GPU time for both eyes, measured on an RTX 5090 at 1764×2480 per eye and full working scale.','select',[[100,'Whole focus area · 10.8 ms · default'],[80,'Central 80% · 7.9 ms'],[70,'Central 70% · 6.4 ms'],[50,'Central 50% · 4.8 ms']],p => nr(p) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter);
@@ -592,7 +598,9 @@ function updateControls() {
   fields.forEach(f => { const inactive = Boolean(f.condition && !f.condition(profile)); f.element.classList.toggle('inactive',inactive); f.input.disabled = busy || inactive; if (f.range) f.range.disabled = busy || inactive; f.element.hidden = Boolean(f.hide && f.hide(profile)); });
   // Pimax native exists only on the Pimax route and cannot host the focus adapter DLSS needs.
   const native = $('input-quadViews').querySelector('[value=PimaxNative]'); native.disabled = !nativeAllowed(profile);
-  native.textContent = 'Pimax native Quad Views' + (profile.runtime === 'SboysSteamVr' ? ' · Pimax route only' : native.disabled ? ' · not with DLSS / Foveated DLSS' : '');
+  native.textContent = 'Pimax native Quad Views' + (profile.runtime === 'SboysSteamVr' ? ' · Pimax route only' : native.disabled ? ' · not with DLSS 5' : '');
+  // Foveated Super Resolution is a stereo option: its card is gone while Quad Views is on.
+  $('foveatedDlssControls').hidden = profile.quadViews !== 'None';
   // Stereo Cheeky clamps these ratios to 0.2 or more: say which value is written when the field holds less.
   fields.filter(f => ['foveaWidth','foveaHeight','peripheralScale'].includes(f.path)).forEach(f => {
     const help = $('help-'+f.path), clamped = stereoCheeky(profile) && Number(profile[f.path]) < CHEEKY_MIN;
@@ -607,7 +615,7 @@ function updateControls() {
   });
   const e = effectiveFovea(profile), owns = coverageOwned(profile);
   $('focusBox').style.width = e.w*100+'%'; $('focusBox').style.height = e.h*100+'%'; $('focusBox').hidden = profile.quadViews === 'None' && !owns;
-  // Pimax Play's units for Quad Views; fractions of the view for Foveated DLSS without Quad Views.
+  // Pimax Play's units for Quad Views; fractions of the view for stereo Cheeky without Quad Views.
   const pimaxFound = state?.pimax?.found;
   $('coverageDetail').textContent = quad(profile) ? (e.pimax ? `Pimax Play ${state.pimax.short}` : `Horizontal FOV ${whole(PIMAX.quickFromShare(profile.foveaWidth))}% · Vertical FOV ${whole(PIMAX.quickFromShare(profile.foveaHeight))}% · Center ${whole(PIMAX.centerFromDensity(profile.quadFocusScale))}% · Peripheral ${whole(PIMAX.peripheralPercent(profile.peripheralScale))}% (Pimax Quick units)`)
     : owns ? `${Math.round(e.w*100)}% width · ${Math.round(e.h*100)}% height · ${Math.round(e.periphery*100)}% peripheral scale` : profile.quadViews === 'PimaxNative' && pimaxFound ? `Pimax native · Pimax Play ${state.pimax.short}` : 'Coverage is controlled by the selected provider.';
@@ -619,7 +627,7 @@ function updateControls() {
   const on = featureState(profile);
   const tiles = [
     ['foveation','QUAD VIEWS',on.quad,profile.quadViews === 'None' ? 'Off' : profile.quadViews === 'PimaxNative' ? 'Pimax native' : 'Bundled Quad Views',featureSummary('quad',profile)],
-    ['dlss','DLSS 5',on.dlss,profile.neuralRendering ? 'DLSS 5 neural' : profile.foveatedDlss ? 'Foveated DLSS' : 'Off',featureSummary('dlss',profile)],
+    ['dlss','DLSS 5',on.dlss,profile.neuralRendering ? 'DLSS 5 neural' : foveatedSr(profile) ? 'Foveated SR' : 'Off',featureSummary('dlss',profile)],
     ['framegen','FRAME GENERATION',on.framegen,profile.frameGen === 'Off' ? 'Off' : profile.frameGen === 'Nvidia' ? 'OFXR · NVIDIA' : 'OFXR · FidelityFX',featureSummary('framegen',profile)],
     ['boost','CPU BOOST',on.boost,on.boost ? 'CPU Boost' : 'Off',featureSummary('boost',profile)]
   ];

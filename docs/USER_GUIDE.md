@@ -29,7 +29,7 @@ DCS VR Control prepares and starts DCS World in VR with a set of performance and
 | Feature | What you get |
 | --- | --- |
 | **Quad Views** | Foveated rendering: DCS draws a sharp *focus* area where you look (eye tracked or fixed in the centre) and a lower-resolution periphery. Uses the focus values you already set in Pimax Play. |
-| **DLSS 5** | NVIDIA's DLSS-NR neural rendering, applied to the Quad Views focus area (you bring the NVIDIA runtime file). Optional Foveated DLSS (Cheeky) on top. |
+| **DLSS 5** | NVIDIA's DLSS-NR neural rendering, applied to the Quad Views focus area on DCS's own DLSS (you bring the NVIDIA runtime file). Without Quad Views, optional Foveated Super Resolution (Cheeky) saves GPU outside where you look. |
 | **Frame generation** | OFXR optical-flow frame generation: DCS renders half (or a third) of the headset refresh rate and generated frames fill the rest. |
 | **CPU Boost** | Gives DCS priority and its best CPU cores while it runs, keeps VR services and background apps off those cores, and an optional fix for a DCS terrain loop that wastes CPU. Plus three VRAM helpers. |
 
@@ -96,7 +96,7 @@ Everything you change is kept as a draft across app restarts. **Reset to applied
 
 ![Quad Views with Pimax Play's Quick values](screenshots/quad-views-pimax-play.png)
 
-The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one that works with DLSS 5 and frame generation. **Pimax native** Quad Views (Pimax route only) is also offered, but it cannot be combined with DLSS 5 or Foveated DLSS.
+The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one that works with DLSS 5 and frame generation. **Pimax native** Quad Views (Pimax route only) is also offered, but it cannot be combined with DLSS 5.
 
 - **Focus movement** — *Eye tracked* (needs working eye tracking in Pimax Play, or a gaze bridge on Sboys) or *Fixed (centred)*.
 - **Focus area source** — *From Pimax Play's settings* (default) or *This profile*.
@@ -125,7 +125,7 @@ Settings:
 - **Process at render resolution** — on: before DLSS upscaling (faster, subtler); off: at output resolution (more detail, more GPU).
 - **In-flight toggle key** — turn DLSS 5 on/off in flight to compare (default **Ctrl+Shift+F12**).
 - **Advanced image controls** (folded) — model corrections, all at their defaults; change one only to fix something specific you can see. **Reset to defaults** puts them back.
-- **Foveated Super Resolution** (Cheeky) is a separate switch on the same page.
+- **Foveated Super Resolution** (Cheeky) is a separate switch on the same page, for **stereo without Quad Views** only: a performance option that runs DLSS at full quality only where you look and lighter in the periphery. With Quad Views it is hidden and stays off: Quad Views already renders the periphery at lower resolution, and DLSS 5 builds on DCS's own DLSS of the focus views (with Foveated Super Resolution on, Cheeky would redo that upscale privately instead).
 
 ### Frame generation
 

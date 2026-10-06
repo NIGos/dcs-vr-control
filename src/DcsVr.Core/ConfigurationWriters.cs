@@ -16,7 +16,7 @@ public static class ConfigurationWriters
     public static string Cheeky(VrProfile p) => $"""
         [CheekyFoveatedDLSS]
         SchemaVersion=1
-        Enabled={(p.FoveatedDlss ? 1 : 0)}
+        Enabled={(p.UsesFoveatedDlss ? 1 : 0)}
         D3D11D3D12Transport={(p.NeuralRendering ? 1 : 0)}
         D3D12LowerHook=1
         PeripheralDlaa={(p.UsesQuadFocus ? 0 : 1)}

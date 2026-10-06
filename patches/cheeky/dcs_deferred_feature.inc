@@ -14,6 +14,15 @@
 //     passthrough, native-SR NR, private-path fallback: all of them call it);
 //   * ReleaseFeature releases the real feature only if it exists;
 //   * D3D11 Shutdown forgets real features the core destroys itself.
+// DCS's own feature is created only when nothing else can produce the view:
+//   * the Quad Views focus proof is not ready yet (first frames after a mission
+//     load): a handle whose output is the published focus extent keeps running
+//     on the private D3D12 SR without NR (the very feature it will use with NR,
+//     DCS-equivalent output); with no layout published at all, a bilinear
+//     upscale holds the view for at most dcs_deferred_unknown_hold_ms;
+//   * DLSS 5 toggled off in flight: the private D3D12 SR keeps running without NR;
+//   * the genuine fallbacks (transport unavailable or failed, a peripheral
+//     extent, a layout that never appears) create it exactly as before.
 // Once created, the real feature lives until DCS releases its handle: NGX's
 // DX11 runtime does not return a released feature's VRAM while the game's other
 // DX11 DLSS features (the peripheral views) stay alive (measured: 0 MiB back
@@ -29,6 +38,9 @@ std::atomic<NgxD3D11ShutdownFn> real_core_shutdown_d3d11{};
 std::atomic<NgxD3D11Shutdown1Fn> real_core_shutdown_d3d11_1{};
 
 constexpr unsigned dcs_deferred_magic = 0x44435346U; // "DCSF"
+// A deferred view with no Quad Views layout at all is held (bilinear upscale) at
+// most this long; then DCS's own feature is created (stereo session, layer gone).
+constexpr std::uint64_t dcs_deferred_unknown_hold_ms = 3000;
 
 [[nodiscard]] bool dcs_quad_focus_env() noexcept {
     wchar_t value[2]{};
@@ -81,6 +93,8 @@ struct DcsDeferredFeature {
     std::size_t slot{};
     DcsCreateValues create{};
     std::uint64_t created_ms{}, materializations{};
+    // Frames produced without DCS's own feature, and when an unknown layout was first seen.
+    std::uint64_t sr_only_frames{}, held_frames{}, unknown_since_ms{};
 };
 std::mutex dcs_deferred_mutex;
 std::vector<DcsDeferredFeature> dcs_deferred_features;
@@ -130,11 +144,13 @@ bool dcs_try_defer_d3d11_create(ID3D11DeviceContext* const context, const std::u
         !real_core_release_d3d11.load(std::memory_order_acquire)) return false;
     const auto settings = current_settings();
     // Only configurations whose transport replaces DCS's SR on accepted views.
-    // NR-only after upscaling evaluates DCS's own feature on every frame.
-    const bool native_sr = !settings.enabled && settings.nr_enabled &&
+    // NR-only after upscaling evaluates DCS's own feature on every frame. NR
+    // toggled off for the session (DLSS 5 key) still defers: those views keep the
+    // private D3D12 SR without NR, and NR resumes on the same feature.
+    const bool native_sr = !settings.enabled &&
         (!settings.nr_foveated || !settings.nr_use_sr_foveation) && !settings.peripheral_dlaa_enabled &&
         settings.nr_processing_order != NrProcessingOrder::before_upscaling;
-    if (!settings.d3d11_use_d3d12_transport || !(settings.enabled || settings.nr_enabled) || native_sr) return false;
+    if (!settings.d3d11_use_d3d12_transport || native_sr) return false;
     std::size_t slot{};
     if (!dcs_public_d3d11_slot(slot)) return false;
     const auto out_width = get_ui(parameters, "OutWidth");
@@ -174,6 +190,63 @@ bool dcs_try_defer_d3d11_create(ID3D11DeviceContext* const context, const std::u
         focus > 0 ? "layout" : "unclassified", slot, live);
     if (live > 1U) dcs_ledger_trace("after-create");
     return true;
+}
+
+// The private D3D12 SR of a deferred view stands in for DCS's own feature, so it
+// must see DCS's creation-time DLSS parameters (PerfQualityValue, preset hints,
+// create flags, render and output size), not whatever DCS's shared bag holds at
+// evaluation. Replayed only where they differ, restored after the evaluation.
+struct DcsCreateValuesSaved {
+    NgxParameters* bag{};
+    DcsCreateValues current{};
+    std::array<bool, dcs_create_key_count> changed{};
+};
+thread_local std::vector<DcsCreateValuesSaved> dcs_create_values_stack;
+
+bool dcs_deferred_push_create_values(const NgxHandle* const handle, const NgxParameters* const parameters) noexcept {
+    if (parameters == nullptr || handle == nullptr || dcs_deferred_count.load(std::memory_order_acquire) == 0U) return false;
+    DcsCreateValues create{};
+    {
+        std::lock_guard lock(dcs_deferred_mutex);
+        const auto* entry = dcs_find_deferred_locked(handle);
+        if (entry == nullptr) return false;
+        create = entry->create;
+    }
+    DcsCreateValuesSaved saved{};
+    saved.bag = const_cast<NgxParameters*>(parameters);
+    saved.current = dcs_capture_create_values(saved.bag);
+    unsigned replayed{};
+    for (std::size_t i{}; i < create.size(); ++i) {
+        if (!create[i].present) continue;
+        if (saved.current[i].present && saved.current[i].value == create[i].value &&
+            saved.current[i].is_int == create[i].is_int) continue;
+        dcs_apply_create_value(saved.bag, create[i]);
+        saved.changed[i] = true;
+        ++replayed;
+    }
+    if (replayed) {
+        static std::atomic<std::uint64_t> traced{};
+        const auto n = ++traced;
+        if (n <= 4U || (n & (n - 1U)) == 0U)
+            trace_event("DCS deferred DX11 DLSS private SR uses DCS's creation-time DLSS parameters handle=%p replayed=%u "
+                "PerfQualityValue=%u (evaluation bag held %u) count=%llu", handle, replayed, create[12].value,
+                saved.current[12].value, static_cast<unsigned long long>(n));
+    }
+    try { dcs_create_values_stack.push_back(saved); }
+    catch (...) {
+        for (std::size_t i{}; i < saved.current.size(); ++i)
+            if (saved.changed[i] && saved.current[i].present) dcs_apply_create_value(saved.bag, saved.current[i]);
+        return false;
+    }
+    return true;
+}
+
+void dcs_deferred_pop_create_values() noexcept {
+    if (dcs_create_values_stack.empty()) return;
+    const auto saved = dcs_create_values_stack.back();
+    dcs_create_values_stack.pop_back();
+    for (std::size_t i{}; i < saved.current.size(); ++i)
+        if (saved.changed[i] && saved.current[i].present) dcs_apply_create_value(saved.bag, saved.current[i]);
 }
 
 // Creates the real core feature with the stored creation values. Called on the
@@ -235,6 +308,9 @@ bool dcs_try_defer_d3d11_create(ID3D11DeviceContext* const context, const std::u
     return keep ? real : nullptr;
 }
 
+// Why the next materialization happens (set by the paths that tried to avoid it).
+thread_local const char* dcs_deferred_fallback_reason{};
+
 // The pipeline's "original" evaluate for an opaque handle: DCS's own feature is
 // needed now, so create it first. Other handles (private DX11 features created
 // through the snippet) keep the snippet's own evaluate.
@@ -249,7 +325,9 @@ NgxResult dcs_evaluate_real(ID3D11DeviceContext* context, const NgxHandle* handl
         created_now = entry && !entry->real;
     }
     const auto before = created_now ? dcs_vram_sample(context) : DcsVram{};
-    auto* real = dcs_materialize_deferred(context, handle, parameters, "game-feature-evaluation", result);
+    const char* const reason = dcs_deferred_fallback_reason ? dcs_deferred_fallback_reason : "game-feature-evaluation";
+    dcs_deferred_fallback_reason = nullptr;
+    auto* real = dcs_materialize_deferred(context, handle, parameters, reason, result);
     if (real == nullptr) return ngx_succeeded(result) ? 0xBAD00005U : result;
     result = evaluate_real(real, callback);
     // NGX allocates a DLSS feature's working set on its first evaluation.
@@ -260,6 +338,133 @@ NgxResult dcs_evaluate_real(ID3D11DeviceContext* context, const NgxHandle* handl
             dcs_mb(after.usage), dcs_delta_mb(before, after));
     }
     return result;
+}
+
+// True for an opaque handle whose real feature does not exist (yet).
+bool dcs_deferred_unmaterialized(const NgxHandle* handle) noexcept {
+    if (handle == nullptr || dcs_deferred_count.load(std::memory_order_acquire) == 0U) return false;
+    std::lock_guard lock(dcs_deferred_mutex);
+    const auto* entry = dcs_find_deferred_locked(handle);
+    return entry != nullptr && entry->real == nullptr;
+}
+
+// Bounded trace: the first four frames of each kind, then powers of two.
+[[nodiscard]] bool dcs_deferred_count_frame(const NgxHandle* handle, bool sr_only, std::uint64_t& count) noexcept {
+    std::lock_guard lock(dcs_deferred_mutex);
+    auto* entry = dcs_find_deferred_locked(handle);
+    if (entry == nullptr) return false;
+    count = sr_only ? ++entry->sr_only_frames : ++entry->held_frames;
+    return count <= 4U || (count & (count - 1U)) == 0U;
+}
+
+// DCS's own feature is not needed for this frame: the private D3D12 SR runs on
+// the handle exactly as with DLSS 5 (full view, same inputs, same feature and
+// textures), only the NR pass is skipped. Its output is DCS's own upscale, so
+// this is correct for any view; it is used for focus-extent views and for the
+// session with DLSS 5 off. False when the transport cannot run the frame.
+[[nodiscard]] bool dcs_deferred_sr_only(const D3D11RuntimeCallbacks& runtime, ID3D11DeviceContext* const context,
+    const NgxHandle* const handle, const NgxParameters* const parameters, const Settings& settings,
+    const char* const reason, NgxResult& result) noexcept {
+    if (!settings.d3d11_use_d3d12_transport || context == nullptr || parameters == nullptr) return false;
+    auto sr_only = settings;
+    sr_only.enabled = false;            // Full-view SR: the NR-only transport geometry, never a foveated crop.
+    sr_only.nr_enabled = true;          // Same textures/feature as with NR, so NR resumes without rebuilding them.
+    sr_only.dcs_nr_suppressed = true;   // ...but the NR pass itself is skipped.
+    sr_only.peripheral_dlaa_enabled = false;
+    skip_dlss_nr_history(static_cast<DlssViewId>(reinterpret_cast<std::uintptr_t>(handle)));
+    NgxResult transport_result{};
+    bool owned{};
+    {
+        // DCS's creation-time quality first; the profile's preset override, if any, on top (as on the NR path).
+        DcsDeferredCreateValuesScope create_values{handle, parameters};
+        NgxPresetOverrideScope center_preset{parameters, settings.center_preset};
+        owned = evaluate_d3d11_via_d3d12(context, handle, parameters, sr_only, current_transport_ngx(runtime),
+            transport_result, nullptr);
+    }
+    if (!owned || !ngx_succeeded(transport_result)) {
+        trace_event("DCS deferred DX11 DLSS: private D3D12 SR unavailable handle=%p reason=%s owned=%u result=0x%08X; "
+            "DCS's own feature is created", handle, reason, owned ? 1U : 0U, unsigned(transport_result));
+        dcs_deferred_fallback_reason = "transport-unavailable";
+        return false;
+    }
+    release_d3d11_peripheral_dlaa_view(handle);
+    diagnostic_note_d3d11_execution_path(D3D11ExecutionPath::dx12_transport);
+    diagnostic_note_state(DiagnosticApi::d3d11, DiagnosticState::active);
+    diagnostic_note_result(DiagnosticApi::d3d11, transport_result);
+    if (std::uint64_t frames{}; dcs_deferred_count_frame(handle, true, frames))
+        trace_event("DCS deferred DX11 DLSS kept on the private D3D12 SR without NR handle=%p reason=%s frames=%llu "
+            "(DCS's own DX11 feature not created)", handle, reason, static_cast<unsigned long long>(frames));
+    result = transport_result;
+    return true;
+}
+
+// Gate rejected a deferred focus handle (proof not ready). True when the frame
+// was produced without DCS's own feature; false leaves the caller's fallback.
+bool dcs_deferred_hold_unproven(const D3D11RuntimeCallbacks& runtime, ID3D11DeviceContext* const context,
+    const NgxHandle* const handle, const NgxParameters* const parameters, NgxResult& result) noexcept {
+    if (!dcs_deferred_unmaterialized(handle) || parameters == nullptr) return false;
+    const auto out_width = get_ui(parameters, "OutWidth");
+    const auto out_height = get_ui(parameters, "OutHeight");
+    const int role = dcs_quad_focus_create_extent(out_width, out_height);
+    if (role > 0) // The published layout says focus extent: DCS-equivalent SR on the private feature.
+        return dcs_deferred_sr_only(runtime, context, handle, parameters, current_settings(), "focus-proof-pending", result);
+    const auto now = GetTickCount64();
+    if (role == 0) {
+        // A peripheral (or other) extent: DCS's own feature is the right owner.
+        trace_event("DCS deferred DX11 DLSS handle=%p output=%ux%u is not a Quad Views focus extent; DCS's own feature is created",
+            handle, out_width, out_height);
+        dcs_deferred_fallback_reason = "not-a-focus-extent";
+        return false;
+    }
+    // No layout published yet: hold with a bilinear upscale for a bounded time.
+    std::uint64_t since{};
+    {
+        std::lock_guard lock(dcs_deferred_mutex);
+        auto* entry = dcs_find_deferred_locked(handle);
+        if (entry == nullptr) return false;
+        if (!entry->unknown_since_ms) entry->unknown_since_ms = now;
+        since = entry->unknown_since_ms;
+    }
+    if (now - since > dcs_deferred_unknown_hold_ms) {
+        trace_event("DCS deferred DX11 DLSS handle=%p: no Quad Views layout after %llu ms; DCS's own feature is created",
+            handle, static_cast<unsigned long long>(now - since));
+        dcs_deferred_fallback_reason = "layout-unknown-timeout";
+        return false;
+    }
+    ID3D11Resource* color{};
+    ID3D11Resource* output{};
+    parameters->Get("Color", &color);
+    parameters->Get("Output", &output);
+    auto render_width = get_ui(parameters, "DLSS.Render.Subrect.Dimensions.Width");
+    auto render_height = get_ui(parameters, "DLSS.Render.Subrect.Dimensions.Height");
+    if (!render_width) render_width = get_ui(parameters, "Width");
+    if (!render_height) render_height = get_ui(parameters, "Height");
+    const DcsHoldUpscaleRegion region{get_ui(parameters, "DLSS.Input.Color.Subrect.Base.X"),
+        get_ui(parameters, "DLSS.Input.Color.Subrect.Base.Y"), render_width, render_height,
+        get_ui(parameters, "DLSS.Output.Subrect.Base.X"), get_ui(parameters, "DLSS.Output.Subrect.Base.Y"),
+        out_width, out_height};
+    if (!dcs_hold_upscale(context, color, output, region)) {
+        trace_event("DCS deferred DX11 DLSS handle=%p: bilinear hold unavailable; DCS's own feature is created", handle);
+        dcs_deferred_fallback_reason = "hold-unavailable";
+        return false;
+    }
+    release_d3d11_transport_view(handle);
+    skip_dlss_nr_history(static_cast<DlssViewId>(reinterpret_cast<std::uintptr_t>(handle)));
+    if (std::uint64_t frames{}; dcs_deferred_count_frame(handle, false, frames))
+        trace_event("DCS deferred DX11 DLSS held with a bilinear upscale handle=%p reason=layout-unknown frames=%llu "
+            "waited_ms=%llu (DCS's own DX11 feature not created)", handle, static_cast<unsigned long long>(frames),
+            static_cast<unsigned long long>(now - since));
+    result = 1U;
+    return true;
+}
+
+// Accepted focus view with DLSS 5 off for the session (in-flight key): keep the
+// private D3D12 SR instead of creating DCS's own feature.
+bool dcs_deferred_keep_transport(const D3D11RuntimeCallbacks& runtime, ID3D11DeviceContext* const context,
+    const NgxHandle* const handle, const NgxParameters* const parameters, const Settings& settings,
+    NgxResult& result) noexcept {
+    return dcs_deferred_unmaterialized(handle) &&
+        dcs_deferred_sr_only(runtime, context, handle, parameters, settings, "dlss5-off", result);
 }
 
 NgxResult dcs_deferred_evaluate(ID3D11DeviceContext* context, const NgxHandle* handle,

@@ -52,7 +52,27 @@ Test("ZIP rejects symbolic links", () =>
 Test("Package digest rejects modified archive", () => { var z = Zip("digest.zip", ("a", "b")); Throws<InvalidDataException>(() => new ComponentCache(Path.Combine(root, "digest-cache")).Import(PackageCatalog.Get("ofxr"), z)); });
 foreach (var package in PackageCatalog.All)
     Test("Official package integrity " + package.Id, () => { var archive = Path.Combine(workspace, ".cache/packages", package.ArchiveName); Require(Hashing.FileSha256(archive) == package.Sha256); var d = new ComponentCache(Path.Combine(root, "package-cache")).Import(package, archive); Require(Directory.EnumerateFiles(d, "*", SearchOption.AllDirectories).Any()); });
-Test("Profile compatibility rejects Cheeky plus Quad Views", () => Require(ProfileValidation.Validate(new() { FoveatedDlss = true, ExperimentalAcknowledged = true }).Any(i => i.Code == "quad-cheeky" && i.Severity == IssueSeverity.Error)));
+Test("Profile compatibility rejects Cheeky plus Pimax native Quad Views", () => Require(ProfileValidation.Validate(new() { NeuralRendering = true, ExperimentalAcknowledged = true }).Any(i => i.Code == "quad-cheeky" && i.Severity == IssueSeverity.Error)));
+Test("Foveated Super Resolution is stereo only: Quad Views turns it off and never deploys Cheeky for it", () =>
+{
+    foreach (var provider in new[] { QuadProvider.QuadViewsFoveated, QuadProvider.PimaxNative })
+    {
+        var p = new VrProfile { QuadViews = provider, FoveatedDlss = true, QuadFocusAdapter = true };
+        Require(!p.UsesFoveatedDlss && !p.UsesCheeky && !p.UsesQuadFocus, provider + ": ignored with Quad Views");
+        Require(!ProfileValidation.Validate(p).Any(i => i.Code.StartsWith("quad-")), provider + ": no Cheeky error, DLSS is simply off");
+        Require(ProfileValidation.ResolveFeatures(p) is { FoveatedDlss: false, QuadFocusAdapter: false } r && r.QuadViews == provider, provider + ": settled to DLSS off, provider kept");
+    }
+    var dlss5 = ProfileValidation.ResolveFeatures(ProfilePresets.All[5] with { FoveatedDlss = true });
+    Require(dlss5 is { FoveatedDlss: false, NeuralRendering: true, UsesQuadFocus: true }, "DLSS 5 with Quad Views keeps the focus adapter without Foveated Super Resolution");
+    Require(ConfigurationWriters.Cheeky(ProfilePresets.All[5] with { FoveatedDlss = true }).Split('\n').Any(l => l.Trim() == "Enabled=0"), "A Quad Views profile never writes Enabled=1");
+    var stereo = new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true };
+    Require(stereo.UsesFoveatedDlss && stereo.UsesCheeky && ProfileValidation.ResolveFeatures(stereo).FoveatedDlss && ConfigurationWriters.Cheeky(stereo).Split('\n').Any(l => l.Trim() == "Enabled=1"), "Stereo keeps it");
+    var exe = Make("qv-foveated-only/bin/DCS.exe", "fixture"); var options = Make("qv-foveated-only/options.lua", Lua);
+    var runtime = Make("qv-foveated-only/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("qv-foveated-only/runtime.dll", "fixture");
+    var plan = new DeploymentPlanner(new(null, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release")))
+        .Build(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true, QuadFocusAdapter = true }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }, Path.Combine(root, "qv-foveated-only/managed"));
+    Require(plan.LaunchEnvironment["DCSVR_QUAD_FOCUS"] == "0" && !plan.Files.Any(f => f.Path.Contains("CheekyFoveatedDLSS", StringComparison.OrdinalIgnoreCase) || f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase)), "No Cheeky files for Quad Views + Foveated Super Resolution alone");
+});
 Test("Sboys cannot use native Pimax Quad Views", () => Require(ProfileValidation.Validate(new() { Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "quad-runtime")));
 Test("Unknown profile schema and invalid numbers rejected", () => { var p = new VrProfile { SchemaVersion = 99, FoveaWidth = double.NaN, NeuralIntensity = 2 }; Require(ProfileValidation.Validate(p).Count(i => i.Severity == IssueSeverity.Error) == 3); });
 Test("Profile JSON roundtrip", () => Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(ProfilePresets.All[1])) == ProfilePresets.All[1]));
@@ -766,7 +786,7 @@ Test("Combined profiles opt into the bounded focus adapter", () =>
         Require(!issues.Any(i => i.Severity == IssueSeverity.Error));
     }
 });
-Test("Focus adapter rejects unverified alternative compositors", () => Require(ProfileValidation.Validate(new() { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, FoveatedDlss = true, ExperimentalAcknowledged = true, QuadViewsLayerDirectory = "alternative" }).Any(i => i.Code == "quad-adapter-provider")));
+Test("Focus adapter rejects unverified alternative compositors", () => Require(ProfileValidation.Validate(new() { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, ExperimentalAcknowledged = true, QuadViewsLayerDirectory = "alternative" }).Any(i => i.Code == "quad-adapter-provider")));
 Test("Focus configuration avoids nested foveation and duplicate peripheral processing", () =>
 {
     var ini = ConfigurationWriters.Cheeky(ProfilePresets.All[5]);
@@ -781,7 +801,8 @@ Test("DLSS 5 area writes a central feathered NR region only with the focus adapt
     foreach (var area in new[] { 80, 70, 50 })
         Require(Has(focus with { NeuralFocusArea = area }, "NrFoveated=1", "NrUseSrFoveation=0", $"NrWidth=0.{area / 10}", $"NrHeight=0.{area / 10}",
             "NrRoundness=0", "NrTransitionWidth=0.12", "Enabled=0", "PeripheralDlaa=0", "CenterMode=0", "AutoStereoAlignment=0", "NrProcessingOrder=0"), "Central " + area + "%");
-    Require(Has(focus with { NeuralRendering = false, FoveatedDlss = true, NeuralFocusArea = 70 }, "NrFoveated=0", "NrWidth=1"), "The area applies only to DLSS 5");
+    Require(!(focus with { NeuralRendering = false, NeuralFocusArea = 70 }).UsesCentralNeuralArea, "The area applies only to DLSS 5");
+    Require(Has(focus with { FoveatedDlss = true, NeuralFocusArea = 70 }, "Enabled=0", "NrFoveated=1", "NrWidth=0.7"), "Foveated Super Resolution never runs on the focus views");
     var stereo = ProfilePresets.All[3] with { NeuralFocusArea = 50 };
     Require(!stereo.UsesCentralNeuralArea && Has(stereo, "NrFoveated=1", "NrUseSrFoveation=1", "NrWidth=0.57", "NrHeight=0.34"), "Stereo NR coverage is unchanged");
     Require(!ProfileValidation.Validate(focus with { NeuralFocusArea = 70 }).Any(i => i.Code == "neural-area"));
@@ -795,12 +816,14 @@ Test("Focus adapter fails closed when adapted binaries are missing", () =>
 {
     var exe = Make("missing-adapter/bin/DCS.exe", "fixture"); var options = Make("missing-adapter/options.lua", Lua);
     var runtime = Make("missing-adapter/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("missing-adapter/runtime.dll", "fixture");
-    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, FoveatedDlss = true, ExperimentalAcknowledged = true };
+    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, ExperimentalAcknowledged = true };
     Throws<InvalidDataException>(() => new DeploymentPlanner(new(null, "unused", "unused")).Build(p, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }, Path.Combine(root, "missing-adapter/managed")));
 });
 foreach (var runtimeKind in new[] { RuntimeKind.Pimax, RuntimeKind.SboysSteamVr })
     Test("Combined focus deployment and restoration " + runtimeKind, () =>
     {
+        // Cheeky runs with Quad Views only for DLSS 5, whose signed runtime file is never in the repository.
+        if (RealNeuralRuntime() is not { } neuralRuntime) { Console.WriteLine("SKIP combined focus deployment: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
         var dir = "combined-" + runtimeKind; var exe = Make(dir + "/bin/DCS.exe", "fixture"); var options = Make(dir + "/options.lua", Lua);
         var runtime = Make(dir + "/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make(dir + "/runtime.dll", "fixture");
         var ofxr = new ComponentCache(Path.Combine(root, dir + "/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
@@ -808,11 +831,11 @@ foreach (var runtimeKind in new[] { RuntimeKind.Pimax, RuntimeKind.SboysSteamVr 
         var focus = Path.Combine(root, dir + "/focus"); Directory.CreateDirectory(Path.Combine(focus, "CheekyFoveatedDLSS"));
         File.Copy(Path.Combine(upstream, "dxgi.dll"), Path.Combine(focus, "dxgi.dll"));
         foreach (var name in new[] { "CheekyFoveatedDLSSHost.dll", "CheekyFoveatedDLSSRuntime.dll" }) File.Copy(Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyFoveatedDLSS", name), Path.Combine(focus, "CheekyFoveatedDLSS", name));
-        var p = new VrProfile { Runtime = runtimeKind, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, FoveatedDlss = true, FrameGen = FrameGeneration.Nvidia, Gaze = runtimeKind == RuntimeKind.Pimax ? GazeMode.EyeTracked : GazeMode.Fixed, ExperimentalAcknowledged = true };
+        var p = new VrProfile { Runtime = runtimeKind, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, NeuralRuntimePath = neuralRuntime, FrameGen = FrameGeneration.Nvidia, Gaze = runtimeKind == RuntimeKind.Pimax ? GazeMode.EyeTracked : GazeMode.Fixed, ExperimentalAcknowledged = true };
         var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime, SteamVrRuntime = runtime };
         var plan = new DeploymentPlanner(new(ofxr, null, Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll"), Path.Combine(workspace, "external/quadviews/bin/x64/Release"), focus, DeferredOfxr)).Build(p, inv, Path.Combine(root, dir + "/managed"));
         Require(plan.LaunchEnvironment["DCSVR_QUAD_FOCUS"] == "1");
-        Require(plan.LaunchEnvironment["DCSVR_DIAG_HOTKEY"] == "123:6" && plan.LaunchEnvironment["DCSVR_DIAG_OVERLAY"] == "0" && plan.LaunchEnvironment["DCSVR_NR_HOTKEY"] == "0:0");
+        Require(plan.LaunchEnvironment["DCSVR_DIAG_HOTKEY"] == "123:6" && plan.LaunchEnvironment["DCSVR_DIAG_OVERLAY"] == "0" && plan.LaunchEnvironment["DCSVR_NR_HOTKEY"] == NeuralHotkeys.Environment(p.NeuralToggleKey));
         Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_CHEEKY_foveated_dlss;XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic");
         var runtimeFile = plan.Files.Single(f => f.Path.EndsWith("CheekyFoveatedDLSSRuntime.dll")); Require(Hashing.BytesSha256(runtimeFile.Content) == Hashing.FileSha256(Path.Combine(focus, "CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll")));
         var store = new OriginalsStore(Path.Combine(root, dir + "/originals")); store.Apply(plan); Require(store.RestoreOriginals().Complete); Require(File.ReadAllText(options) == Lua);
@@ -1694,13 +1717,17 @@ Test("Import settles feature combinations exactly like the interface checklist",
     var service = new ControlService(root, Path.Combine(root, "import-settle/state"));
     VrProfile Load(string name, VrProfile p) => service.LoadProfile(Make("import-settle/" + name + ".json", JsonData.Serialize(p)));
     Require(Load("sboys-native", new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.PimaxNative }) is { QuadViews: QuadProvider.QuadViewsFoveated, QuadFocusAdapter: false }, "Sboys + Pimax native");
-    Require(Load("cheeky-no-adapter", new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true, QuadFocusAdapter = false }).UsesQuadFocus, "Bundled QV + Cheeky without the adapter");
+    Require(Load("cheeky-no-adapter", new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, QuadFocusAdapter = false }).UsesQuadFocus, "Bundled QV + Cheeky without the adapter");
+    Require(Load("qv-foveated", new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true, NeuralRendering = true }) is { FoveatedDlss: false, UsesQuadFocus: true }, "Bundled QV + DLSS 5 + Foveated Super Resolution");
+    Require(Load("qv-foveated-only", new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true, QuadFocusAdapter = true }) is { FoveatedDlss: false, QuadFocusAdapter: false, UsesCheeky: false }, "Bundled QV + Foveated Super Resolution alone is DLSS off");
+    Require(Load("native-foveated", new VrProfile { FoveatedDlss = true }) is { QuadViews: QuadProvider.PimaxNative, FoveatedDlss: false, UsesCheeky: false }, "Pimax native + Foveated Super Resolution keeps Pimax native, DLSS off");
+    Require(Load("stereo-foveated", new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true }) is { FoveatedDlss: true, UsesCheeky: true }, "Stereo keeps Foveated Super Resolution");
     Require(Load("native-dlss", new VrProfile { QuadViews = QuadProvider.PimaxNative, NeuralRendering = true }) is { QuadViews: QuadProvider.QuadViewsFoveated, UsesQuadFocus: true }, "Pimax native + DLSS 5");
     Require(Load("plain-adapter", new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true }) is { QuadFocusAdapter: false }, "No adapter without Cheeky");
     Require(Load("native", new VrProfile()) is { QuadViews: QuadProvider.PimaxNative }, "Pimax native stays on the Pimax route without DLSS");
     // Messages name controls that exist: the Quad Views provider and the alternative provider folder.
-    var messages = string.Join("\n", new[] { new VrProfile { Runtime = RuntimeKind.SboysSteamVr }, new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true },
-        new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true, QuadFocusAdapter = true, QuadViewsLayerDirectory = "alt" } }.SelectMany(p => ProfileValidation.Validate(p)).Where(i => i.Code.StartsWith("quad-")).Select(i => i.Message));
+    var messages = string.Join("\n", new[] { new VrProfile { Runtime = RuntimeKind.SboysSteamVr }, new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true },
+        new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, QuadFocusAdapter = true, QuadViewsLayerDirectory = "alt" } }.SelectMany(p => ProfileValidation.Validate(p)).Where(i => i.Code.StartsWith("quad-")).Select(i => i.Message));
     Require(messages.Contains("Bundled Quad Views as the Quad Views provider") && messages.Contains("Alternative Quad Views provider folder") && !messages.Contains("enable the focus adapter"), messages);
 });
 Test("Pimax notes say when the focus resolution or periphery is clamped", () =>

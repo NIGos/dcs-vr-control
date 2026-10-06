@@ -12,10 +12,13 @@ public static class ProfileValidation
     ], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Settles feature combinations that cannot run, exactly like the interface's checklist (resolveFeatures in
-    /// ui/app.js): Pimax native Quad Views exists only on the Pimax route and cannot host the focus adapter DLSS needs, so
-    /// it becomes bundled Quad Views there; with bundled Quad Views, Cheeky always runs through the focus adapter.</summary>
+    /// ui/app.js): Foveated Super Resolution is for stereo only, so Quad Views turns it off (with Quad Views it would redo
+    /// DCS's DLSS of the focus views instead of DLSS 5 building on it); Pimax native Quad Views exists only on the Pimax
+    /// route and cannot host the focus adapter DLSS 5 needs, so it becomes bundled Quad Views there; with bundled Quad
+    /// Views, Cheeky always runs through the focus adapter.</summary>
     public static VrProfile ResolveFeatures(VrProfile profile)
     {
+        if (profile.FoveatedDlss && profile.QuadViews != QuadProvider.None) profile = profile with { FoveatedDlss = false };
         if (profile.QuadViews == QuadProvider.PimaxNative && (profile.Runtime == RuntimeKind.SboysSteamVr || profile.UsesCheeky))
             profile = profile with { QuadViews = QuadProvider.QuadViewsFoveated };
         return profile with { QuadFocusAdapter = profile.UsesCheeky && profile.QuadViews == QuadProvider.QuadViewsFoveated };
@@ -61,11 +64,11 @@ public static class ProfileValidation
         if (profile.Runtime == RuntimeKind.SboysSteamVr && profile.QuadViews == QuadProvider.PimaxNative)
             Error("quad-runtime", "Pimax native Quad Views works only on the Pimax route. Select Bundled Quad Views as the Quad Views provider, or switch the route to Pimax.");
         if (profile.UsesCheeky && profile.QuadViews != QuadProvider.None && !profile.UsesQuadFocus)
-            Error("quad-cheeky", "DLSS 5 and Foveated DLSS with Quad Views need Bundled Quad Views as the Quad Views provider.");
+            Error("quad-cheeky", "DLSS 5 with Quad Views needs Bundled Quad Views as the Quad Views provider.");
         if (profile.UsesQuadFocus && !string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory))
-            Error("quad-adapter-provider", "DLSS 5 and Foveated DLSS with Quad Views need the bundled Quad Views provider. Clear the Alternative Quad Views provider folder.");
+            Error("quad-adapter-provider", "DLSS 5 with Quad Views needs the bundled Quad Views provider. Clear the Alternative Quad Views provider folder.");
         if (profile.UsesQuadFocus)
-            issues.Add(new("quad-focus", IssueSeverity.Info, (profile.NeuralRendering ? "DLSS 5" : "Foveated DLSS") + " runs on the two Quad Views focus views through the focus adapter; the periphery keeps DCS's own image."));
+            issues.Add(new("quad-focus", IssueSeverity.Info, "DLSS 5 runs on the two Quad Views focus views through the focus adapter, on DCS's own DLSS; the periphery keeps DCS's own image."));
         if (profile.Runtime == RuntimeKind.Pimax && profile.QuadViews == QuadProvider.QuadViewsFoveated)
             issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views replaces the Pimax runtime's own Quad Views for DCS." + (PimaxFovea.UsesPimaxPlay(profile)
                 ? "" : " Its focus area comes from this profile; Pimax Play's Quad View settings do not apply.")));

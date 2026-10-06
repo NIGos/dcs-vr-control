@@ -137,11 +137,15 @@ window.runWebSmoke = async function() {
     for (const route of ['Pimax','SboysSteamVr']) {
       select(route,{quad:true,dlss:true,framegen:true});
       edit('neuralRendering',false); edit('foveatedDlss',true); edit('quadFocusScale',150); edit('quadSharpening',.456789123456); edit('quadEdgeBlend',.15); edit('flowPreset','Slow'); edit('bidirectionalFlow',true); edit('nvidiaFlowScale',100);
+      // DLSS off would bring back the Pimax native provider picked earlier: this route test uses the bundled one.
+      edit('quadViews','QuadViewsFoveated');
+      check(route+' with Quad Views Foveated Super Resolution stays off and hidden, so DLSS is off',!ui.profile.foveatedDlss && !ui.profile.quadFocusAdapter && $('foveatedDlssControls').hidden && !$('featureCheck-dlss').checked && $('featureSummary-dlss').textContent === 'Off · original image');
       edit('fpsLimit','Custom'); edit('renderedFpsCap',47.5); edit('disableDcsVSync',true);
       check(route+' custom quality retained',ui.profile.quadSharpening === .456789123456 && ui.profile.flowPreset === 'Slow');
       check(route+' the focus area says it comes from Pimax Play\'s settings',ui.profile.foveaSource === 'PimaxPlay' && $('featureSummary-quad').textContent.includes("from Pimax Play's settings") && $('input-foveaSource').querySelector('[value=PimaxPlay]').textContent === "From Pimax Play's settings");
       check(route+' before the first launch the status says changes apply at launch',$('statusTitle').textContent === 'Changes will be applied when you launch' && !$('launch').disabled && !$('apply').disabled && $('openRecovery').hidden);
       await ui.run('preview'); check(route+' Review files lists every file read-only, with nothing to approve',ui.plan.files.length > 5 && !('token' in ui.plan) && !$('page-diagnostics').hidden && $('plannedFiles').children.length === ui.plan.files.length && !ui.state.launchReady && ui.state.originals.count === 0 && ui.state.status.includes('Launch DCS backs up the originals'));
+      check(route+' Quad Views without DLSS 5 deploys no Cheeky file',!ui.plan.files.some(f => /CheekyFoveatedDLSS/i.test(f.path)));
       check(route+' review reads Pimax Play and reports it in Pimax Play units',ui.state.status.includes(ui.state.pimax.summary) && ui.state.pimax.summary.startsWith('Pimax Play · '+window.offlineFixture.pimaxMode+': Center Resolution 125%, Peripheral Resolution 20%') && ui.state.report.includes('Focus area from Pimax Play') && ui.plan.foveaStamp === ui.state.pimax.stamp);
       check(route+' exact FPS and VSync values reach native deployment',ui.plan.files.some(f => f.luaChanges?.some(c => c.path === 'graphics.maxFPS' && c.installedRaw === '47.5') && f.luaChanges.some(c => c.path === 'graphics.sync' && c.installedRaw === 'false')) && ui.state.cadence.dcsCap === 47.5);
       edit('renderedFpsCap',48); check(route+' an edit drops the reviewed file list',!ui.plan && $('fileCount').textContent === 'NOT REVIEWED'); edit('renderedFpsCap',47.5);
@@ -221,19 +225,23 @@ window.runWebSmoke = async function() {
     }
     edit('foveaWidth',.55); edit('foveaHeight',.45); edit('quadFocusScale',150); edit('quadSharpening',.7); edit('quadEdgeBlend',.2); edit('neuralWorkingScale',.75); edit('neuralIntensity',.35);
     edit('headsetRefreshHz',90); edit('renderedFpsCap',45); edit('fpsLimit','MatchRefresh');
-    edit('foveatedDlss',false); // Foveated DLSS is a DLSS-page option, independent of the checklist.
-    // The DLSS row covers DLSS 5 and Foveated DLSS alone; Pimax native comes back once DLSS no longer forces the bundled provider.
+    edit('foveatedDlss',false); // Foveated Super Resolution is a stereo-only DLSS-page option, independent of the checklist.
+    // The DLSS row covers DLSS 5 and, in stereo, Foveated Super Resolution alone; Pimax native comes back once DLSS 5 no longer forces the bundled provider.
     select('Pimax',{...ui.featureState(ui.profile),quad:true,dlss:false}); edit('quadViews','PimaxNative');
     $('featureCheck-dlss').click(); check('DLSS on moves Pimax native to bundled Quad Views',ui.profile.quadViews === 'QuadViewsFoveated' && ui.profile.neuralRendering);
     $('featureCheck-dlss').click(); check('Pimax native comes back when DLSS is turned off',ui.profile.quadViews === 'PimaxNative' && !ui.profile.neuralRendering && !ui.profile.foveatedDlss);
     edit('foveatedDlss',true);
-    check('Foveated DLSS alone checks the DLSS row and lights the DLSS tile',$('featureCheck-dlss').checked && $('featureSummary-dlss').textContent.startsWith('Foveated DLSS on') && $('pipeline').querySelector('[data-page=dlss]').classList.contains('on') && $('input-quadViews').querySelector('[value=PimaxNative]').textContent.endsWith('not with DLSS / Foveated DLSS'));
-    $('featureCheck-dlss').click(); check('Unchecking the DLSS row turns DLSS 5 and Foveated DLSS off',!ui.profile.foveatedDlss && !ui.profile.neuralRendering && ui.profile.quadViews === 'PimaxNative');
+    check('With Quad Views Foveated Super Resolution is hidden and does not turn on',!ui.profile.foveatedDlss && $('foveatedDlssControls').hidden && !$('featureCheck-dlss').checked && ui.profile.quadViews === 'PimaxNative' && !$('input-quadViews').querySelector('[value=PimaxNative]').disabled);
     $('featureCheck-quad').click(); $('featureCheck-quad').click(); check('Quad Views turned back on uses the provider last selected',ui.profile.quadViews === 'PimaxNative');
-    // Stereo Foveated DLSS: Cheeky writes ratios of at least 0.2, and the page says so.
-    $('featureCheck-quad').click(); edit('foveatedDlss',true); edit('peripheralScale',.15);
-    check('Stereo Foveated DLSS shows the 0.2 Cheeky writes',$('help-peripheralScale').textContent.includes('0.2 is written') && ui.effectiveFovea(ui.profile).periphery === .2 && !$('help-foveaWidth').textContent.includes('is written'));
-    edit('peripheralScale',.55); edit('foveatedDlss',false); $('featureCheck-quad').click(); edit('quadViews','QuadViewsFoveated'); edit('neuralRendering',true);
+    // Stereo Foveated Super Resolution: shown for stereo, and Cheeky writes ratios of at least 0.2, and the page says so.
+    $('featureCheck-quad').click(); edit('foveatedDlss',true);
+    check('Stereo Foveated Super Resolution alone checks the DLSS row and lights the DLSS tile',!$('foveatedDlssControls').hidden && $('setting-foveatedDlss').textContent.includes('For stereo without Quad Views') && $('featureCheck-dlss').checked && $('featureSummary-dlss').textContent.startsWith('Foveated Super Resolution on') && $('pipeline').querySelector('[data-page=dlss]').classList.contains('on') && !$('input-quadViews').querySelector('[value=PimaxNative]').disabled);
+    $('featureCheck-dlss').click(); check('Unchecking the DLSS row turns DLSS 5 and Foveated Super Resolution off',!ui.profile.foveatedDlss && !ui.profile.neuralRendering && ui.profile.quadViews === 'None');
+    edit('foveatedDlss',true); edit('peripheralScale',.15);
+    check('Stereo Foveated Super Resolution shows the 0.2 Cheeky writes',$('help-peripheralScale').textContent.includes('0.2 is written') && ui.effectiveFovea(ui.profile).periphery === .2 && !$('help-foveaWidth').textContent.includes('is written'));
+    edit('peripheralScale',.55); $('featureCheck-quad').click();
+    check('Turning Quad Views on turns Foveated Super Resolution off and hides it',ui.profile.quadViews === 'PimaxNative' && !ui.profile.foveatedDlss && !$('featureCheck-dlss').checked && $('foveatedDlssControls').hidden);
+    edit('quadViews','QuadViewsFoveated'); edit('neuralRendering',true);
     const wizard = window.setupWizard, beforeWizard = JSON.stringify(ui.profile);
     const pick = (id,value) => { $(id).value = value; $(id).dispatchEvent(new Event('change')); };
     $('guidedSetup').click(); check('Guided setup opens with a three-step stepper',$('setupDialog').open && $('setupSteps').children.length === 3);
@@ -272,7 +280,7 @@ window.runWebSmoke = async function() {
     let offlineDownloadRejected = false; try { await ui.run('prepareSboys'); } catch(e) { offlineDownloadRejected = /Network downloads are disabled/.test(e.message); } check('Unbundled driver download is blocked in offline fixtures',offlineDownloadRejected);
     // Final screenshots show a complete configurable route, without an applied game modification.
     edit('quadViews','QuadViewsFoveated'); edit('foveatedDlss',true);
-    check('Foveated DLSS with Quad Views turns the focus adapter on by itself',ui.profile.quadFocusAdapter);
+    check('With Quad Views Foveated Super Resolution never turns on, and the focus adapter follows DLSS 5',!ui.profile.foveatedDlss && ui.profile.quadFocusAdapter === Boolean(ui.profile.neuralRendering) && !$('featureSummary-dlss').textContent.includes('Foveated'));
     await ui.run('refresh'); $('toast').hidden = true;
     ui.navigate('overview'); check('No fixture change remains',ui.state.originals.count === 0 && !ui.state.launchReady);
     window.chrome.webview.postMessage({smokeResult:{passed:true,count:checks.length,checks,mode:'Hidden HWND; real WebView2 + real .NET bridge; isolated deployment fixtures; no DCS launch'}});

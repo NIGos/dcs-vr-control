@@ -19,7 +19,7 @@ inputs = [
     'src/gaze_foveation.hpp', 'src/gaze_foveation.cpp', 'src/hooks.cpp',
     'tests/openxr_calibration_tests.cpp', 'tests/gaze_tests.cpp', 'standalone/host.cpp', 'uevr/runtime.cpp',
     'src/d3d11_d3d12_transport.cpp', 'tests/runtime_host_tests.cpp', 'src/d3d11_d3d12_transport.hpp', 'src/dlss_nr.cpp',
-    'cmake/Standalone.cmake',
+    'cmake/Standalone.cmake', 'src/settings.hpp',
 ]
 for relative in inputs:
     path = fixture / 'external/cheeky' / relative
@@ -32,7 +32,8 @@ shutil.copytree(root / 'patches/cheeky', fixture / 'patches/cheeky')
 script = fixture / 'scripts/patch-cheeky.py'
 subprocess.run([sys.executable, str(script)], check=True)
 outputs = inputs + ['src/dcs_quad_focus_policy.hpp', 'src/dcs_quad_focus_gate.inc', 'tests/dcs_quad_focus_layer_tests.inc',
-    'standalone/dcs_nr_hotkey.hpp', 'src/dcs_feature_ledger.inc', 'src/dcs_deferred_feature.inc', 'tests/dcs_deferred_tests.inc']
+    'standalone/dcs_nr_hotkey.hpp', 'src/dcs_feature_ledger.inc', 'src/dcs_deferred_feature.inc', 'tests/dcs_deferred_tests.inc',
+    'src/dcs_hold_upscale.hpp', 'tests/dcs_fake_layer.cpp']
 first = {relative: (fixture / 'external/cheeky' / relative).read_text(encoding='utf-8') for relative in outputs}
 for relative, value in first.items():
     if value != (upstream / relative).read_text(encoding='utf-8'):

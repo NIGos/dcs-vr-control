@@ -49,7 +49,7 @@ if($gui.ExitCode -ne 0){throw 'Installed GUI offscreen smoke failed.'}
 $gui.Dispose()
 foreach($index in 0..47){if(-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "gui-$index.png"))){throw 'Missing offscreen GUI view.'}}
 $guiChecks=Get-Content -LiteralPath (Join-Path $fixtureRoot 'gui-checks.json') -Raw | ConvertFrom-Json
-if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){256}else{242})){throw 'Installed WebView2 control and bridge verification failed.'}
+if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){262}else{248})){throw 'Installed WebView2 control and bridge verification failed.'}
 # Exercise the actual packaged service against isolated game/runtime fixtures.
 # Optional real user-supplied NR deployment is tested only in these game fixtures.
 $presets = & $installedCli presets | ConvertFrom-Json
@@ -109,7 +109,7 @@ foreach($case in $cases){
     foreach($value in @('nvidia_preset=slow','nvidia_input_scale=100','nvidia_bidirectional=1')){if(!$flowQuality.Contains($value)){throw "Custom optical flow quality configuration missing: $value"}}
     $launchEntry=$journal.entries | Where-Object { $_.path.EndsWith('launch.json') }
     $launch=Get-Content -LiteralPath $launchEntry.path -Raw | ConvertFrom-Json
-    if($launch.environment.DCSVR_QUAD_FOCUS -ne '1'){throw 'Packaged adapter environment missing.'}
+    if($launch.environment.DCSVR_QUAD_FOCUS -ne $(if($case.neural){'1'}else{'0'})){throw 'Packaged adapter environment mismatch (Foveated SR alone is stereo-only, so Quad Views profiles without DLSS 5 run no adapter).'}
     & $installedCli launch-check --state $stateRoot
     if($LASTEXITCODE -ne 0){throw 'Packaged launch contract verification failed.'}
     [IO.File]::WriteAllText($runtimeDll,'Changed runtime fixture; never loaded.')
@@ -125,7 +125,8 @@ foreach($case in $cases){
     if((& $installedCli status --state $stateRoot | ConvertFrom-Json).count -ne 0){throw 'Restore originals left recorded files.'}
     if((Get-FileHash -LiteralPath $options).Hash -ne $beforeOptions){throw 'Fixture DCS options did not restore.'}
     if(@(Get-ChildItem -LiteralPath (Join-Path $gameRoot 'bin') -Recurse -File).Count -ne 1){throw 'Fixture game mods were not removed.'}
-    if($presetId -eq 'pimax-combined'){
+    # The focus adapter only deploys with DLSS 5 (Foveated SR alone is stereo-only), so the tamper check needs the neural case.
+    if($presetId -eq 'pimax-combined' -and $case.neural){
         $focusDll=Join-Path $installRoot 'components/cheeky-focus/CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll'
         $original=[IO.File]::ReadAllBytes($focusDll)
         try{

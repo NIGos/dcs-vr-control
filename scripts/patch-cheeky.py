@@ -1041,6 +1041,7 @@ shutil.copyfile(root / 'patches/cheeky/dcs_deferred_tests.inc', source / 'tests/
 replace('tests/runtime_host_tests.cpp', '''int main(int argc, char** argv) {
     try {
         bool ota_transport{}, ota_only{};''', '''bool dcs_deferred_mode{};
+int dcs_deferred_scenario{};
 #include "dcs_deferred_tests.inc"
 
 int main(int argc, char** argv) {
@@ -1049,6 +1050,8 @@ int main(int argc, char** argv) {
 replace('tests/runtime_host_tests.cpp', '''            else if (arg == "--transport-forwarded") { transport = true; dx11 = true; forwarded_transport = true; }
 ''', '''            else if (arg == "--transport-forwarded") { transport = true; dx11 = true; forwarded_transport = true; }
             else if (arg == "--transport-dcs-deferred") { transport = dx11 = dcs_deferred_mode = true; }
+            else if (arg == "--transport-dcs-deferred-unproven") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 1; }
+            else if (arg == "--transport-dcs-deferred-nr-off") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 2; }
 ''')
 replace('tests/runtime_host_tests.cpp', '''                proc<void(*)(HMODULE, bool)>(GetModuleHandleW(L"_nvngx.dll"),
                     "CheekyFakeForwardTo")(fake_ngx, false);
@@ -1064,15 +1067,87 @@ replace('tests/runtime_host_tests.cpp', '''                proc<void(*)(HMODULE,
 ''')
 replace('tests/runtime_host_tests.cpp', '''        if (transport) verify_transport(command, get, attachment,''', '''        if (dcs_deferred_mode) {
             verify_dcs_deferred(command, get, attachment, device11.Get(), context11.Get(), fake_ngx,
-                directory / "CheekyFoveatedDLSS-Standalone.log");
+                directory / "CheekyFoveatedDLSS-Standalone.log", bin, dcs_deferred_scenario);
             detach(attachment);
-            puts("PASS: DCS deferred DX11 feature: no VRAM until evaluated, materialized on the first fallback, released once");
+            puts(dcs_deferred_scenario == 1 ? "PASS: DCS deferred focus view before the Quad Views proof: private D3D12 SR without NR, NR on the same textures, never DCS's own feature"
+                : dcs_deferred_scenario == 2 ? "PASS: DCS deferred focus view with DLSS 5 off in flight: private D3D12 SR without NR, never DCS's own feature"
+                : "PASS: DCS deferred DX11 feature: no VRAM until evaluated, bounded bilinear hold without a layout, then materialized once, released once");
             return 0;
         }
         if (transport) verify_transport(command, get, attachment,''')
 replace('cmake/Standalone.cmake', '''    add_test(NAME CheekyRuntimeStandalone-TransportInitFailure COMMAND CheekyRuntimeHostTests --transport-init-failure)
 ''', '''    add_test(NAME CheekyRuntimeStandalone-TransportInitFailure COMMAND CheekyRuntimeHostTests --transport-init-failure)
     add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferred COMMAND CheekyRuntimeHostTests --transport-dcs-deferred)
+    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredUnproven COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-unproven)
+    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredNrOff COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-nr-off)
 ''')
+
+# DCS VR Control: a deferred Quad Views focus view never creates DCS's own DX11 DLSS feature (whose VRAM NGX keeps
+# until shutdown) while the private D3D12 SR can produce it: before the Quad Views proof (first frames after a mission
+# load) and with DLSS 5 toggled off in flight the transport runs SR without NR on the same feature and textures; with no
+# layout at all a bounded bilinear hold (dcs_hold_upscale.hpp). The genuine fallbacks still create it.
+shutil.copyfile(root / 'patches/cheeky/dcs_hold_upscale.hpp', source / 'src/dcs_hold_upscale.hpp')
+replace(hooks, '#include "settings.hpp"\n', '#include "settings.hpp"\n#include "dcs_hold_upscale.hpp"\n')
+replace('src/settings.hpp', """    float nr_motion_scale_y_multiplier{1.0F};
+};""", """    float nr_motion_scale_y_multiplier{1.0F};
+    // DCS VR Control (transient, never persisted): the D3D11 transport runs SR only and skips the NR pass.
+    bool dcs_nr_suppressed{};
+};""")
+replace(transport, """    } nr_attempt{settings, view_id};
+""", """    } nr_attempt{settings, view_id};
+    // DCS VR Control: SR only (the caller holds NR off and has reset its history).
+    if (settings.dcs_nr_suppressed) nr_attempt.attempted = true;
+""")
+replace(transport, """    bool nr_before_succeeded{};
+    if (nr_before) {
+        if (measure_dlss) device->command_list12->EndQuery(slot.dlss_timing_heap, D3D12_QUERY_TYPE_TIMESTAMP, 4U);
+        slot.dlss_nr_timing_foveated = settings.nr_foveated;
+""", """    bool nr_before_succeeded{};
+    if (nr_before && settings.dcs_nr_suppressed) {
+        // DCS VR Control: SR only. Same textures and private SR feature as with NR; the NR pass is skipped.
+        if (measure_dlss) device->command_list12->EndQuery(slot.dlss_timing_heap, D3D12_QUERY_TYPE_TIMESTAMP, 4U);
+        slot.dlss_nr_timing_foveated = settings.nr_foveated;
+    } else if (nr_before) {
+        if (measure_dlss) device->command_list12->EndQuery(slot.dlss_timing_heap, D3D12_QUERY_TYPE_TIMESTAMP, 4U);
+        slot.dlss_nr_timing_foveated = settings.nr_foveated;
+""")
+replace(transport, '    if (settings.nr_enabled && !nr_before) {\n', '    if (settings.nr_enabled && !nr_before && !settings.dcs_nr_suppressed) {\n')
+replace(hooks, """            get_ui(parameters, "OutWidth"), get_ui(parameters, "OutHeight"), dcs_reset_original)) {
+        release_d3d11_transport_view(handle);""", """            get_ui(parameters, "OutWidth"), get_ui(parameters, "OutHeight"), dcs_reset_original)) {
+        // DCS VR Control: a deferred focus view whose proof is not ready yet never creates DCS's own feature.
+        if (NgxResult held{}; dcs_deferred_hold_unproven(runtime, context, handle, parameters, held)) return held;
+        release_d3d11_transport_view(handle);""", count=2)
+replace(hooks, """    if (!settings.enabled &&
+        !(settings.nr_enabled && settings.d3d11_use_d3d12_transport)) {
+        diagnostic_note_state(DiagnosticApi::d3d11, DiagnosticState::disabled);""", """    if (!settings.enabled &&
+        !(settings.nr_enabled && settings.d3d11_use_d3d12_transport)) {
+        // DCS VR Control: DLSS 5 off in flight keeps a deferred focus view on the private D3D12 SR.
+        if (NgxResult kept{}; dcs_deferred_keep_transport(runtime, context, handle, parameters, settings, kept)) return kept;
+        diagnostic_note_state(DiagnosticApi::d3d11, DiagnosticState::disabled);""", count=2)
+# The private SR of a deferred view (with or without NR) always sees DCS's creation-time DLSS parameters.
+replace(hooks, """    if (settings.d3d11_use_d3d12_transport) {
+        NgxPresetOverrideScope center_preset{
+            parameters, settings.center_preset
+        };""", """    if (settings.d3d11_use_d3d12_transport) {
+        // DCS VR Control: a deferred view's private SR uses DCS's creation-time DLSS parameters.
+        DcsDeferredCreateValuesScope dcs_create_values{handle, parameters};
+        NgxPresetOverrideScope center_preset{
+            parameters, settings.center_preset
+        };""", count=2)
+# Test fixture named CheekyOpenXRLayer.dll publishing the gate's snapshot and four-view layout.
+shutil.copyfile(root / 'patches/cheeky/dcs_fake_layer.cpp', source / 'tests/dcs_fake_layer.cpp')
+replace('cmake/Standalone.cmake', """add_dependencies(CheekyRuntimeHostTests CheekyFoveatedDLSSRuntime)
+""", """add_dependencies(CheekyRuntimeHostTests CheekyFoveatedDLSSRuntime)
+add_library(CheekyFakeDcsLayer MODULE tests/dcs_fake_layer.cpp)
+target_include_directories(CheekyFakeDcsLayer PRIVATE src shared)
+target_compile_features(CheekyFakeDcsLayer PRIVATE cxx_std_20)
+target_compile_definitions(CheekyFakeDcsLayer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+set_target_properties(CheekyFakeDcsLayer PROPERTIES PREFIX "" OUTPUT_NAME CheekyOpenXRLayer
+    ARCHIVE_OUTPUT_NAME CheekyFakeDcsLayer PDB_NAME CheekyFakeDcsLayer
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/test-fixtures/dcs-layer"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/test-fixtures/dcs-layer")
+add_dependencies(CheekyRuntimeHostTests CheekyFakeDcsLayer)
+""")
 
 print('Applied opt-in DCS quad focus adapter to the pinned Cheeky source.')
