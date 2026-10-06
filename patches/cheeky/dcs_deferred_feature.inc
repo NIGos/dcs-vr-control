@@ -189,6 +189,7 @@ bool dcs_try_defer_d3d11_create(ID3D11DeviceContext* const context, const std::u
         get_ngx_integer_bits(parameters, "DLSS.Feature.Create.Flags"), get_ngx_integer_bits(parameters, "PerfQualityValue"),
         focus > 0 ? "layout" : "unclassified", slot, live);
     if (live > 1U) dcs_ledger_trace("after-create");
+    dcs_release_idle_views(opaque);
     return true;
 }
 

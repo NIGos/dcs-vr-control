@@ -4,7 +4,8 @@
 // with DCSVR_QUAD_FOCUS=1 and the SR-replacing NR-before transport selected.
 // Scenarios: 0 the deferred lifecycle (no OpenXR layer: bilinear hold, then
 // DCS's own feature after the bound), 1 the startup path before the Quad Views
-// proof (private D3D12 SR without NR, then NR on the same textures), 2 DLSS 5
+// proof (private D3D12 SR without NR, then NR on the same textures; the idle
+// view's resources given back at the next mission's create), 2 DLSS 5
 // toggled off in flight (private D3D12 SR without NR, never DCS's feature).
 #include "dcs_quad_focus_policy.hpp"
 std::uint32_t dcs_created_quality{~0U};
@@ -203,8 +204,23 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
             require(private_mirrors_creation(), "With NR the private SR keeps DCS's creation-time quality and preset");
             require(counter(core, "CheekyFakeCreates") == creates0 && counter(core, "CheekyFakeEvaluates") == core_evaluates0,
                 "The proven focus view never needed DCS's own feature");
+            // 3. DCS never releases a mission's features: the next mission's create gives back the idle
+            //    view's private resources, and the old handle still works should DCS ever use it again.
+            Sleep(5200U);
+            const auto idle_before = log_count("FEATURE_IDLE released private resources");
+            NgxHandle* next_mission{};
+            require(ngx_succeeded(create(context, 1, &parameters, &next_mission)) && next_mission, "Next mission's focus create");
+            require(log_count("FEATURE_IDLE released private resources") == idle_before + 1U,
+                "The next create releases the idle view's private resources");
+            const auto released_allocations = allocations();
+            dcs_clear(device, context, output, sentinel);
+            for (unsigned i = 0; i < 6; ++i) frame(focus, true);
+            require(output_written() && allocations() > released_allocations,
+                "An idle-released view is rebuilt on its next evaluation");
+            require(counter(core, "CheekyFakeCreates") == creates0, "Rebuilding never needs DCS's own feature");
+            require(ngx_succeeded(release(next_mission)), "Release the next mission's focus");
             require(ngx_succeeded(release(focus)) && counter(core, "CheekyFakeReleases") == releases0, "Release without any NGX release");
-            // 3. A view created before any layout that turns out peripheral gets DCS's own feature at once.
+            // 4. A view created before any layout that turns out peripheral gets DCS's own feature at once.
             publish(nullptr, nullptr);
             MockNgxParameters peripheral_parameters = parameters;
             peripheral_parameters.Set("Width", 64U); peripheral_parameters.Set("Height", 64U);

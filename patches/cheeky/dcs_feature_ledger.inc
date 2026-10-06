@@ -91,8 +91,11 @@ struct DcsFeatureRecord {
     const void* handle{};
     unsigned route{};
     std::uint32_t feature{}, width{}, height{}, out_width{}, out_height{};
-    std::uint64_t created_ms{}, evaluations{}, sequence{};
+    std::uint64_t created_ms{}, evaluations{}, sequence{}, last_evaluated_ms{};
     bool deferred{};
+    // The view's private resources were released while it sat idle (see
+    // dcs_release_idle_views); an evaluation clears it.
+    bool idle_released{};
 };
 std::mutex dcs_ledger_mutex;
 std::vector<DcsFeatureRecord> dcs_ledger;
@@ -116,7 +119,11 @@ unsigned dcs_ledger_created(const void* handle, unsigned route, std::uint32_t fe
 // True on the first evaluation of a recorded game feature.
 bool dcs_ledger_evaluated(const void* handle) noexcept {
     std::lock_guard lock(dcs_ledger_mutex);
-    for (auto& record : dcs_ledger) if (record.handle == handle) return ++record.evaluations == 1U;
+    for (auto& record : dcs_ledger) if (record.handle == handle) {
+        record.last_evaluated_ms = GetTickCount64();
+        record.idle_released = false;
+        return ++record.evaluations == 1U;
+    }
     return false;
 }
 
@@ -148,6 +155,8 @@ void dcs_ledger_trace(const char* reason) noexcept {
             static_cast<unsigned long long>(r.evaluations), r.deferred ? 1U : 0U);
 }
 
+void dcs_release_idle_views(const void* created) noexcept;
+
 void dcs_trace_feature_create(unsigned route, std::uint32_t feature, const NgxParameters* parameters,
     NgxResult result, const NgxHandle* handle, const DcsVram& before, const DcsVram& after,
     std::uint64_t elapsed_ms, bool record) noexcept {
@@ -160,6 +169,47 @@ void dcs_trace_feature_create(unsigned route, std::uint32_t feature, const NgxPa
         static_cast<unsigned long long>(elapsed_ms), dcs_mb(before.usage), dcs_mb(after.usage),
         dcs_delta_mb(before, after), dcs_mb(after.budget), live);
     if (record && ngx_succeeded(result) && handle && live > 1U) dcs_ledger_trace("after-create");
+    if (record && ngx_succeeded(result) && handle) dcs_release_idle_views(handle);
+}
+
+// DCS never releases its DLSS features: every mission load creates a new set
+// and the previous mission's stay alive, never evaluated again, until DCS
+// exits (flight 2026-10-06: 0 releases, 16 live features at the second load).
+// The private resources this layer keeps per view - the D3D11->D3D12
+// transport textures, the private D3D12 SR feature and the DLSS-NR feature,
+// about half a GiB per mission for the two focus views - would stay with
+// them. When the game creates a feature, every other view idle for at least
+// dcs_idle_view_ms gives them back. Nothing else changes: the game's handle
+// stays valid, and should it ever be evaluated again its view is rebuilt as
+// on its first evaluation (the bilinear hold releases a view the same way).
+constexpr std::uint64_t dcs_idle_view_ms = 5000;
+
+void dcs_release_idle_views(const void* created) noexcept {
+    struct Idle { const void* handle; double idle_s; std::uint64_t evaluations; };
+    std::vector<Idle> idle;
+    {
+        std::lock_guard lock(dcs_ledger_mutex);
+        const auto now = GetTickCount64();
+        for (auto& record : dcs_ledger) {
+            if (record.handle == created || record.idle_released || record.evaluations == 0U) continue;
+            const auto since = now - std::max(record.last_evaluated_ms, record.created_ms);
+            if (since < dcs_idle_view_ms) continue;
+            record.idle_released = true;
+            try { idle.push_back({record.handle, static_cast<double>(since) / 1000.0, record.evaluations}); }
+            catch (...) { record.idle_released = false; }
+        }
+    }
+    for (const auto& view : idle) {
+        const auto before = dcs_vram_sample();
+        auto* const handle = static_cast<const NgxHandle*>(view.handle);
+        release_d3d11_transport_view(handle);
+        release_d3d11_peripheral_dlaa_view(handle);
+        const auto after = dcs_vram_sample();
+        trace_event("FEATURE_IDLE released private resources handle=%p idle_s=%.1f evaluations=%llu "
+            "vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f (the game's handle stays valid)",
+            view.handle, view.idle_s, static_cast<unsigned long long>(view.evaluations), dcs_mb(before.usage),
+            dcs_mb(after.usage), dcs_delta_mb(before, after));
+    }
 }
 
 // Release logging around the real release call; logs only handles the game owns.

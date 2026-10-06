@@ -1,0 +1,593 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 8d6b94d..94eb1ed 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -287,7 +287,20 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     templates loaded, b= where from (1 DCS's Visualizer.dll in the
+     //     process, 2 Visualizer.dll in cursor_templates, 3 the built-in
+     //     arrow), c= the HRESULT of turning it on.
++    //   result=3 (0011), once a second when matches were too weak: a= their
++    //     mean score x1000, b= their mean scale step x100 (the steps run 0.4,
++    //     0.5, 0.63, 0.79, 1, 1.26, 1.59, 2, 2.52, 3.17 times the image), c=
++    //     the latest one too weak or too close to a look-alike: template
++    //     (bits 0-7), scale step (8-15), score x255 (16-23), look-alike x255
++    //     (24-31).
+     smooth_cursor,
++    // DCS VR Control (0011). Video memory once a second with `[ofxr]
++    // diag_vram` (what the panel shows), in MiB: a= this process's resident
++    // use (bits 0-31) and the budget DXGI gives it (32-63); b= every
++    // process's use of the adapter's dedicated memory (0-31) and its size
++    // (32-63), 0 where not known; c= 1 while the application owns the
++    // foreground window (Windows budgets a background process lower).
++    vram_status,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+index 53aec9f..f485c69 100644
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -131,6 +131,12 @@ struct D3D12SmoothCursorStats {
+     std::uint64_t idle_pairs{};     // pairs with the mouse idle (nothing ran)
+     std::uint64_t timed_pairs{};    // pairs whose detection was GPU-timed
+     std::uint64_t detection_microseconds{}; // their summed GPU time
++    // (0011) The too-weak matches: their summed scores (x1000) and scale
++    // steps, and the latest one (template | step << 8 | score x255 << 16 |
++    // look-alike x255 << 24).
++    std::uint64_t weak_score_milli{};
++    std::uint64_t weak_scale_steps{};
++    std::uint32_t last_weak{};
+     std::uint32_t templates{};      // templates uploaded
+     std::uint32_t matchable_templates{};
+ };
+diff --git a/include/xrfg/smooth_cursor_templates.hpp b/include/xrfg/smooth_cursor_templates.hpp
+index e0e939e..d81b7fe 100644
+--- a/include/xrfg/smooth_cursor_templates.hpp
++++ b/include/xrfg/smooth_cursor_templates.hpp
+@@ -30,10 +30,10 @@ struct CursorTemplateSet {
+     CursorTemplateSource source{CursorTemplateSource::none};
+ };
+ 
+-// The cursor resources DCS shows in a cockpit (by resource id in
+-// Visualizer.dll): the arrows (116 white, 132 red), the clickable-control
+-// markers (145-151) and the newer outlined set (301-310), at most
+-// kD3D12MaxCursorTemplates of them.
++// The cursor resources a VR pilot moves (by resource id in Visualizer.dll):
++// the cockpit's yellow cross (147) and green sight (145), and the menus'
++// white arrow (116). In the cockpit DCS draws them as a 2-degree spot
++// projected into the scene (enlight's RayCursor; 0011).
+ [[nodiscard]] std::span<const std::uint16_t> dcs_cockpit_cursor_ids() noexcept;
+ 
+ // Decodes the bits of one RT_CURSOR resource (a hotspot, then a DIB with its
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index ac1ebe8..535a352 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -345,7 +345,8 @@ constexpr UINT kCursorStateWords = 1024;
+ // each with a candidate per template.
+ constexpr UINT kCursorListEntries = 400;
+ constexpr UINT kCursorStatsBase = 192;
+-constexpr UINT kCursorStatsWords = 10;
++constexpr UINT kCursorStatsWords = 13;
++static_assert(kCursorStatsWords * sizeof(std::uint32_t) <= 64U); // one slot's readback region
+ constexpr UINT kCursorTileSize = 32;
+ constexpr UINT kCursorNoEntry = 2;
+ 
+@@ -2483,6 +2484,9 @@ struct D3D12FrameSynthesizer::Impl {
+                 cursor_stats.busy = values[7];
+                 cursor_stats.acquired = values[8];
+                 cursor_stats.tracked = values[9];
++                cursor_stats.weak_score_milli = values[10];
++                cursor_stats.weak_scale_steps = values[11];
++                cursor_stats.last_weak = values[12];
+             }
+         }
+         slot.cursor_order = 0;
+@@ -2530,6 +2534,17 @@ struct D3D12FrameSynthesizer::Impl {
+         if (a != 0U || b != 0U || d != 0U) {
+             bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 1, a, b, d);
+         }
++        // (0011) Matches too weak this second: their mean score (x1000) and
++        // mean scale step (x100), and the latest one as the GPU packed it.
++        const std::uint64_t weak = c.low_score >= l.low_score ? c.low_score - l.low_score : 0U;
++        if (weak != 0U) {
++            const std::uint64_t score_sum = c.weak_score_milli >= l.weak_score_milli
++                ? c.weak_score_milli - l.weak_score_milli : 0U;
++            const std::uint64_t step_sum = c.weak_scale_steps >= l.weak_scale_steps
++                ? c.weak_scale_steps - l.weak_scale_steps : 0U;
++            bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 3,
++                score_sum / weak, step_sum * 100U / weak, c.last_weak);
++        }
+         cursor_logged = cursor_stats;
+     }
+     // ---------------------------------------------------------------------
+diff --git a/src/d3d12/smooth_cursor.hlsl b/src/d3d12/smooth_cursor.hlsl
+index ddd6bad..f10f98f 100644
+--- a/src/d3d12/smooth_cursor.hlsl
++++ b/src/d3d12/smooth_cursor.hlsl
+@@ -23,7 +23,7 @@
+ //                   template: zero-mean normalised correlation of the
+ //                   template's opaque pixels only (so the background never
+ //                   takes part), coarse positions, the tracked scale or all
+-//                   eight
++//                   ten
+ //   CursorVerifyCS  one group per view: refines the best candidate with every
+ //                   sample and measures the best look-alike elsewhere in a
+ //                   window around it (the margin)
+@@ -126,6 +126,12 @@ static const uint kStatJump = 6;
+ static const uint kStatBusy = 7;
+ static const uint kStatAcquired = 8;
+ static const uint kStatTracked = 9;
++// (0011) Why matches were too weak: the sum of the failing detections'
++// scores (x1000) and scale steps, and the latest one too weak or too close to
++// a look-alike packed (template, scale step, score and look-alike score x255).
++static const uint kStatScoreSum = 10;
++static const uint kStatScaleSum = 11;
++static const uint kStatLastWeak = 12;
+ // The tiles the search visits: (view << 16) | tile.
+ static const uint kListCount = 256;
+ static const uint kListEntries = 260;
+@@ -133,8 +139,12 @@ static const uint kMaxListEntries = 400;
+ 
+ // The sprite's size in the eye image against the 32x32 cursor image: DCS has
+ // no size option, but the size in pixels follows the headset's resolution.
+-static const uint kScaleCount = 8;
+-static const float kScales[8] = {0.4, 0.5, 0.63, 0.794, 1.0, 1.26, 1.587, 2.0};
++// In the cockpit DCS draws the cursor image as a spot 2 degrees across
++// (enlight's RayCursor, built with a 1-degree half-angle), about 65 px in a
++// Pimax Crystal Super's 5424-px eye image: twice the image or a little more,
++// hence the two largest steps (0011).
++static const uint kScaleCount = 10;
++static const float kScales[10] = {0.4, 0.5, 0.63, 0.794, 1.0, 1.26, 1.587, 2.0, 2.52, 3.17};
+ 
+ static const uint kMaxHotTiles = 24;
+ static const float kHotDifference = 0.08;
+@@ -346,9 +356,47 @@ float correlation(int2 position, float scale, uint slice, uint count,
+     return gs_shape != 0u ? abs(score) : score;
+ }
+ 
++// The same correlation on each texel's footprint (0011). From twice the
++// image's size up (DCS's cockpit spot) a texel covers 2x2 pixels or more and
++// its centre pixel matches a position a pixel off just as well, so the
++// refinement takes the footprint's first and last pixel - the footprint the
++// composition redraws (cursor_texel) - and only the true position has both
++// inside the sprite.
++float footprint_correlation(int2 position, float scale, uint slice, uint count,
++    float template_mean, float template_spread) {
++    float sum = 0.0;
++    float sum_squares = 0.0;
++    float cross_sum = 0.0;
++    for (uint i = 0; i < count; ++i) {
++        uint packed = gs_texel[i];
++        float2 texel = float2(float(packed & 0xffu), float(packed >> 8));
++        // The pixels cursor_texel (floor((pixel + 0.5) / scale)) gives this texel.
++        int2 first = position + int2(ceil(texel * scale - 0.5));
++        int2 last = max(first, position + int2(ceil((texel + 1.0) * scale - 0.5)) - 1);
++        float value = 0.5 * (frame_luma(first, slice) + frame_luma(last, slice));
++        sum += value;
++        sum_squares += value * value;
++        cross_sum += value * gs_luma[i];
++    }
++    float n = float(max(count, 1u));
++    float mean = sum / n;
++    float spread = sum_squares - n * mean * mean;
++    bool structured = spread >= n * 1.0e-4 && template_spread > 0.0;
++    float score = structured
++        ? (cross_sum - n * mean * template_mean) * rsqrt(max(spread * template_spread, 1.0e-12))
++        : 0.0;
++    return gs_shape != 0u ? abs(score) : score;
++}
++
+ // A shape template's colour against the image's under its opaque samples, as
+ // chromaticity (so brightness does not count): 1 the same, falling to 0 at a
+-// clearly different hue. Inner-contrast templates are not checked.
++// clearly different hue. Inner-contrast templates are not checked. In the
++// cockpit DCS lights the cursor image with the scene's exposure, mixes it
++// into the frame before tone mapping and DLSS, and leaves 30 % of the panel
++// behind it showing (enlight/rayCursor.fx): its yellow cross arrives orange,
++// its green one paler. A chromaticity distance up to 0.3 (yellow to orange)
++// therefore still counts as the same colour; grey (0.67 from yellow, green
++// or cyan) and another primary (1.0) do not (0011).
+ float shape_colour_match(uint template_index, int2 position, float scale, uint slice, uint count) {
+     float3 image = float3(0.0, 0.0, 0.0);
+     float3 sprite = float3(0.0, 0.0, 0.0);
+@@ -375,7 +423,7 @@ float shape_colour_match(uint template_index, int2 position, float scale, uint s
+     float3 sprite_chroma = sprite / max(sprite.r + sprite.g + sprite.b, 1.0e-4);
+     float distance = abs(image_chroma.r - sprite_chroma.r) + abs(image_chroma.g - sprite_chroma.g) +
+         abs(image_chroma.b - sprite_chroma.b);
+-    return template_is_shape(template_index) ? saturate(1.0 - distance * 4.0) : 1.0;
++    return template_is_shape(template_index) ? saturate(1.0 - max(distance - 0.3, 0.0) * 4.0) : 1.0;
+ }
+ 
+ void template_statistics(uint count, out float mean, out float spread) {
+@@ -643,7 +691,9 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     if (found && thread_index < 25u) {
+         int2 candidate = position + int2(int(thread_index % 5u) - 2, int(thread_index / 5u) - 2);
+         if (all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
+-            score = correlation(candidate, scale, slice, count, template_mean, template_spread);
++            score = scale >= 1.5
++                ? footprint_correlation(candidate, scale, slice, count, template_mean, template_spread)
++                : correlation(candidate, scale, slice, count, template_mean, template_spread);
+             refined = candidate;
+         }
+     }
+@@ -797,10 +847,16 @@ void CursorGateCS() {
+         moved[v] = current[v].position -
+             (previous[v].position - Mappings[v].SourceRect.xy + Mappings[v].TargetRect.xy);
+     }
++    Detection weak = current[0];
+     for (uint view = 0; view < views && reason == kReasonNone; ++view) {
+         uint a = judge_detection(previous[view]);
+         uint b = judge_detection(current[view]);
+         reason = a != kReasonNone ? a : b;
++        if (a != kReasonNone) {
++            weak = previous[view];
++        } else {
++            weak = current[view];
++        }
+     }
+     if (TrackIndex >= 2u) {
+         reason = kReasonNotFound;
+@@ -894,8 +950,16 @@ void CursorGateCS() {
+             counter = kStatBusy;
+         } else if (reason == kReasonScore) {
+             counter = kStatScore;
++            CursorState[kStatsBase + kStatScoreSum] += uint(saturate(weak.score) * 1000.0);
++            CursorState[kStatsBase + kStatScaleSum] += weak.scale_index;
++            CursorState[kStatsBase + kStatLastWeak] = min(weak.template_index, 255u) |
++                (weak.scale_index << 8) | (uint(saturate(weak.score) * 255.0) << 16) |
++                (uint(saturate(weak.second) * 255.0) << 24);
+         } else if (reason == kReasonMargin) {
+             counter = kStatMargin;
++            CursorState[kStatsBase + kStatLastWeak] = min(weak.template_index, 255u) |
++                (weak.scale_index << 8) | (uint(saturate(weak.score) * 255.0) << 16) |
++                (uint(saturate(weak.second) * 255.0) << 24);
+         } else if (reason == kReasonStereo) {
+             counter = kStatStereo;
+         } else if (reason == kReasonJump) {
+diff --git a/src/d3d12/smooth_cursor_templates.cpp b/src/d3d12/smooth_cursor_templates.cpp
+index f15ae66..318b248 100644
+--- a/src/d3d12/smooth_cursor_templates.cpp
++++ b/src/d3d12/smooth_cursor_templates.cpp
+@@ -8,10 +8,12 @@
+ namespace xrfg {
+ namespace {
+ 
+-constexpr std::array<std::uint16_t, 16> kCockpitCursorIds{
+-    116, 132, 145, 146, 147, 148, 149, 151,
+-    301, 302, 303, 306, 307, 308, 309, 310,
+-};
++// (0011) The cursors a VR pilot moves: the yellow cross (147) and the green
++// sight (145) DCS swaps between in the cockpit, and the white arrow (116) of
++// the menus and the map. The control markers DCS shows over a switch last
++// only while the mouse rests on it, when there is nothing to smooth, and
++// every image searched costs a pass and is one more look-alike.
++constexpr std::array<std::uint16_t, 3> kCockpitCursorIds{147, 145, 116};
+ 
+ [[nodiscard]] std::uint32_t read_u32(std::span<const std::uint8_t> bytes, std::size_t at) noexcept {
+     return static_cast<std::uint32_t>(bytes[at]) |
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index 262621e..0b434d1 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -112,6 +112,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "scene_change";
+     case BridgeFlightOperation::smooth_cursor: // DCS VR Control (0010)
+         return "smooth_cursor";
++    case BridgeFlightOperation::vram_status: // DCS VR Control (0011)
++        return "vram_status";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 028c92c..c4ae53d 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1696,6 +1696,8 @@ struct SessionState {
+     xrfg::latency::TripleDepth triple_depth;
+     // `[ofxr] diag_vram`. Fixed for the session.
+     bool diag_vram{};
++    // DCS VR Control (0011): when vram_status was last logged.
++    std::uint64_t vram_logged_ms{};
+     // When the application's thread last entered xrBeginFrame, for the
+     // blocked-interval attribution (sample_application_throughput).
+     std::atomic<std::int64_t> application_begin_entered_ns{0};
+@@ -13959,6 +13961,43 @@ void ensure_gpu_stats(SessionState& state) noexcept {
+     }
+ }
+ 
++// DCS VR Control (0011): with `[ofxr] diag_vram` the memory the panel shows
++// also goes to the flight log once a second (vram_status), so a flight that
++// ran short of video memory can be told from one that did not afterwards.
++void log_vram_status(SessionState& state) noexcept {
++    if (!state.diag_vram || !xrfg::bridge_flight_logger().enabled()) {
++        return;
++    }
++    const std::uint64_t now = GetTickCount64();
++    if (now - state.vram_logged_ms < 1000U) {
++        return;
++    }
++    state.vram_logged_ms = now;
++    // Only once the session's device is known: ensure_gpu_stats tries once.
++    if (state.d3d12_device || state.d3d11_device) {
++        ensure_gpu_stats(state);
++    }
++    if (!state.gpu_stats) {
++        return;
++    }
++    const xrfg::VramStatus vram = state.gpu_stats->snapshot().vram;
++    if (!vram.known) {
++        return;
++    }
++    const auto mib = [](std::uint64_t bytes) { return std::min<std::uint64_t>(bytes >> 20U, 0xffffffffU); };
++    // Windows gives a process in the background a smaller budget.
++    DWORD foreground_process = 0;
++    if (HWND foreground = GetForegroundWindow(); foreground != nullptr) {
++        GetWindowThreadProcessId(foreground, &foreground_process);
++    }
++    xrfg::bridge_flight_logger().event(
++        xrfg::BridgeFlightOperation::vram_status,
++        1,
++        mib(vram.process_usage) | (mib(vram.budget) << 32U),
++        mib(vram.adapter_used) | (mib(vram.adapter_total) << 32U),
++        foreground_process == GetCurrentProcessId() ? 1U : 0U);
++}
++
+ // DCS VR Control (0004): one application frame's throughput evidence, taken
+ // as its xrEndFrame is entered: the CPU time since the previous one less what
+ // this thread spent blocked in the layer (ApplicationBlockedScope), and the
+@@ -14213,6 +14252,7 @@ XrResult layer_end_frame_impl(
+     apply_scene_change(state); // DCS VR Control (0009)
+     apply_live_frame_multiplier(state, use_continuous_presenter);
+     apply_embedded_control(state);
++    log_vram_status(*state); // DCS VR Control (0011)
+     const bool manually_disarmed = state->manual_control.stop_requested();
+     if (manually_disarmed && !state->manual_stop_applied) {
+         // The existing queue has been drained before taking the content lock.
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index ddfb55b..4ab65ab 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -230,6 +230,19 @@ int main(int argc, char** argv) {
+             45ULL | (44ULL << 16),
+             1ULL << 16,
+             7ULL << 48);
++        // DCS VR Control (0011): the weak matches' second and the memory.
++        enabled.event(
++            xrfg::BridgeFlightOperation::smooth_cursor,
++            3,
++            612,
++            750,
++            0xa1be0802ULL);
++        enabled.event(
++            xrfg::BridgeFlightOperation::vram_status,
++            1,
++            17748ULL | (31419ULL << 32),
++            29000ULL | (32607ULL << 32),
++            0);
+         enabled.shutdown();
+ 
+         const std::string log = read(log_path);
+@@ -293,6 +306,14 @@ int main(int argc, char** argv) {
+             log.find("op=smooth_cursor result=1 dur_us=0 a=2883629 b=65536 c=1970324836974592") !=
+                 std::string::npos,
+             "bridge log is missing the 0010 smooth cursor record");
++        require(
++            log.find("op=smooth_cursor result=3 dur_us=0 a=612 b=750 c=2713585666") !=
++                std::string::npos,
++            "bridge log is missing the 0011 weak-match record");
++        require(
++            log.find("op=vram_status result=1 dur_us=0 a=134943577490772 b=140045998649672 c=0") !=
++                std::string::npos,
++            "bridge log is missing the 0011 video memory record");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index d9e18fa..5aa29aa 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -4348,6 +4348,19 @@ using CursorPosition = std::array<int, 2>;
+     return marker;
+ }
+ 
++// (0011) DCS's cockpit cursor in the manner of its yellow cross (147): one
++// colour, two 2-texel bars over 18x18 texels.
++[[nodiscard]] xrfg::D3D12CursorTemplate yellow_cross_template() noexcept {
++    xrfg::D3D12CursorTemplate cross{};
++    for (UINT y = 7; y < 25; ++y) {
++        for (UINT x = 7; x < 25; ++x) {
++            const bool bar = (x >= 15 && x < 17) || (y >= 15 && y < 17);
++            cross.rgba[y * xrfg::kD3D12CursorTemplateSize + x] = bar ? 0xff00ffffU : 0U;
++        }
++    }
++    return cross;
++}
++
+ // A cursor image as drawn: the template resized by nearest texel, the way
+ // the detection and the composition map pixels to texels.
+ struct Sprite {
+@@ -4402,6 +4415,37 @@ void draw_cursor(StereoPattern* pattern, UINT eye, CursorPosition at, const Spri
+     draw_cursor_sized(pattern, eye, kCursorWidth, kCursorHeight, at, sprite);
+ }
+ 
++// (0011) As DCS's cockpit draws it (enlight/rayCursor.fx): the image as a
++// spot, brighter at its centre (x0.5 at the rim to x1.5), lit by the scene so
++// its yellow arrives orange, added over the panel with 30 % of the panel
++// still showing under its opaque texels.
++void draw_ray_cursor(StereoPattern* pattern, UINT eye, CursorPosition at, const Sprite& sprite) {
++    const float half = static_cast<float>(sprite.size) * 0.5F;
++    for (int ty = 0; ty < sprite.size; ++ty) {
++        for (int tx = 0; tx < sprite.size; ++tx) {
++            const std::uint32_t rgba = sprite.rgba[static_cast<std::size_t>(ty * sprite.size + tx)];
++            const int x = at[0] + tx;
++            const int y = at[1] + ty;
++            if ((rgba >> 24U) == 0U || x < 0 || y < 0 || x >= static_cast<int>(kCursorWidth) ||
++                y >= static_cast<int>(kCursorHeight)) {
++                continue;
++            }
++            const float dx = (static_cast<float>(tx) + 0.5F - half) / half;
++            const float dy = (static_cast<float>(ty) + 0.5F - half) / half;
++            const float t = std::clamp(1.0F - (dx * dx + dy * dy), 0.0F, 1.0F);
++            const float gain = (t * t * (3.0F - 2.0F * t) + 0.5F) / 1.5F;
++            const std::array<float, 3> lit{235.0F, 150.0F, 20.0F};
++            const std::size_t offset =
++                (static_cast<std::size_t>(y) * kCursorWidth + static_cast<std::size_t>(x)) * kBytesPerPixel;
++            for (UINT channel = 0; channel < 3U; ++channel) {
++                const float under = static_cast<float>((*pattern)[eye][offset + channel]);
++                (*pattern)[eye][offset + channel] = static_cast<std::uint8_t>(
++                    std::lround(std::clamp(under * 0.3F + lit[channel] * gain, 0.0F, 255.0F)));
++            }
++        }
++    }
++}
++
+ void draw_cursor_into(StereoPattern* pattern, UINT width, UINT height, CursorPosition at,
+     const Sprite& sprite) {
+     for (UINT eye = 0; eye < kEyeCount; ++eye) {
+@@ -4426,6 +4470,8 @@ struct CursorScenario {
+     bool marker{false};
+     // How large DCS draws it against the 32x32 image.
+     float scale{1.0F};
++    // (0011) DCS's cockpit spot: the yellow cross drawn as draw_ray_cursor.
++    bool ray{false};
+     // Head yaw between the two frames (radians): the scene turns past the
+     // view-locked cursor and the previous frame is warped into the current
+     // camera.
+@@ -4449,8 +4495,15 @@ struct CursorRun {
+     xrfg::D3D12OpticalFlowBackend backend,
+     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options,
+     const CursorScenario& scenario) {
+-    const Sprite sprite = make_sprite(
+-        scenario.marker ? marker_template() : xrfg::built_in_arrow_template(), scenario.scale);
++    const Sprite sprite = make_sprite(scenario.ray ? yellow_cross_template()
++        : scenario.marker ? marker_template() : xrfg::built_in_arrow_template(), scenario.scale);
++    const auto draw = [&](StereoPattern* pattern, UINT eye, CursorPosition at) {
++        if (scenario.ray) {
++            draw_ray_cursor(pattern, eye, at, sprite);
++        } else {
++            draw_cursor(pattern, eye, at, sprite);
++        }
++    };
+     CursorRun run;
+     const ReprojectionViews previous_views = make_reprojection_views();
+     const ReprojectionViews current_views = make_reprojection_views(scenario.yaw);
+@@ -4466,12 +4519,12 @@ struct CursorRun {
+         const CursorPosition to{from[0] + scenario.motion[0], from[1] + scenario.motion[1]};
+         if (scenario.distractor) {
+             const CursorPosition still{from[0] + (*scenario.distractor)[0], from[1] + (*scenario.distractor)[1]};
+-            draw_cursor(&run.previous_frame, eye, still, sprite);
+-            draw_cursor(&run.current_frame, eye, still, sprite);
++            draw(&run.previous_frame, eye, still);
++            draw(&run.current_frame, eye, still);
+         }
+         if (scenario.draw) {
+-            draw_cursor(&run.previous_frame, eye, from, sprite);
+-            draw_cursor(&run.current_frame, eye, to, sprite);
++            draw(&run.previous_frame, eye, from);
++            draw(&run.current_frame, eye, to);
+         }
+     }
+     std::array<ComPtr<ID3D12Resource>, 2> sources{
+@@ -4506,6 +4559,7 @@ struct CursorRun {
+         options.enabled = true;
+         options.templates.push_back(xrfg::built_in_arrow_template());
+         options.templates.push_back(marker_template());
++        options.templates.push_back(yellow_cross_template());
+         require(synthesizer.set_smooth_cursor(options) == S_OK, "cursor: set_smooth_cursor");
+     }
+     synthesizer.note_cursor_position(1200, 700, 100'000);
+@@ -4550,9 +4604,10 @@ struct CursorRun {
+ }
+ 
+ struct CursorMeasure {
+-    // Opaque cursor texels at the expected position that differ from the
+-    // cursor's colour by more than 2/255, and the offset (within 2 px) where
+-    // the cursor matches best.
++    // Opaque cursor texels at the expected position that differ by more than
++    // 2/255 from the current real frame's cursor (the sprite's own colour,
++    // or for DCS's spot what it left of the panel too), and the offset
++    // (within 2 px) where the cursor matches best.
+     std::size_t cursor_mismatches{};
+     CursorPosition best_offset{};
+     // Pixels near either real frame's position (but away from the expected
+@@ -4566,8 +4621,8 @@ struct CursorMeasure {
+ };
+ 
+ [[nodiscard]] CursorMeasure measure_cursor(
+-    const StereoPattern& output, const StereoPattern& background, UINT eye,
+-    CursorPosition from, CursorPosition to, CursorPosition expected, const Sprite& sprite) {
++    const StereoPattern& output, const StereoPattern& background, const StereoPattern& current,
++    UINT eye, CursorPosition from, CursorPosition to, CursorPosition expected, const Sprite& sprite) {
+     const int kSize = sprite.size;
+     const auto pixel = [&](const StereoPattern& pattern, int x, int y, UINT channel) {
+         return static_cast<int>(pattern[eye][(static_cast<std::size_t>(y) * kCursorWidth +
+@@ -4601,7 +4656,7 @@ struct CursorMeasure {
+                     const int y = expected[1] + oy + ty;
+                     for (UINT channel = 0; channel < 3U; ++channel) {
+                         if (std::abs(pixel(output, x, y, channel) -
+-                                static_cast<int>((rgba >> (8U * channel)) & 0xffU)) > 2) {
++                                pixel(current, to[0] + tx, to[1] + ty, channel)) > 2) {
+                             ++mismatches;
+                             break;
+                         }
+@@ -4653,17 +4708,25 @@ void test_smooth_cursor(
+     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options = {}) {
+     const char* label = backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "NVIDIA" : "FidelityFX";
+-    for (const int variant : {0, 1, 2, 3, 4, 5}) {
++    for (const int variant : {0, 1, 2, 3, 4, 5, 6, 7}) {
+         // 2X, 3X, 2X while the head turns, the green marker in 2X, and the
+-        // arrow drawn a quarter larger and a fifth smaller than its image.
+-        const bool triple = variant == 1;
++        // arrow drawn a quarter larger and a fifth smaller than its image;
++        // (0011) DCS's cockpit spot, twice its image in 2X and two and a half
++        // times in 3X.
++        const bool triple = variant == 1 || variant == 7;
+         CursorScenario on{};
+         on.triple = triple;
+         on.yaw = variant == 2 ? 0.03F : 0.0F;
+         on.marker = variant == 3;
+-        on.scale = variant == 4 ? 1.26F : variant == 5 ? 0.794F : 1.0F;
+-        const Sprite sprite = make_sprite(
+-            on.marker ? marker_template() : xrfg::built_in_arrow_template(), on.scale);
++        on.ray = variant >= 6;
++        on.scale = variant == 4 ? 1.26F : variant == 5 ? 0.794F : variant == 6 ? 2.0F
++            : variant == 7 ? 2.52F : 1.0F;
++        if (on.ray) {
++            on.previous = {CursorPosition{40, 50}, CursorPosition{28, 50}};
++            on.motion = {70, 16};
++        }
++        const Sprite sprite = make_sprite(on.ray ? yellow_cross_template()
++            : on.marker ? marker_template() : xrfg::built_in_arrow_template(), on.scale);
+         CursorScenario off = on;
+         off.feature = false;
+         const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, on);
+@@ -4679,7 +4742,8 @@ void test_smooth_cursor(
+                 std::to_string(with.stats.low_score) + ", margin " +
+                 std::to_string(with.stats.ambiguous) + ", stereo " +
+                 std::to_string(with.stats.stereo) + ", jump " + std::to_string(with.stats.jump) +
+-                ", busy " + std::to_string(with.stats.busy) + ")");
++                ", busy " + std::to_string(with.stats.busy) + ", last rejected 0x" +
++                [&] { char text[16]{}; std::snprintf(text, sizeof(text), "%08x", with.stats.last_weak); return std::string(text); }() + ")");
+         for (UINT output = 0; output < (triple ? 2U : 1U); ++output) {
+             const float t = with.fractions[output];
+             for (UINT eye = 0; eye < kEyeCount; ++eye) {
+@@ -4688,12 +4752,13 @@ void test_smooth_cursor(
+                 const CursorPosition expected{
+                     to[0] + static_cast<int>(std::lround((from[0] - to[0]) * (1.0F - t))),
+                     to[1] + static_cast<int>(std::lround((from[1] - to[1]) * (1.0F - t)))};
+-                const CursorMeasure good = measure_cursor(
+-                    with.synthetic[output], with.background, eye, from, to, expected, sprite);
+-                const CursorMeasure bad = measure_cursor(
+-                    without.synthetic[output], with.background, eye, from, to, expected, sprite);
++                const CursorMeasure good = measure_cursor(with.synthetic[output], with.background,
++                    with.current_frame, eye, from, to, expected, sprite);
++                const CursorMeasure bad = measure_cursor(without.synthetic[output], with.background,
++                    with.current_frame, eye, from, to, expected, sprite);
+                 std::cout << "smooth cursor " << label << (triple ? " 3X" : " 2X")
+                           << (on.yaw != 0.0F ? " turning" : "") << (on.marker ? " marker" : "")
++                          << (on.ray ? " cockpit-spot" : "")
+                           << (on.scale != 1.0F ? " scale=" + std::to_string(on.scale) : std::string())
+                           << " t=" << t
+                           << " eye=" << eye << ": on mismatches=" << good.cursor_mismatches
