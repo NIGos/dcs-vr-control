@@ -1,0 +1,3876 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c62a37a..4dfb4e9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -152,6 +152,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+     set(XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+     set(XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
+     set(XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
++    # DCS VR Control (0010): the smooth cursor's detection.
++    set(XRFG_CURSOR_BEGIN_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_begin_shader.hpp")
++    set(XRFG_CURSOR_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_motion_shader.hpp")
++    set(XRFG_CURSOR_ARGUMENTS_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_arguments_shader.hpp")
++    set(XRFG_CURSOR_SEARCH_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_search_shader.hpp")
++    set(XRFG_CURSOR_VERIFY_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_verify_shader.hpp")
++    set(XRFG_CURSOR_GATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_gate_shader.hpp")
++    set(XRFG_CURSOR_REGION_VERTEX_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_region_vertex_shader.hpp")
++    set(XRFG_CURSOR_COMPOSITE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_composite_pixel_shader.hpp")
+     add_custom_command(
+         OUTPUT
+             "${XRFG_PACK_INPUT_HEADER}"
+@@ -164,6 +173,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+             "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+             "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
++            "${XRFG_CURSOR_BEGIN_HEADER}"
++            "${XRFG_CURSOR_MOTION_HEADER}"
++            "${XRFG_CURSOR_ARGUMENTS_HEADER}"
++            "${XRFG_CURSOR_SEARCH_HEADER}"
++            "${XRFG_CURSOR_VERIFY_HEADER}"
++            "${XRFG_CURSOR_GATE_HEADER}"
++            "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
++            "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackFlowInput
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+@@ -206,8 +223,41 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorBeginCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_BEGIN_HEADER}" /Vn g_xrfg_cursor_begin_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorMotionCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_MOTION_HEADER}" /Vn g_xrfg_cursor_motion_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorArgumentsCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_ARGUMENTS_HEADER}" /Vn g_xrfg_cursor_arguments_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorSearchCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_SEARCH_HEADER}" /Vn g_xrfg_cursor_search_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorVerifyCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_VERIFY_HEADER}" /Vn g_xrfg_cursor_verify_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorGateCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_GATE_HEADER}" /Vn g_xrfg_cursor_gate_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E CursorRegionVS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_REGION_VERTEX_HEADER}" /Vn g_xrfg_cursor_region_vertex_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E CursorCompositePS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}" /Vn g_xrfg_cursor_composite_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+         DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
+         VERBATIM)
+ 
+     add_library(xrfg_d3d12_history STATIC
+@@ -217,6 +267,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         src/vulkan/vulkan_d3d12_interop.cpp
+         src/d3d12/d3d12_history.cpp
+         src/d3d12/d3d12_frame_synthesizer.cpp
++        src/d3d12/smooth_cursor_templates.cpp
+         src/common/dlss_motion_vectors.cpp
+         "${XRFG_PACK_INPUT_HEADER}"
+         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
+@@ -227,7 +278,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
+         "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+         "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+-        "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
++        "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
++        "${XRFG_CURSOR_BEGIN_HEADER}"
++        "${XRFG_CURSOR_MOTION_HEADER}"
++        "${XRFG_CURSOR_ARGUMENTS_HEADER}"
++        "${XRFG_CURSOR_SEARCH_HEADER}"
++        "${XRFG_CURSOR_VERIFY_HEADER}"
++        "${XRFG_CURSOR_GATE_HEADER}"
++        "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
++        "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}")
+     target_include_directories(xrfg_d3d12_history
+         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
+         PRIVATE
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 871282d..8d6b94d 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -274,6 +274,20 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // late-frame skip was on (bit 16), a probe of 2X was under way (bit 17);
+     // c= the display time correction in force, in microseconds.
+     scene_change,
++    // DCS VR Control (0010). The smooth mouse cursor (`[ofxr] smooth_cursor`).
++    //   result=1, once a second while it is on and anything happened, counts
++    //     over that second, 16 bits each: a= pairs the gate judged (0-15),
++    //     drawn (16-31), frame-views searched by acquisition (32-47) and by
++    //     tracking (48-63); b= rejected: not found (0-15), score too low
++    //     (16-31), a look-alike too close (32-47), the views disagree
++    //     (48-63); c= rejected for an impossible jump (0-15), too much
++    //     motion to search (16-31), pairs with the mouse idle (32-47), the
++    //     mean GPU time of the detection in microseconds (48-63, 0 untimed).
++    //   result=2, once per synthesizer the layer turns it on for: a= the
++    //     templates loaded, b= where from (1 DCS's Visualizer.dll in the
++    //     process, 2 Visualizer.dll in cursor_templates, 3 the built-in
++    //     arrow), c= the HRESULT of turning it on.
++    smooth_cursor,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+index e06ddfe..53aec9f 100644
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -7,12 +7,14 @@
+ 
+ #include <d3d12.h>
+ 
++#include <array>
+ #include <cstdint>
+ #include <limits>
+ #include <memory>
+ #include <mutex>
+ #include <optional>
+ #include <span>
++#include <vector>
+ 
+ namespace xrfg {
+ 
+@@ -83,6 +85,54 @@ struct D3D12NvidiaGpuTiming {
+     std::uint64_t gpu_begin_qpc{};
+     std::uint64_t gpu_end_qpc{};
+     std::uint32_t eye_count{};
++    // DCS VR Control (0010): the smooth cursor's detection passes, when the
++    // pair ran them; 0 otherwise.
++    std::uint64_t cursor_microseconds{};
++};
++
++// DCS VR Control (0010): smooth mouse cursor. One cursor image the detection
++// matches and the synthesis uses as the sprite's shape: 32x32 texels, straight
++// alpha, RGBA8 with red in the low byte. Positions everywhere are the box's
++// top-left corner, so a hotspot plays no part.
++inline constexpr std::uint32_t kD3D12CursorTemplateSize = 32;
++inline constexpr std::uint32_t kD3D12MaxCursorTemplates = 16;
++
++struct D3D12CursorTemplate {
++    std::array<std::uint32_t,
++        kD3D12CursorTemplateSize * kD3D12CursorTemplateSize> rgba{};
++    // Where it came from (a resource id), for the log only.
++    std::uint32_t source_id{};
++};
++
++struct D3D12SmoothCursorOptions {
++    bool enabled{};
++    // At most kD3D12MaxCursorTemplates; one with too little inner contrast to
++    // be matched on its own (a plain dot) is kept for the shape but never
++    // matched.
++    std::vector<D3D12CursorTemplate> templates;
++    // The detection runs only while the Windows cursor moved within this
++    // long; otherwise nothing of the feature runs at all.
++    std::uint32_t active_milliseconds{5000};
++};
++
++// Running totals since set_smooth_cursor. The GPU counts are as of the latest
++// completed work slot, so they trail the submissions by a frame or two.
++struct D3D12SmoothCursorStats {
++    std::uint64_t pairs{};          // pairs the gate judged
++    std::uint64_t drawn{};          // ... and accepted: the cursor was redrawn
++    std::uint64_t not_found{};      // a frame or view without a match
++    std::uint64_t low_score{};      // a match below the acceptance score
++    std::uint64_t ambiguous{};      // a look-alike too close in score
++    std::uint64_t stereo{};         // the two views disagree
++    std::uint64_t jump{};           // an impossible move
++    std::uint64_t busy{};           // too much moved to search the frame
++    std::uint64_t acquired{};       // frame-views searched where motion was
++    std::uint64_t tracked{};        // frame-views searched around the last find
++    std::uint64_t idle_pairs{};     // pairs with the mouse idle (nothing ran)
++    std::uint64_t timed_pairs{};    // pairs whose detection was GPU-timed
++    std::uint64_t detection_microseconds{}; // their summed GPU time
++    std::uint32_t templates{};      // templates uploaded
++    std::uint32_t matchable_templates{};
+ };
+ 
+ enum class D3D12OpticalFlowBackend {
+@@ -255,6 +305,19 @@ public:
+     static constexpr std::uint32_t kMaxMaskVertices = 3072;
+     [[nodiscard]] HRESULT set_visibility_mask(
+         std::uint32_t view, std::span<const float> tangent_xy) noexcept;
++    // DCS VR Control (0010): turns the smooth cursor on with its templates
++    // (see D3D12SmoothCursorOptions and smooth_cursor.hlsl). Only before the
++    // first submission; E_ILLEGAL_METHOD_CALL afterwards. Off by default.
++    [[nodiscard]] HRESULT set_smooth_cursor(
++        const D3D12SmoothCursorOptions& options) noexcept;
++    // The Windows cursor's position (GetCursorPos, screen pixels) and the
++    // time in milliseconds (GetTickCount64), noted once per application frame
++    // before its submission. It decides whether the detection runs (the
++    // cursor moved recently) and predicts where to look.
++    void note_cursor_position(
++        std::int32_t x, std::int32_t y, std::uint64_t milliseconds) noexcept;
++    [[nodiscard]] HRESULT smooth_cursor_stats(
++        D3D12SmoothCursorStats* stats) noexcept;
+     // Caller excludes presenter use and new history captures. Keeps XR destinations.
+     [[nodiscard]] HRESULT reconfigure(D3D12OpticalFlowBackend backend,
+         D3D12NvidiaOpticalFlowOptions options) noexcept;
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index de72222..c7bfc2c 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -175,6 +175,19 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_visibility_mask(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS VR Control (0010). `[ofxr] smooth_cursor`: generated frames draw the
++// application's mouse cursor where it is at their own instant (see
++// D3D12SmoothCursorOptions). Off unless set to 1. Read when a swapchain's
++// synthesis is set up.
++[[nodiscard]] bool read_smooth_cursor(
++    const std::filesystem::path& module_directory) noexcept;
++
++// DCS VR Control (0010). `[ofxr] cursor_templates`: a directory holding the
++// game's Visualizer.dll, read for the cursor images when the running game has
++// not loaded one of its own (see load_dcs_cursor_templates). Empty: none.
++[[nodiscard]] std::filesystem::path read_cursor_templates(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // Held by every running session that cannot follow the "3X Frame Gen"
+ // switch live - one started with "Prefer FPS over latency" off, or one the
+ // runtime's swapchain limit pushed back to a single synthetic. The tray asks
+diff --git a/include/xrfg/smooth_cursor_templates.hpp b/include/xrfg/smooth_cursor_templates.hpp
+new file mode 100644
+index 0000000..e0e939e
+--- /dev/null
++++ b/include/xrfg/smooth_cursor_templates.hpp
+@@ -0,0 +1,56 @@
++#pragma once
++
++// DCS VR Control (0010): the cursor images the smooth cursor matches. They are
++// not shipped: DCS keeps its cursors as Windows cursor resources in its own
++// bin\Visualizer.dll (32x32, 32-bit with alpha), and they are read from the
++// copy the running game has loaded, or from the file in a directory the ini
++// names, at the moment the synthesis is set up. A built-in arrow stands in
++// where neither is found.
++
++#include "xrfg/d3d12_frame_synthesizer.hpp"
++
++#include <cstdint>
++#include <filesystem>
++#include <span>
++#include <vector>
++
++namespace xrfg {
++
++enum class CursorTemplateSource : std::uint32_t {
++    none = 0,
++    // Visualizer.dll as loaded in this process (the game itself).
++    dcs_process = 1,
++    // Visualizer.dll in the directory `[ofxr] cursor_templates` names.
++    dcs_file = 2,
++    built_in = 3,
++};
++
++struct CursorTemplateSet {
++    std::vector<D3D12CursorTemplate> templates;
++    CursorTemplateSource source{CursorTemplateSource::none};
++};
++
++// The cursor resources DCS shows in a cockpit (by resource id in
++// Visualizer.dll): the arrows (116 white, 132 red), the clickable-control
++// markers (145-151) and the newer outlined set (301-310), at most
++// kD3D12MaxCursorTemplates of them.
++[[nodiscard]] std::span<const std::uint16_t> dcs_cockpit_cursor_ids() noexcept;
++
++// Decodes the bits of one RT_CURSOR resource (a hotspot, then a DIB with its
++// AND mask) into a 32x32 template. 32-bit images keep their alpha; 1, 4, 8
++// and 24-bit ones take it from the AND mask. False for any other size or
++// format, or a malformed resource.
++[[nodiscard]] bool decode_cursor_resource(
++    std::span<const std::uint8_t> bits,
++    D3D12CursorTemplate* output) noexcept;
++
++// A plain arrow, white with a dark outline, about 12x19 texels, in the
++// manner of every desktop pointer.
++[[nodiscard]] D3D12CursorTemplate built_in_arrow_template() noexcept;
++
++// The game's own module first, then `directory`\Visualizer.dll when one is
++// given, then the built-in arrow.
++[[nodiscard]] CursorTemplateSet load_dcs_cursor_templates(
++    const std::filesystem::path& directory) noexcept;
++
++}  // namespace xrfg
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+index 555ef9a..822a5ff 100644
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -43,6 +43,12 @@ history_in_place=1
+ ; Generated frames skip what the headset's lens never shows (the runtime's
+ ; visibility mask, where it has one). 1 on (default), 0 off.
+ visibility_mask=1
++; Generated frames draw the mouse cursor where it is at their own moment
++; instead of fading it between two places. 1 on, 0 off (default).
++smooth_cursor=0
++; A folder holding DCS's Visualizer.dll, read for the cursor images when the
++; running game has not loaded its own. Empty: the game's, else a plain arrow.
++cursor_templates=
+ ; Frame generation for Vulkan games. 1 on (default), 0 off; not in the tray's
+ ; menu, set vulkan_bridge=0 in tray.ini instead. Needs the OFXR Vulkan layer
+ ; registered beside this one, which the tray does while armed with it on.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index 6d0d987..89bea9b 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -333,6 +333,28 @@ bool read_visibility_mask(const std::filesystem::path& module_directory) noexcep
+     return read_ofxr_switch(module_directory, L"visibility_mask", true);
+ }
+ 
++bool read_smooth_cursor(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"smooth_cursor", false);
++}
++
++std::filesystem::path read_cursor_templates(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return {};
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        std::wstring value(1024, L'\0');
++        const DWORD length = GetPrivateProfileStringW(
++            L"ofxr", L"cursor_templates", L"", value.data(),
++            static_cast<DWORD>(value.size()), ini_path.c_str());
++        value.resize(length);
++        return std::filesystem::path(value);
++    } catch (...) {
++        return {};
++    }
++}
++
+ bool read_display_time_correction(
+     const std::filesystem::path& module_directory) noexcept {
+     try {
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 54d2a81..ac1ebe8 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -18,6 +18,15 @@
+ #include "nvidia_synthesize_midpoint_pixel_shader.hpp"
+ #include "pack_flow_input_shader.hpp"
+ #include "synthesize_midpoint_pixel_shader.hpp"
++// DCS VR Control (0010): the smooth cursor's detection (smooth_cursor.hlsl).
++#include "cursor_arguments_shader.hpp"
++#include "cursor_begin_shader.hpp"
++#include "cursor_composite_pixel_shader.hpp"
++#include "cursor_gate_shader.hpp"
++#include "cursor_motion_shader.hpp"
++#include "cursor_region_vertex_shader.hpp"
++#include "cursor_search_shader.hpp"
++#include "cursor_verify_shader.hpp"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -68,8 +77,12 @@ struct NvidiaInputScaleRatio {
+ }
+ constexpr UINT kMaxReprojectionViews = 2;
+ // DCS VR Control (0008): the eighth, t7, is the visibility mask's vertices.
+-constexpr UINT kSrvDescriptorCount = 8;
++// DCS VR Control (0010): the ninth and tenth, t8 and t9, the smooth cursor's
++// templates and its state (the gate's record the composition reads).
++constexpr UINT kSrvDescriptorCount = 10;
+ constexpr UINT kMaskSrvDescriptor = 7;
++constexpr UINT kCursorTemplateSrvDescriptor = 8;
++constexpr UINT kCursorStateSrvDescriptor = 9;
+ constexpr UINT kMaskVerticesPerView = D3D12FrameSynthesizer::kMaxMaskVertices;
+ constexpr UINT kUavDescriptorCount = 3;
+ constexpr UINT kDescriptorBlockSize =
+@@ -88,7 +101,10 @@ constexpr UINT kNvidiaTimestampCompositionEnd = 4;
+ // absolute times rather than only as a duration.
+ constexpr UINT kSpanBegin = 5;
+ constexpr UINT kSpanEnd = 6;
+-constexpr UINT kTimestampCount = 7;
++// DCS VR Control (0010): around the smooth cursor's detection passes.
++constexpr UINT kCursorBegin = 7;
++constexpr UINT kCursorEnd = 8;
++constexpr UINT kTimestampCount = 9;
+ constexpr float kPositionToleranceMeters = 1.0e-4F;
+ constexpr float kCameraTolerance = 1.0e-5F;
+ constexpr D3D12_RESOURCE_STATES kShaderReadState =
+@@ -316,6 +332,158 @@ static_assert(offsetof(SynthesisParameters, previous_mappings) == sizeof(UINT) *
+ static_assert(offsetof(SynthesisParameters, slice) == sizeof(UINT) * 60U);
+ static_assert(kSynthesisConstantCount + 2U <= 64U);
+ 
++// DCS VR Control (0010): the smooth cursor. Layouts mirror smooth_cursor.hlsl.
++constexpr UINT kCursorTemplateTexels =
++    kD3D12CursorTemplateSize * kD3D12CursorTemplateSize;
++constexpr UINT kCursorSamplesPerTemplate = 64;
++constexpr UINT kCursorSampleBase = kD3D12MaxCursorTemplates * kCursorTemplateTexels;
++constexpr UINT kCursorInfoBase =
++    kCursorSampleBase + kD3D12MaxCursorTemplates * kCursorSamplesPerTemplate;
++constexpr UINT kCursorTemplateWords = kCursorInfoBase + kD3D12MaxCursorTemplates;
++constexpr UINT kCursorStateWords = 1024;
++// The tiles one detection can visit (smooth_cursor.hlsl kMaxListEntries),
++// each with a candidate per template.
++constexpr UINT kCursorListEntries = 400;
++constexpr UINT kCursorStatsBase = 192;
++constexpr UINT kCursorStatsWords = 10;
++constexpr UINT kCursorTileSize = 32;
++constexpr UINT kCursorNoEntry = 2;
++
++struct CursorParameters {
++    UINT width{};
++    UINT height{};
++    UINT flags{};
++    UINT template_count{};
++    UINT entry_index{};
++    UINT track_index{kCursorNoEntry};
++    UINT tiles_x{};
++    UINT tiles_y{};
++    std::array<float, 2> mouse_delta{};
++    // The views (bits 0-7) and each one's array slice (8-15, 16-23).
++    UINT view_info{};
++    UINT padding{};
++    std::array<CameraMapping, kMaxReprojectionViews> mappings{};
++};
++constexpr UINT kCursorConstantCount =
++    static_cast<UINT>(sizeof(CursorParameters) / sizeof(UINT));
++static_assert(sizeof(CursorParameters) == sizeof(UINT) * 52U);
++static_assert(offsetof(CursorParameters, mappings) == sizeof(UINT) * 12U);
++// One table, four root descriptors and the constants.
++static_assert(1U + 2U * 4U + kCursorConstantCount <= 64U);
++constexpr UINT kCursorFlagLinear = 1U;
++constexpr UINT kCursorFlagPrevious = 2U;
++constexpr UINT kCursorFlagMouseKnown = 4U;
++
++[[nodiscard]] bool srgb_view_format(DXGI_FORMAT format) noexcept {
++    return format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
++           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
++}
++
++[[nodiscard]] float cursor_template_luma(std::uint32_t rgba) noexcept {
++    return (0.2126F * static_cast<float>(rgba & 0xffU) +
++            0.7152F * static_cast<float>((rgba >> 8U) & 0xffU) +
++            0.0722F * static_cast<float>((rgba >> 16U) & 0xffU)) / 255.0F;
++}
++
++// The words the detection reads for the templates: their texels, up to 64
++// sample positions each (spread over the shape, the even ones first so the
++// first 32 are the coarse pass's) and each one's sample count. A template
++// with inner contrast samples its opaque texels and is matched on their
++// brightness; one of a single colour samples 40 of its opaque texels and 24
++// of the transparent ring around them, weighted 255 and 0 in bits 16-23, and
++// is matched on that shape (info bit 16). A template with fewer than eight
++// opaque texels has a count of 0: it is never matched, but lends its shape.
++[[nodiscard]] std::vector<std::uint32_t> cursor_template_words(
++    const std::vector<D3D12CursorTemplate>& templates,
++    std::uint32_t* matchable) {
++    std::vector<std::uint32_t> words(kCursorTemplateWords, 0U);
++    std::uint32_t usable = 0;
++    const std::size_t count = std::min<std::size_t>(
++        templates.size(), kD3D12MaxCursorTemplates);
++    for (std::size_t index = 0; index < count; ++index) {
++        const auto& texels = templates[index].rgba;
++        std::copy(texels.begin(), texels.end(),
++            words.begin() + static_cast<std::ptrdiff_t>(index * kCursorTemplateTexels));
++        constexpr std::uint32_t kSize = kD3D12CursorTemplateSize;
++        const auto alpha = [&](int x, int y) {
++            return x < 0 || y < 0 || x >= static_cast<int>(kSize) || y >= static_cast<int>(kSize)
++                ? 0U
++                : texels[static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x)] >> 24U;
++        };
++        std::vector<std::uint32_t> opaque;
++        std::vector<std::uint32_t> ring;
++        for (std::uint32_t texel = 0; texel < kCursorTemplateTexels; ++texel) {
++            const int x = static_cast<int>(texel % kSize);
++            const int y = static_cast<int>(texel / kSize);
++            if (alpha(x, y) >= 192U) {
++                opaque.push_back(texel);
++            } else if (alpha(x, y) == 0U &&
++                       (alpha(x - 1, y) >= 192U || alpha(x + 1, y) >= 192U ||
++                        alpha(x, y - 1) >= 192U || alpha(x, y + 1) >= 192U)) {
++                ring.push_back(texel);
++            }
++        }
++        const auto spread_out = [](const std::vector<std::uint32_t>& from, std::size_t wanted) {
++            std::vector<std::uint32_t> chosen;
++            wanted = std::min(wanted, from.size());
++            for (std::size_t sample = 0; sample < wanted; ++sample) {
++                chosen.push_back(from[sample * from.size() / wanted]);
++            }
++            return chosen;
++        };
++        // Inner contrast: the opaque texels' brightness varies enough to
++        // match on alone.
++        float sum = 0.0F;
++        float sum_squares = 0.0F;
++        const std::vector<std::uint32_t> inner = spread_out(opaque, kCursorSamplesPerTemplate);
++        for (const std::uint32_t texel : inner) {
++            const float value = cursor_template_luma(texels[texel]);
++            sum += value;
++            sum_squares += value * value;
++        }
++        const float n = static_cast<float>(std::max<std::size_t>(inner.size(), 1U));
++        const float mean = sum / n;
++        const bool contrast = inner.size() >= 8U &&
++            sum_squares - n * mean * mean >= n * 4.0e-3F;
++        const bool shape = !contrast && opaque.size() >= 8U && ring.size() >= 8U;
++        // (texel, weight) pairs in raster order, then the even ones first.
++        std::vector<std::pair<std::uint32_t, std::uint32_t>> chosen;
++        if (contrast) {
++            for (const std::uint32_t texel : inner) {
++                chosen.emplace_back(texel, 255U);
++            }
++        } else if (shape) {
++            for (const std::uint32_t texel : spread_out(opaque, 40U)) {
++                chosen.emplace_back(texel, 255U);
++            }
++            for (const std::uint32_t texel :
++                 spread_out(ring, kCursorSamplesPerTemplate - chosen.size())) {
++                chosen.emplace_back(texel, 0U);
++            }
++            std::sort(chosen.begin(), chosen.end());
++        }
++        std::vector<std::pair<std::uint32_t, std::uint32_t>> ordered;
++        for (std::size_t sample = 0; sample < chosen.size(); sample += 2) {
++            ordered.push_back(chosen[sample]);
++        }
++        for (std::size_t sample = 1; sample < chosen.size(); sample += 2) {
++            ordered.push_back(chosen[sample]);
++        }
++        for (std::size_t sample = 0; sample < ordered.size(); ++sample) {
++            const std::uint32_t texel = ordered[sample].first;
++            words[kCursorSampleBase + index * kCursorSamplesPerTemplate + sample] =
++                (texel % kSize) | ((texel / kSize) << 8U) | (ordered[sample].second << 16U);
++        }
++        words[kCursorInfoBase + index] = static_cast<std::uint32_t>(ordered.size()) |
++            (shape ? 0x10000U : 0U);
++        usable += contrast || shape ? 1U : 0U;
++    }
++    if (matchable != nullptr) {
++        *matchable = usable;
++    }
++    return words;
++}
++
+ [[nodiscard]] bool finite(float value) noexcept {
+     return std::isfinite(value);
+ }
+@@ -690,6 +858,16 @@ struct D3D12FrameSynthesizer::Impl {
+         std::array<NvidiaEyeResources, kMaxReprojectionViews> nvidia_eyes;
+         D3D12NvidiaGpuTiming timing_metadata{};
+         D3D12NvidiaGpuTiming cached_timing{};
++        // DCS VR Control (0010): the NVIDIA path's smooth-cursor detection,
++        // queued between the pack and the optical flow so that it runs while
++        // the flow engine works. Recorded only for a pair that runs it.
++        ComPtr<ID3D12CommandAllocator> cursor_allocator;
++        ComPtr<ID3D12GraphicsCommandList> cursor_command_list;
++        bool cursor_recorded{};
++        bool cursor_timed{};
++        // Nonzero while this slot's copy of the cursor counters waits to be
++        // read: the order it was submitted in.
++        std::uint64_t cursor_order{};
+         std::uint64_t fence_value{};
+         UINT timing_query_base{};
+         bool timing_pending{};
+@@ -838,6 +1016,65 @@ struct D3D12FrameSynthesizer::Impl {
+     bool flow_output_consumed{};
+     bool nvidia_gpu_timing_enabled{};
+ 
++    // DCS VR Control (0010): the smooth cursor (smooth_cursor.hlsl). The
++    // template and state buffers exist from initialize on, so every
++    // descriptor block names real resources whether or not it is used; the
++    // rest is made by set_smooth_cursor. Every buffer rests in COMMON between
++    // submissions and is promoted where it is used.
++    ComPtr<ID3D12Resource> cursor_templates;
++    ComPtr<ID3D12Resource> cursor_state;
++    ComPtr<ID3D12Resource> cursor_candidates;
++    // The motion pass's and the search's dispatch sizes, which the detection
++    // decides on the GPU (ExecuteIndirect).
++    ComPtr<ID3D12Resource> cursor_arguments;
++    ComPtr<ID3D12CommandSignature> cursor_dispatch_signature;
++    ComPtr<ID3D12Resource> cursor_upload;
++    ComPtr<ID3D12CommandAllocator> cursor_upload_allocator;
++    ComPtr<ID3D12GraphicsCommandList> cursor_upload_list;
++    ComPtr<ID3D12Resource> cursor_stats_readback;
++    ComPtr<ID3D12RootSignature> cursor_root_signature;
++    ComPtr<ID3D12PipelineState> cursor_begin_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_motion_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_arguments_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_search_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_verify_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_gate_pipeline;
++    // The pass that redraws the pixels around the cursor after the
++    // composition (frame_synthesis.hlsl CursorRegionVS/CursorCompositePS).
++    ComPtr<ID3D12PipelineState> cursor_composite_pipeline;
++    bool cursor_enabled{};
++    UINT cursor_template_count{};
++    UINT cursor_tiles_x{};
++    UINT cursor_tiles_y{};
++    std::uint32_t cursor_active_milliseconds{5000};
++    std::int32_t cursor_x{};
++    std::int32_t cursor_y{};
++    bool cursor_position_known{};
++    std::uint64_t cursor_moved_milliseconds{};
++    std::uint64_t cursor_now_milliseconds{};
++    // Which application frame's detection each of the two ring entries
++    // holds (its capture serial; 0 none).
++    std::array<std::uint64_t, 2> cursor_entry_serial{};
++    // The Windows cursor as it was noted for the last submitted frame.
++    std::uint64_t cursor_pointer_serial{};
++    std::int32_t cursor_pointer_x{};
++    std::int32_t cursor_pointer_y{};
++    // This pair's plan: set by submit_pair, read by the recorders.
++    struct CursorPlan {
++        bool run{};
++        bool detect_previous{};
++        bool mouse_known{};
++        UINT previous_entry{};
++        UINT current_entry{1};
++        std::array<float, 2> mouse_delta{};
++    };
++    CursorPlan cursor_plan{};
++    D3D12SmoothCursorStats cursor_stats{};
++    std::uint64_t cursor_stats_order{};
++    std::uint64_t cursor_next_order{1};
++    D3D12SmoothCursorStats cursor_logged{};
++    std::uint64_t cursor_log_milliseconds{};
++
+     ~Impl() {
+         // Nothing outside this object waits on the synthesis queue. Its work
+         // writes into the slot command allocators and reads the history
+@@ -1709,6 +1946,594 @@ struct D3D12FrameSynthesizer::Impl {
+         return S_OK;
+     }
+ 
++    // DCS VR Control (0010) ------------------------------------------------
++    [[nodiscard]] static D3D12_RESOURCE_DESC buffer_description(
++        UINT64 bytes,
++        D3D12_RESOURCE_FLAGS flags) noexcept {
++        D3D12_RESOURCE_DESC description{};
++        description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        description.Width = bytes;
++        description.Height = 1;
++        description.DepthOrArraySize = 1;
++        description.MipLevels = 1;
++        description.Format = DXGI_FORMAT_UNKNOWN;
++        description.SampleDesc.Count = 1;
++        description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        description.Flags = flags;
++        return description;
++    }
++
++    // The two buffers every descriptor block names. Committed resources start
++    // zeroed: no detection, no record.
++    [[nodiscard]] HRESULT create_cursor_buffers(UINT node_mask) noexcept {
++        const D3D12_HEAP_PROPERTIES heap = default_heap_properties(node_mask);
++        D3D12_RESOURCE_DESC description = buffer_description(
++            static_cast<UINT64>(kCursorTemplateWords) * sizeof(std::uint32_t),
++            D3D12_RESOURCE_FLAG_NONE);
++        HRESULT result = device->CreateCommittedResource(
++            &heap, D3D12_HEAP_FLAG_NONE, &description,
++            D3D12_RESOURCE_STATE_COMMON, nullptr,
++            IID_PPV_ARGS(cursor_templates.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        description = buffer_description(
++            static_cast<UINT64>(kCursorStateWords) * sizeof(std::uint32_t),
++            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++        return device->CreateCommittedResource(
++            &heap, D3D12_HEAP_FLAG_NONE, &description,
++            D3D12_RESOURCE_STATE_COMMON, nullptr,
++            IID_PPV_ARGS(cursor_state.GetAddressOf()));
++    }
++
++    [[nodiscard]] HRESULT create_cursor_pipelines(UINT node_mask) noexcept {
++        D3D12_DESCRIPTOR_RANGE frames{};
++        frames.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
++        frames.NumDescriptors = 2;
++        frames.BaseShaderRegister = 0;
++        frames.OffsetInDescriptorsFromTableStart = 0;
++        std::array<D3D12_ROOT_PARAMETER, 6> parameters{};
++        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++        parameters[0].DescriptorTable.NumDescriptorRanges = 1;
++        parameters[0].DescriptorTable.pDescriptorRanges = &frames;
++        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++        parameters[1].Descriptor.ShaderRegister = 2;
++        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
++        parameters[2].Descriptor.ShaderRegister = 0;
++        parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
++        parameters[3].Descriptor.ShaderRegister = 1;
++        parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
++        parameters[4].Descriptor.ShaderRegister = 2;
++        parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++        parameters[5].Constants.ShaderRegister = 0;
++        parameters[5].Constants.Num32BitValues = kCursorConstantCount;
++        for (D3D12_ROOT_PARAMETER& parameter : parameters) {
++            parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++        }
++        D3D12_ROOT_SIGNATURE_DESC description{};
++        description.NumParameters = static_cast<UINT>(parameters.size());
++        description.pParameters = parameters.data();
++        ComPtr<ID3DBlob> serialized;
++        ComPtr<ID3DBlob> error;
++        HRESULT result = D3D12SerializeRootSignature(
++            &description, D3D_ROOT_SIGNATURE_VERSION_1,
++            serialized.GetAddressOf(), error.GetAddressOf());
++        if (FAILED(result)) {
++            return result;
++        }
++        result = device->CreateRootSignature(
++            node_mask, serialized->GetBufferPointer(), serialized->GetBufferSize(),
++            IID_PPV_ARGS(cursor_root_signature.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        const auto pipeline = [&](const BYTE* code, std::size_t size,
++                                  ComPtr<ID3D12PipelineState>* output) {
++            D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
++            compute.pRootSignature = cursor_root_signature.Get();
++            compute.CS = {code, size};
++            compute.NodeMask = node_mask;
++            return device->CreateComputePipelineState(
++                &compute, IID_PPV_ARGS(output->GetAddressOf()));
++        };
++        result = pipeline(g_xrfg_cursor_begin_shader,
++            sizeof(g_xrfg_cursor_begin_shader), &cursor_begin_pipeline);
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_motion_shader,
++                sizeof(g_xrfg_cursor_motion_shader), &cursor_motion_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_arguments_shader,
++                sizeof(g_xrfg_cursor_arguments_shader), &cursor_arguments_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_search_shader,
++                sizeof(g_xrfg_cursor_search_shader), &cursor_search_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_verify_shader,
++                sizeof(g_xrfg_cursor_verify_shader), &cursor_verify_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_gate_shader,
++                sizeof(g_xrfg_cursor_gate_shader), &cursor_gate_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            D3D12_INDIRECT_ARGUMENT_DESC dispatch{};
++            dispatch.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
++            D3D12_COMMAND_SIGNATURE_DESC signature{};
++            signature.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
++            signature.NumArgumentDescs = 1;
++            signature.pArgumentDescs = &dispatch;
++            signature.NodeMask = node_mask;
++            result = device->CreateCommandSignature(
++                &signature, nullptr,
++                IID_PPV_ARGS(cursor_dispatch_signature.GetAddressOf()));
++        }
++        return result;
++    }
++
++    // The composition's own root signature and output, no blending: it
++    // overwrites what the composition wrote under it.
++    [[nodiscard]] HRESULT create_cursor_composite_pipeline(UINT node_mask) noexcept {
++        D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
++        description.pRootSignature = root_signature.Get();
++        description.VS = {g_xrfg_cursor_region_vertex_shader,
++            sizeof(g_xrfg_cursor_region_vertex_shader)};
++        description.PS = {g_xrfg_cursor_composite_pixel_shader,
++            sizeof(g_xrfg_cursor_composite_pixel_shader)};
++        D3D12_RENDER_TARGET_BLEND_DESC& blend = description.BlendState.RenderTarget[0];
++        blend.SrcBlend = D3D12_BLEND_ONE;
++        blend.DestBlend = D3D12_BLEND_ZERO;
++        blend.BlendOp = D3D12_BLEND_OP_ADD;
++        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
++        blend.DestBlendAlpha = D3D12_BLEND_ZERO;
++        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
++        blend.LogicOp = D3D12_LOGIC_OP_NOOP;
++        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++        description.SampleMask = std::numeric_limits<UINT>::max();
++        description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++        description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++        description.RasterizerState.DepthClipEnable = TRUE;
++        description.DepthStencilState.DepthEnable = FALSE;
++        description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
++        description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
++        description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++        description.NumRenderTargets = 1;
++        description.RTVFormats[0] = view_format;
++        description.DSVFormat = DXGI_FORMAT_UNKNOWN;
++        description.SampleDesc.Count = 1;
++        description.NodeMask = node_mask;
++        return device->CreateGraphicsPipelineState(
++            &description, IID_PPV_ARGS(cursor_composite_pipeline.GetAddressOf()));
++    }
++
++    // After a view's composition draw, with its root constants still bound:
++    // the cursor pass, when this pair ran the detection. `restore` is the
++    // composition's pipeline, set back for the next view.
++    void draw_cursor_region(
++        ID3D12GraphicsCommandList* list,
++        const WorkSlot& slot,
++        ID3D12PipelineState* restore) noexcept {
++        if (!slot.cursor_recorded || cursor_composite_pipeline == nullptr) {
++            return;
++        }
++        list->SetPipelineState(cursor_composite_pipeline.Get());
++        list->DrawInstanced(6, 1, 0, 0);
++        list->SetPipelineState(restore);
++    }
++
++    [[nodiscard]] HRESULT set_smooth_cursor(
++        const D3D12SmoothCursorOptions& options) noexcept {
++        if (device == nullptr || queue == nullptr || cursor_templates == nullptr) {
++            return E_UNEXPECTED;
++        }
++        // Before any submission: the templates are uploaded on the queue
++        // ahead of everything that reads them.
++        if (cursor_enabled || next_fence_value != 1U) {
++            return E_ILLEGAL_METHOD_CALL;
++        }
++        if (!options.enabled) {
++            return S_OK;
++        }
++        if (options.templates.empty() ||
++            options.templates.size() > kD3D12MaxCursorTemplates) {
++            return E_INVALIDARG;
++        }
++        const UINT tiles_x = static_cast<UINT>(
++            (image_description.Width + kCursorTileSize - 1U) / kCursorTileSize);
++        const UINT tiles_y = (image_description.Height + kCursorTileSize - 1U) / kCursorTileSize;
++        // The best candidate's tile travels in 16 bits.
++        if (static_cast<UINT64>(tiles_x) * tiles_y > 0x10000U) {
++            return E_INVALIDARG;
++        }
++        try {
++            std::uint32_t matchable = 0;
++            const std::vector<std::uint32_t> words =
++                cursor_template_words(options.templates, &matchable);
++            const UINT node_mask = queue->GetDesc().NodeMask;
++            HRESULT result = create_cursor_pipelines(node_mask);
++            if (FAILED(result)) {
++                return result;
++            }
++            result = create_cursor_composite_pipeline(node_mask);
++            if (FAILED(result)) {
++                return result;
++            }
++            const D3D12_HEAP_PROPERTIES heap = default_heap_properties(node_mask);
++            D3D12_RESOURCE_DESC description = buffer_description(
++                static_cast<UINT64>(kCursorListEntries) * kD3D12MaxCursorTemplates * 2U *
++                    sizeof(std::uint32_t),
++                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++            result = device->CreateCommittedResource(
++                &heap, D3D12_HEAP_FLAG_NONE, &description,
++                D3D12_RESOURCE_STATE_COMMON, nullptr,
++                IID_PPV_ARGS(cursor_candidates.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            description = buffer_description(
++                2U * sizeof(D3D12_DISPATCH_ARGUMENTS),
++                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++            result = device->CreateCommittedResource(
++                &heap, D3D12_HEAP_FLAG_NONE, &description,
++                D3D12_RESOURCE_STATE_COMMON, nullptr,
++                IID_PPV_ARGS(cursor_arguments.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            D3D12_HEAP_PROPERTIES upload_heap{};
++            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
++            upload_heap.CreationNodeMask = node_mask == 0 ? 1U : node_mask;
++            upload_heap.VisibleNodeMask = upload_heap.CreationNodeMask;
++            description = buffer_description(
++                static_cast<UINT64>(words.size()) * sizeof(std::uint32_t),
++                D3D12_RESOURCE_FLAG_NONE);
++            result = device->CreateCommittedResource(
++                &upload_heap, D3D12_HEAP_FLAG_NONE, &description,
++                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
++                IID_PPV_ARGS(cursor_upload.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            void* mapped = nullptr;
++            const D3D12_RANGE no_read{0, 0};
++            result = cursor_upload->Map(0, &no_read, &mapped);
++            if (FAILED(result)) {
++                return result;
++            }
++            std::memcpy(mapped, words.data(), words.size() * sizeof(std::uint32_t));
++            cursor_upload->Unmap(0, nullptr);
++            D3D12_HEAP_PROPERTIES readback_heap{};
++            readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
++            readback_heap.CreationNodeMask = upload_heap.CreationNodeMask;
++            readback_heap.VisibleNodeMask = upload_heap.CreationNodeMask;
++            description = buffer_description(
++                static_cast<UINT64>(work_slots.size()) * 64U, D3D12_RESOURCE_FLAG_NONE);
++            result = device->CreateCommittedResource(
++                &readback_heap, D3D12_HEAP_FLAG_NONE, &description,
++                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++                IID_PPV_ARGS(cursor_stats_readback.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            result = device->CreateCommandAllocator(
++                D3D12_COMMAND_LIST_TYPE_DIRECT,
++                IID_PPV_ARGS(cursor_upload_allocator.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            result = device->CreateCommandList(
++                node_mask, D3D12_COMMAND_LIST_TYPE_DIRECT,
++                cursor_upload_allocator.Get(), nullptr,
++                IID_PPV_ARGS(cursor_upload_list.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            // Promoted to COPY_DEST here and decayed back to COMMON once the
++            // list has run; every later list on the queue reads it after.
++            cursor_upload_list->CopyBufferRegion(
++                cursor_templates.Get(), 0, cursor_upload.Get(), 0,
++                static_cast<UINT64>(words.size()) * sizeof(std::uint32_t));
++            result = cursor_upload_list->Close();
++            if (FAILED(result)) {
++                return result;
++            }
++            ID3D12CommandList* lists[] = {cursor_upload_list.Get()};
++            queue->ExecuteCommandLists(1, lists);
++            cursor_tiles_x = tiles_x;
++            cursor_tiles_y = tiles_y;
++            cursor_template_count = static_cast<UINT>(options.templates.size());
++            cursor_active_milliseconds = options.active_milliseconds;
++            cursor_stats = {};
++            cursor_stats.templates = cursor_template_count;
++            cursor_stats.matchable_templates = matchable;
++            cursor_logged = cursor_stats;
++            cursor_enabled = matchable != 0U;
++            return cursor_enabled ? S_OK : S_FALSE;
++        } catch (...) {
++            return E_OUTOFMEMORY;
++        }
++    }
++
++    void note_cursor_position(
++        std::int32_t x, std::int32_t y, std::uint64_t milliseconds) noexcept {
++        cursor_now_milliseconds = milliseconds;
++        if (cursor_position_known && (x != cursor_x || y != cursor_y)) {
++            cursor_moved_milliseconds = milliseconds;
++        }
++        cursor_x = x;
++        cursor_y = y;
++        cursor_position_known = true;
++    }
++
++    // What this pair does about the cursor: nothing unless the feature is on
++    // and the mouse moved within the active window. A frame whose detection
++    // the ring still holds (the previous pair's current frame) is not
++    // searched again.
++    void plan_cursor(std::uint64_t previous_serial, UINT view_count) noexcept {
++        cursor_plan = {};
++        if (!cursor_enabled || view_count == 0 || view_count > kMaxReprojectionViews) {
++            return;
++        }
++        const bool active = cursor_position_known && cursor_moved_milliseconds != 0 &&
++            cursor_now_milliseconds >= cursor_moved_milliseconds &&
++            cursor_now_milliseconds - cursor_moved_milliseconds <= cursor_active_milliseconds;
++        if (!active) {
++            ++cursor_stats.idle_pairs;
++            return;
++        }
++        cursor_plan.run = true;
++        cursor_plan.detect_previous = true;
++        cursor_plan.previous_entry = 0;
++        for (UINT entry = 0; entry < 2U; ++entry) {
++            if (previous_serial != 0 && cursor_entry_serial[entry] == previous_serial) {
++                cursor_plan.previous_entry = entry;
++                cursor_plan.detect_previous = false;
++            }
++        }
++        cursor_plan.current_entry = 1U - cursor_plan.previous_entry;
++        cursor_plan.mouse_known =
++            previous_serial != 0 && cursor_pointer_serial == previous_serial;
++        if (cursor_plan.mouse_known) {
++            cursor_plan.mouse_delta = {
++                static_cast<float>(cursor_x - cursor_pointer_x),
++                static_cast<float>(cursor_y - cursor_pointer_y)};
++        }
++    }
++
++    // After a submission: which frames the ring now holds, and the pointer
++    // this frame was submitted with.
++    void finish_cursor_pair(
++        WorkSlot& slot,
++        std::uint64_t previous_serial,
++        std::uint64_t current_serial,
++        bool submitted) noexcept {
++        if (cursor_plan.run) {
++            if (submitted && slot.cursor_recorded) {
++                cursor_entry_serial[cursor_plan.previous_entry] = previous_serial;
++                cursor_entry_serial[cursor_plan.current_entry] = current_serial;
++                slot.cursor_order = cursor_next_order++;
++            } else {
++                cursor_entry_serial = {};
++            }
++        }
++        if (cursor_position_known) {
++            cursor_pointer_serial = current_serial;
++            cursor_pointer_x = cursor_x;
++            cursor_pointer_y = cursor_y;
++        }
++        cursor_plan = {};
++    }
++
++    // Finds the cursor in this pair's frames and writes the gate's record
++    // (smooth_cursor.hlsl). Both frames must be in a shader-read state, with
++    // their views in the slot's first descriptor block. Leaves the state
++    // readable by the composition that follows in the same list (a later
++    // list finds it decayed to COMMON, from which a read promotes it).
++    void record_cursor_detection(
++        ID3D12GraphicsCommandList* list,
++        WorkSlot& slot,
++        const RollingSource& previous_source,
++        std::span<const D3D12ReprojectionView> target_views) noexcept {
++        const UINT slot_index = static_cast<UINT>(&slot - work_slots.data());
++        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
++        list->SetDescriptorHeaps(1, heaps);
++        list->SetComputeRootSignature(cursor_root_signature.Get());
++        list->SetComputeRootDescriptorTable(
++            0, slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart());
++        list->SetComputeRootShaderResourceView(1, cursor_templates->GetGPUVirtualAddress());
++        list->SetComputeRootUnorderedAccessView(2, cursor_state->GetGPUVirtualAddress());
++        list->SetComputeRootUnorderedAccessView(3, cursor_candidates->GetGPUVirtualAddress());
++        list->SetComputeRootUnorderedAccessView(4, cursor_arguments->GetGPUVirtualAddress());
++        slot.cursor_timed = nvidia_gpu_timing_enabled && nvidia_timestamp_heap != nullptr;
++        if (slot.cursor_timed) {
++            list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                slot.timing_query_base + kCursorBegin);
++        }
++        CursorParameters parameters{};
++        parameters.width = static_cast<UINT>(image_description.Width);
++        parameters.height = image_description.Height;
++        parameters.template_count = cursor_template_count;
++        parameters.tiles_x = cursor_tiles_x;
++        parameters.tiles_y = cursor_tiles_y;
++        const UINT view_count = static_cast<UINT>(
++            std::min<std::size_t>(target_views.size(), kMaxReprojectionViews));
++        parameters.view_info = view_count;
++        for (UINT view = 0; view < view_count; ++view) {
++            const UINT slice = resolved_array_slice(
++                target_views[view], view, target_views.size(),
++                image_description.DepthOrArraySize);
++            parameters.view_info |= (slice & 0xffU) << (8U + 8U * view);
++            parameters.mappings[view] = make_camera_mapping(
++                previous_source.views[view], target_views[view],
++                static_cast<UINT>(image_description.Width), image_description.Height);
++        }
++        const UINT base_flags = (srgb_view_format(view_format) ? kCursorFlagLinear : 0U) |
++            (cursor_plan.mouse_known ? kCursorFlagMouseKnown : 0U);
++        const std::array<D3D12_RESOURCE_BARRIER, 2> uav{
++            uav_barrier(cursor_state.Get()), uav_barrier(cursor_candidates.Get())};
++        // The dispatch sizes go from written (UAV) to read as arguments and
++        // back, with the state's and candidates' writes made visible too.
++        const std::array<D3D12_RESOURCE_BARRIER, 3> to_arguments{
++            uav_barrier(cursor_state.Get()), uav_barrier(cursor_candidates.Get()),
++            transition_barrier(cursor_arguments.Get(),
++                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)};
++        const std::array<D3D12_RESOURCE_BARRIER, 3> from_arguments{
++            uav_barrier(cursor_state.Get()), uav_barrier(cursor_candidates.Get()),
++            transition_barrier(cursor_arguments.Get(),
++                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
++                D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
++        const auto detect = [&](UINT entry, UINT track, bool previous,
++                                std::array<float, 2> mouse) {
++            parameters.entry_index = entry;
++            parameters.track_index = track;
++            parameters.flags = base_flags | (previous ? kCursorFlagPrevious : 0U);
++            parameters.mouse_delta = mouse;
++            list->SetComputeRoot32BitConstants(5, kCursorConstantCount, &parameters, 0);
++            list->SetPipelineState(cursor_begin_pipeline.Get());
++            list->Dispatch(1, 1, 1);
++            list->ResourceBarrier(static_cast<UINT>(to_arguments.size()), to_arguments.data());
++            list->SetPipelineState(cursor_motion_pipeline.Get());
++            list->ExecuteIndirect(cursor_dispatch_signature.Get(), 1,
++                cursor_arguments.Get(), 0, nullptr, 0);
++            list->ResourceBarrier(static_cast<UINT>(from_arguments.size()), from_arguments.data());
++            list->SetPipelineState(cursor_arguments_pipeline.Get());
++            list->Dispatch(1, 1, 1);
++            list->ResourceBarrier(static_cast<UINT>(to_arguments.size()), to_arguments.data());
++            list->SetPipelineState(cursor_search_pipeline.Get());
++            list->ExecuteIndirect(cursor_dispatch_signature.Get(), 1,
++                cursor_arguments.Get(), sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
++            list->ResourceBarrier(static_cast<UINT>(from_arguments.size()), from_arguments.data());
++            list->SetPipelineState(cursor_verify_pipeline.Get());
++            list->Dispatch(1, 1, view_count);
++            list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
++        };
++        dred_marker(list, "OFXR smooth cursor detection");
++        if (cursor_plan.detect_previous) {
++            detect(cursor_plan.previous_entry, kCursorNoEntry, true,
++                {-cursor_plan.mouse_delta[0], -cursor_plan.mouse_delta[1]});
++        }
++        detect(cursor_plan.current_entry, cursor_plan.previous_entry, false,
++            cursor_plan.mouse_delta);
++        parameters.entry_index = cursor_plan.current_entry;
++        parameters.track_index = cursor_plan.previous_entry;
++        parameters.flags = base_flags;
++        parameters.mouse_delta = cursor_plan.mouse_delta;
++        list->SetComputeRoot32BitConstants(5, kCursorConstantCount, &parameters, 0);
++        list->SetPipelineState(cursor_gate_pipeline.Get());
++        list->Dispatch(1, 1, 1);
++        // The counters go to this slot's readback region, read when the slot
++        // is next taken.
++        const D3D12_RESOURCE_BARRIER to_copy = transition_barrier(
++            cursor_state.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++            D3D12_RESOURCE_STATE_COPY_SOURCE);
++        list->ResourceBarrier(1, &to_copy);
++        list->CopyBufferRegion(
++            cursor_stats_readback.Get(), static_cast<UINT64>(slot_index) * 64U,
++            cursor_state.Get(), static_cast<UINT64>(kCursorStatsBase) * sizeof(std::uint32_t),
++            static_cast<UINT64>(kCursorStatsWords) * sizeof(std::uint32_t));
++        // The composition reads the record through a shader resource view.
++        const D3D12_RESOURCE_BARRIER to_read = transition_barrier(
++            cursor_state.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, kShaderReadState);
++        list->ResourceBarrier(1, &to_read);
++        if (slot.cursor_timed) {
++            list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                slot.timing_query_base + kCursorEnd);
++        }
++        slot.cursor_recorded = true;
++    }
++
++    // Every mark a resolve reads has to have been written: a pair without the
++    // detection writes the two cursor marks as an empty interval.
++    void write_unused_cursor_marks(ID3D12GraphicsCommandList* list, WorkSlot& slot) noexcept {
++        if (!slot.cursor_timed && nvidia_timestamp_heap != nullptr) {
++            list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                slot.timing_query_base + kCursorBegin);
++            list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                slot.timing_query_base + kCursorEnd);
++        }
++    }
++
++    void harvest_cursor_stats(WorkSlot& slot) noexcept {
++        if (slot.cursor_order == 0 || cursor_stats_readback == nullptr ||
++            fence_status(fence.Get(), slot.fence_value) != S_OK) {
++            return;
++        }
++        const UINT slot_index = static_cast<UINT>(&slot - work_slots.data());
++        const SIZE_T begin = static_cast<SIZE_T>(slot_index) * 64U;
++        const D3D12_RANGE read_range{begin, begin + kCursorStatsWords * sizeof(std::uint32_t)};
++        void* mapped = nullptr;
++        if (SUCCEEDED(cursor_stats_readback->Map(0, &read_range, &mapped)) && mapped != nullptr) {
++            std::array<std::uint32_t, kCursorStatsWords> values{};
++            std::memcpy(values.data(), static_cast<const std::byte*>(mapped) + begin,
++                sizeof(values));
++            const D3D12_RANGE no_write{0, 0};
++            cursor_stats_readback->Unmap(0, &no_write);
++            if (slot.cursor_order > cursor_stats_order) {
++                cursor_stats_order = slot.cursor_order;
++                cursor_stats.pairs = values[0];
++                cursor_stats.drawn = values[1];
++                cursor_stats.not_found = values[2];
++                cursor_stats.low_score = values[3];
++                cursor_stats.ambiguous = values[4];
++                cursor_stats.stereo = values[5];
++                cursor_stats.jump = values[6];
++                cursor_stats.busy = values[7];
++                cursor_stats.acquired = values[8];
++                cursor_stats.tracked = values[9];
++            }
++        }
++        slot.cursor_order = 0;
++    }
++
++    void harvest_all_cursor_stats() noexcept {
++        for (WorkSlot& slot : work_slots) {
++            harvest_cursor_stats(slot);
++        }
++    }
++
++    // Once a second while the feature is on, into the flight log
++    // (BridgeFlightOperation::smooth_cursor).
++    void log_smooth_cursor() noexcept {
++        if (!cursor_enabled || !bridge_flight_logger().enabled()) {
++            return;
++        }
++        const std::uint64_t now = GetTickCount64();
++        if (cursor_log_milliseconds == 0) {
++            cursor_log_milliseconds = now;
++            return;
++        }
++        if (now - cursor_log_milliseconds < 1000U) {
++            return;
++        }
++        cursor_log_milliseconds = now;
++        harvest_all_cursor_stats();
++        const D3D12SmoothCursorStats& c = cursor_stats;
++        const D3D12SmoothCursorStats& l = cursor_logged;
++        const auto field = [](std::uint64_t now_value, std::uint64_t then_value) {
++            const std::uint64_t delta = now_value >= then_value ? now_value - then_value : 0U;
++            return std::min<std::uint64_t>(delta, 0xffffU);
++        };
++        const std::uint64_t timed = c.timed_pairs >= l.timed_pairs ? c.timed_pairs - l.timed_pairs : 0U;
++        const std::uint64_t mean_us = timed == 0 ? 0U
++            : std::min<std::uint64_t>(
++                  (c.detection_microseconds - l.detection_microseconds) / timed, 0xffffU);
++        const std::uint64_t a = field(c.pairs, l.pairs) | (field(c.drawn, l.drawn) << 16U) |
++            (field(c.acquired, l.acquired) << 32U) | (field(c.tracked, l.tracked) << 48U);
++        const std::uint64_t b = field(c.not_found, l.not_found) |
++            (field(c.low_score, l.low_score) << 16U) |
++            (field(c.ambiguous, l.ambiguous) << 32U) | (field(c.stereo, l.stereo) << 48U);
++        const std::uint64_t d = field(c.jump, l.jump) | (field(c.busy, l.busy) << 16U) |
++            (field(c.idle_pairs, l.idle_pairs) << 32U) | (mean_us << 48U);
++        if (a != 0U || b != 0U || d != 0U) {
++            bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 1, a, b, d);
++        }
++        cursor_logged = cursor_stats;
++    }
++    // ---------------------------------------------------------------------
++
+     [[nodiscard]] HRESULT create_work_slots(UINT node_mask) noexcept {
+ 
+         descriptor_increment = device->GetDescriptorHandleIncrementSize(
+@@ -1782,6 +2607,27 @@ struct D3D12FrameSynthesizer::Impl {
+                 if (FAILED(result)) {
+                     return result;
+                 }
++                // DCS VR Control (0010).
++                result = device->CreateCommandAllocator(
++                    D3D12_COMMAND_LIST_TYPE_DIRECT,
++                    IID_PPV_ARGS(slot.cursor_allocator.GetAddressOf()));
++                if (FAILED(result)) {
++                    return result;
++                }
++                result = device->CreateCommandList(
++                    node_mask,
++                    D3D12_COMMAND_LIST_TYPE_DIRECT,
++                    slot.cursor_allocator.Get(),
++                    nullptr,
++                    IID_PPV_ARGS(slot.cursor_command_list.GetAddressOf()));
++                if (FAILED(result)) {
++                    return result;
++                }
++                slot.cursor_command_list->SetName(L"OFXR Smooth Cursor");
++                result = slot.cursor_command_list->Close();
++                if (FAILED(result)) {
++                    return result;
++                }
+                 if (nvidia_gpu_timing_enabled) {
+                     result = device->CreateCommandAllocator(
+                         D3D12_COMMAND_LIST_TYPE_DIRECT,
+@@ -1877,6 +2723,43 @@ struct D3D12FrameSynthesizer::Impl {
+                 }
+             }
+ 
++            // DCS VR Control (0010): the smooth cursor's templates and state,
++            // the same views in every block.
++            {
++                D3D12_SHADER_RESOURCE_VIEW_DESC templates_view{};
++                templates_view.Format = DXGI_FORMAT_UNKNOWN;
++                templates_view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
++                templates_view.Shader4ComponentMapping =
++                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++                templates_view.Buffer.FirstElement = 0;
++                templates_view.Buffer.NumElements = kCursorTemplateWords;
++                templates_view.Buffer.StructureByteStride = sizeof(std::uint32_t);
++                D3D12_SHADER_RESOURCE_VIEW_DESC state_view{};
++                state_view.Format = DXGI_FORMAT_R32_TYPELESS;
++                state_view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
++                state_view.Shader4ComponentMapping =
++                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++                state_view.Buffer.FirstElement = 0;
++                state_view.Buffer.NumElements = kCursorStateWords;
++                state_view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
++                for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
++                    device->CreateShaderResourceView(
++                        cursor_templates.Get(),
++                        &templates_view,
++                        offset_cpu_handle(
++                            cpu_start,
++                            block * kDescriptorBlockSize + kCursorTemplateSrvDescriptor,
++                            descriptor_increment));
++                    device->CreateShaderResourceView(
++                        cursor_state.Get(),
++                        &state_view,
++                        offset_cpu_handle(
++                            cpu_start,
++                            block * kDescriptorBlockSize + kCursorStateSrvDescriptor,
++                            descriptor_increment));
++                }
++            }
++
+             D3D12_SHADER_RESOURCE_VIEW_DESC srv_description{};
+             srv_description.Shader4ComponentMapping =
+                 D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+@@ -2287,6 +3170,10 @@ struct D3D12FrameSynthesizer::Impl {
+             nvidia_timestamp_readback.Reset();
+             nvidia_timestamp_heap.Reset();
+         }
++        result = create_cursor_buffers(node_mask);
++        if (FAILED(result)) {
++            return result;
++        }
+         result = create_work_slots(node_mask);
+         if (FAILED(result)) {
+             return result;
+@@ -2386,6 +3273,14 @@ struct D3D12FrameSynthesizer::Impl {
+         slot.cached_timing.gpu_end_qpc = timestamp_qpc(values[kSpanEnd]);
+         slot.cached_timing.total_microseconds = timestamp_microseconds(
+             values[kSpanBegin], values[kSpanEnd]);
++        // DCS VR Control (0010).
++        if (slot.cursor_timed) {
++            slot.cached_timing.cursor_microseconds = timestamp_microseconds(
++                values[kCursorBegin], values[kCursorEnd]);
++            ++cursor_stats.timed_pairs;
++            cursor_stats.detection_microseconds += slot.cached_timing.cursor_microseconds;
++            slot.cursor_timed = false;
++        }
+         if (backend != D3D12OpticalFlowBackend::nvidia) {
+             slot.timing_pending = false;
+             slot.timing_cached = true;
+@@ -2596,6 +3491,7 @@ struct D3D12FrameSynthesizer::Impl {
+             const HRESULT status =
+                 fence_status(fence.Get(), work_slots[index].fence_value);
+             if (status == S_OK) {
++                harvest_cursor_stats(work_slots[index]); // DCS VR Control (0010)
+                 const HRESULT timing_result =
+                     harvest_nvidia_gpu_timing(work_slots[index]);
+                 if (FAILED(timing_result)) {
+@@ -2899,6 +3795,11 @@ struct D3D12FrameSynthesizer::Impl {
+             }
+         }
+         slot.command_list->ResourceBarrier(before_count, before.data());
++        // DCS VR Control (0010).
++        if (cursor_plan.run) {
++            record_cursor_detection(
++                slot.command_list.Get(), slot, previous_source, target_views);
++        }
+ 
+         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+         slot.command_list->SetDescriptorHeaps(1, heaps);
+@@ -2978,6 +3879,8 @@ struct D3D12FrameSynthesizer::Impl {
+                 set_viewport_and_scissor(slot.command_list.Get(), target_views[view_index].image_rect,
+                     static_cast<UINT>(image_description.Width), image_description.Height);
+                 draw_view(slot.command_list.Get(), view_masks[view_index]);
++                draw_cursor_region(slot.command_list.Get(), slot,
++                    game_motion_graphics_pipeline.Get()); // 0010
+                 clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
+                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+             }
+@@ -3014,6 +3917,9 @@ struct D3D12FrameSynthesizer::Impl {
+     }
+ 
+     [[nodiscard]] HRESULT reset_work_slot(WorkSlot& slot) noexcept {
++        // DCS VR Control (0010).
++        slot.cursor_recorded = false;
++        slot.cursor_timed = false;
+         HRESULT result = slot.allocator->Reset();
+         if (FAILED(result)) {
+             synthesis_enabled = false;
+@@ -3385,6 +4291,39 @@ struct D3D12FrameSynthesizer::Impl {
+         }
+         slot.command_list->ResourceBarrier(after_pack_count, after_pack.data());
+         dred_marker(slot.command_list.Get(), "OFXR NVIDIA pack complete");
++        // DCS VR Control (0010): the smooth cursor's detection, in a list of
++        // its own that execute_nvidia_and_signal queues after the pack, where
++        // it runs while the optical-flow engine works.
++        if (cursor_plan.run && slot.cursor_command_list != nullptr) {
++            ID3D12GraphicsCommandList* const cursor = slot.cursor_command_list.Get();
++            HRESULT cursor_result = slot.cursor_allocator->Reset();
++            if (SUCCEEDED(cursor_result)) {
++                cursor_result = cursor->Reset(slot.cursor_allocator.Get(), nullptr);
++            }
++            if (FAILED(cursor_result)) {
++                return cursor_result;
++            }
++            const std::array<D3D12_RESOURCE_BARRIER, 2> cursor_before{
++                transition_barrier(previous_resource, D3D12_RESOURCE_STATE_COMMON,
++                    kShaderReadState),
++                transition_barrier(current_resource, D3D12_RESOURCE_STATE_COMMON,
++                    kShaderReadState)};
++            cursor->ResourceBarrier(
++                static_cast<UINT>(cursor_before.size()), cursor_before.data());
++            record_cursor_detection(cursor, slot, previous_source, target_views);
++            const std::array<D3D12_RESOURCE_BARRIER, 2> cursor_after{
++                transition_barrier(previous_resource, kShaderReadState,
++                    D3D12_RESOURCE_STATE_COMMON),
++                transition_barrier(current_resource, kShaderReadState,
++                    D3D12_RESOURCE_STATE_COMMON)};
++            cursor->ResourceBarrier(
++                static_cast<UINT>(cursor_after.size()), cursor_after.data());
++            cursor_result = cursor->Close();
++            if (FAILED(cursor_result)) {
++                slot.cursor_recorded = false;
++                return cursor_result;
++            }
++        }
+         if (nvidia_gpu_timing_enabled) {
+             slot.command_list->EndQuery(
+                 nvidia_timestamp_heap.Get(),
+@@ -3446,6 +4385,7 @@ struct D3D12FrameSynthesizer::Impl {
+             nvidia_options.bidirectional
+                 ? nvidia_bidirectional_graphics_pipeline.Get()
+                 : nvidia_graphics_pipeline.Get());
++
+         dred_marker(synthesis, "OFXR NVIDIA composition draw");
+         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ 
+@@ -3499,6 +4439,10 @@ struct D3D12FrameSynthesizer::Impl {
+                     static_cast<UINT>(image_description.Width),
+                     image_description.Height);
+                 draw_view(synthesis, view_masks[view_index]);
++                draw_cursor_region(synthesis, slot,
++                    nvidia_options.bidirectional
++                        ? nvidia_bidirectional_graphics_pipeline.Get()
++                        : nvidia_graphics_pipeline.Get()); // 0010
+                 clear_synthetic_marker(synthesis, rtv, target_views[view_index],
+                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+             }
+@@ -3632,6 +4576,7 @@ struct D3D12FrameSynthesizer::Impl {
+                 nvidia_timestamp_heap.Get(),
+                 D3D12_QUERY_TYPE_TIMESTAMP,
+                 slot.timing_query_base + kNvidiaTimestampCompositionEnd);
++            write_unused_cursor_marks(synthesis, slot); // 0010
+             synthesis->ResolveQueryData(
+                 nvidia_timestamp_heap.Get(),
+                 D3D12_QUERY_TYPE_TIMESTAMP,
+@@ -3783,6 +4728,11 @@ struct D3D12FrameSynthesizer::Impl {
+                 before_pixel.data());
+         }
+         flow_output_consumed = true;
++        // DCS VR Control (0010).
++        if (cursor_plan.run) {
++            record_cursor_detection(
++                slot.command_list.Get(), slot, previous_source, target_views);
++        }
+ 
+         slot.command_list->SetDescriptorHeaps(1, heaps);
+         slot.command_list->SetGraphicsRootSignature(root_signature.Get());
+@@ -3837,6 +4787,8 @@ struct D3D12FrameSynthesizer::Impl {
+                     static_cast<UINT>(image_description.Width),
+                     image_description.Height);
+                 draw_view(slot.command_list.Get(), view_masks[view_index]);
++                draw_cursor_region(slot.command_list.Get(), slot,
++                    graphics_pipeline.Get()); // 0010
+                 clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
+                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+             }
+@@ -3862,6 +4814,7 @@ struct D3D12FrameSynthesizer::Impl {
+             // Only this path records a resolve of its own; the NVIDIA path
+             // resolves on its synthesis list. Without one the span marks
+             // never reach the readback buffer at all.
++            write_unused_cursor_marks(slot.command_list.Get(), slot); // 0010
+             slot.command_list->ResolveQueryData(
+                 nvidia_timestamp_heap.Get(),
+                 D3D12_QUERY_TYPE_TIMESTAMP,
+@@ -4252,6 +5205,13 @@ struct D3D12FrameSynthesizer::Impl {
+             return result;
+         }
+         ++next_fence_value;
++        // DCS VR Control (0010): after the pack's signal, so the optical-flow
++        // engine starts without it, and before the wait for that engine, so
++        // this queue runs it meanwhile.
++        if (slot.cursor_recorded && slot.cursor_command_list != nullptr) {
++            ID3D12CommandList* cursor_lists[] = {slot.cursor_command_list.Get()};
++            queue->ExecuteCommandLists(1, cursor_lists);
++        }
+ 
+         if (nvidia_gpu_timing_enabled) {
+             result = slot.timing_marker_allocator->Reset();
+@@ -4485,6 +5445,8 @@ struct D3D12FrameSynthesizer::Impl {
+         current_destinations[current_destination_index].fence_value = fence_value;
+         next_work_slot = (work_slot_index + 1U) %
+             static_cast<std::uint32_t>(work_slots.size());
++        cursor_plan = {}; // DCS VR Control (0010)
++        finish_cursor_pair(slot, 0, current.serial, true);
+ 
+         output_ticket->previous_serial = 0;
+         output_ticket->current_serial = current.serial;
+@@ -4676,6 +5638,8 @@ struct D3D12FrameSynthesizer::Impl {
+                 current_source_views.end(),
+                 previous.views.begin());
+             previous.last_use_fence_value = fence_value;
++            cursor_plan = {}; // DCS VR Control (0010)
++            finish_cursor_pair(slot, 0, current.serial, true);
+             current_destinations[current_destination_index].fence_value = fence_value;
+             synthetic_destinations[synthetic_destination_index].fence_value = fence_value;
+             if (extra_synthetic_destination) {
+@@ -4727,6 +5691,9 @@ struct D3D12FrameSynthesizer::Impl {
+             cancel_next();
+             return result;
+         }
++        // DCS VR Control (0010).
++        plan_cursor(previous.ticket.serial, previous.view_count);
++        const std::uint64_t cursor_previous_serial = previous.ticket.serial;
+         bool used_game_motion = false;
+         result = record_pair(
+             slot,
+@@ -4739,6 +5706,7 @@ struct D3D12FrameSynthesizer::Impl {
+             &used_game_motion);
+         if (FAILED(result)) {
+             synthesis_enabled = false;
++            finish_cursor_pair(slot, cursor_previous_serial, current.serial, false);
+             cancel_next();
+             return result;
+         }
+@@ -4751,6 +5719,7 @@ struct D3D12FrameSynthesizer::Impl {
+         }
+         result = queue->Wait(next.producer_fence.Get(), current.fence_value);
+         if (FAILED(result)) {
++            finish_cursor_pair(slot, cursor_previous_serial, current.serial, false);
+             cancel_next();
+             return result;
+         }
+@@ -4763,6 +5732,8 @@ struct D3D12FrameSynthesizer::Impl {
+                      : execute_and_signal(
+                            slot, work_slot_index, &next, &fence_value,
+                            defer_current_copy);
++        finish_cursor_pair(slot, cursor_previous_serial, current.serial, SUCCEEDED(result));
++        log_smooth_cursor();
+         if (FAILED(result)) {
+             if (next.active()) {
+                 cancel_next();
+@@ -5056,6 +6027,49 @@ HRESULT D3D12FrameSynthesizer::set_visibility_mask(
+     }
+ }
+ 
++HRESULT D3D12FrameSynthesizer::set_smooth_cursor(
++    const D3D12SmoothCursorOptions& options) noexcept {
++    try {
++        std::scoped_lock lock(mutex_);
++        if (impl_ == nullptr) {
++            return E_UNEXPECTED;
++        }
++        return impl_->set_smooth_cursor(options);
++    } catch (...) {
++        return E_FAIL;
++    }
++}
++
++void D3D12FrameSynthesizer::note_cursor_position(
++    std::int32_t x, std::int32_t y, std::uint64_t milliseconds) noexcept {
++    try {
++        std::scoped_lock lock(mutex_);
++        if (impl_ != nullptr) {
++            impl_->note_cursor_position(x, y, milliseconds);
++        }
++    } catch (...) {
++    }
++}
++
++HRESULT D3D12FrameSynthesizer::smooth_cursor_stats(
++    D3D12SmoothCursorStats* stats) noexcept {
++    if (stats == nullptr) {
++        return E_POINTER;
++    }
++    *stats = {};
++    try {
++        std::scoped_lock lock(mutex_);
++        if (impl_ == nullptr) {
++            return E_UNEXPECTED;
++        }
++        impl_->harvest_all_cursor_stats();
++        *stats = impl_->cursor_stats;
++        return S_OK;
++    } catch (...) {
++        return E_FAIL;
++    }
++}
++
+ HRESULT D3D12FrameSynthesizer::wait_for_idle() noexcept {
+     try {
+         std::scoped_lock lock(mutex_);
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index a261395..ec9c3df 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -10,6 +10,11 @@ Texture2DArray<float2> GameMotionVectors : register(t6);
+ // D3D12FrameSynthesizer::set_visibility_mask), read by the vertex shader
+ // when SynthesisFlags bit 1 is set.
+ StructuredBuffer<float2> MaskVertices : register(t7);
++// DCS VR Control (0010): the smooth cursor's templates (smooth_cursor.hlsl
++// lays them out) and its state, of which the composition reads only the
++// gate's record for this pair (CursorRegionVS, CursorCompositePS).
++StructuredBuffer<uint> CursorTemplates : register(t8);
++ByteAddressBuffer CursorState : register(t9);
+ RWTexture2D<float4> PackedColor : register(u0);
+ // The NVIDIA pack is compiled twice: once for BGRA8 inputs, and once with
+ // XRFG_NVIDIA_LUMA_INPUT for R8 inputs, which the engine takes as grayscale
+@@ -683,6 +688,155 @@ bool fast_stationary_patch(float2 pixel, uint slice, float4 current) {
+     return stationary;
+ }
+ 
++// DCS VR Control (0010): smooth mouse cursor. DCS draws its VR cursor as a
++// small view-locked sprite after DLSS. Flow cannot carry a sprite that moves
++// further than its own size between two real frames - each generated pixel
++// samples the flow at its own position, and no vector there lands on the
++// sprite - so it shows faded at both places. With the gate's record for this
++// pair (smooth_cursor.hlsl) a second, small draw after the composition
++// redoes the pixels around both real frames' cursors: every sample that
++// lands on one frame's cursor is taken from the other frame instead, which
++// removes both stale copies, and the cursor is drawn once more where it is at
++// this synthetic's instant, copied pixel for pixel from the current real
++// frame. The composition itself is untouched.
++// Positions are template-box top-left corners in each frame's own image;
++// view-locked, so the instant's position needs no head-pose mapping, and the
++// previous frame's copy is found in the previous frame's own coordinates, so
++// the head-rotation warp of that frame moves nothing it should not.
++static const uint kCursorTemplateSize = 32;
++static const uint kCursorTemplateTexels = 1024;
++static const uint kCursorCompositeBase = 160;
++
++struct CursorPlacement {
++    float2 position;
++    float scale;
++    uint template_index;
++};
++
++struct CursorComposite {
++    CursorPlacement previous;
++    CursorPlacement current;
++    uint valid;
++    uint3 padding;
++};
++
++CursorComposite load_cursor_composite(uint view) {
++    CursorComposite output = (CursorComposite)0;
++    uint record = (kCursorCompositeBase + min(view, 1u) * 16u) * 4u;
++    uint4 first = CursorState.Load4(record);
++    uint4 second = CursorState.Load4(record + 16u);
++    uint last = CursorState.Load(record + 32u);
++    output.valid = first.x;
++    output.previous.position = asfloat(first.yz);
++    output.current.position = float2(asfloat(first.w), asfloat(second.x));
++    output.previous.template_index = second.y;
++    output.current.template_index = second.z;
++    output.previous.scale = max(asfloat(second.w), 0.25);
++    output.current.scale = max(asfloat(last), 0.25);
++    return output;
++}
++
++float cursor_texel_alpha(uint template_index, int2 texel) {
++    // A branch, not a select: HLSL evaluates both sides of ?:, and every
++    // pixel would then read the buffer.
++    float alpha = 0.0;
++    [branch] if (all(texel >= int2(0, 0)) &&
++        all(texel < int2(int(kCursorTemplateSize), int(kCursorTemplateSize)))) {
++        alpha = float(CursorTemplates[min(template_index, 15u) * kCursorTemplateTexels +
++            uint(texel.y) * kCursorTemplateSize + uint(texel.x)] >> 24) / 255.0;
++    }
++    return alpha;
++}
++
++int2 cursor_texel(CursorPlacement cursor, float2 coordinate) {
++    return int2(floor((coordinate - cursor.position + 0.5) / cursor.scale));
++}
++
++// Whether the sprite reaches `coordinate` of its own frame, with a pixel and
++// a half to spare for the filtering that spreads it past its texels.
++bool cursor_covers(CursorPlacement cursor, float2 coordinate) {
++    float2 relative = coordinate - cursor.position;
++    float reach = float(kCursorTemplateSize) * cursor.scale;
++    float coverage = 0.0;
++    if (all(relative >= float2(-2.0, -2.0)) && all(relative <= float2(reach + 2.0, reach + 2.0))) {
++        [unroll] for (int dy = -1; dy <= 1; ++dy) {
++            [unroll] for (int dx = -1; dx <= 1; ++dx) {
++                coverage = max(coverage, cursor_texel_alpha(
++                    cursor.template_index,
++                    cursor_texel(cursor, coordinate + float2(float(dx), float(dy)) * 1.5)));
++            }
++        }
++    }
++    return coverage > 0.0;
++}
++
++// A pair of samples with the cursor taken out: where one frame's sample lands
++// on that frame's cursor and the other's does not, both use the other's.
++// Where both land on a cursor they are left (the redraw covers that overlap:
++// it lies between the two positions). The previous sample is named in the
++// previous frame's own coordinates.
++void cursor_clean_pair(
++    CursorComposite cursor,
++    float2 previous_source,
++    float2 current_coordinate,
++    inout float4 previous_colour,
++    inout float4 current_colour) {
++    if (cursor.valid != 0u) {
++        bool previous_hit = cursor_covers(cursor.previous, previous_source);
++        bool current_hit = cursor_covers(cursor.current, current_coordinate);
++        if (previous_hit && !current_hit) {
++            previous_colour = current_colour;
++        } else if (current_hit && !previous_hit) {
++            current_colour = previous_colour;
++        }
++    }
++}
++
++// The pixels the cursor pass redraws: both real frames' template boxes (the
++// previous one in the current frame's coordinates, which for a view-locked
++// cursor are the same image coordinates) and this margin around them. In it
++// the composition keeps to the camera mapping alone, with the cursor taken
++// out of both samples: the optical flow, measured on images that contain the
++// sprite, follows the sprite there instead of the scene behind it, and the
++// scene behind a cockpit cursor is still.
++static const float kCursorRegionMargin = 24.0;
++
++float4 cursor_region(CursorComposite cursor) {
++    float2 previous_in_target = cursor.previous.position -
++        PreviousMappings[ViewIndex].SourceRect.xy +
++        PreviousMappings[ViewIndex].TargetRect.xy;
++    float2 low = min(previous_in_target, cursor.current.position) - kCursorRegionMargin;
++    float2 high = max(
++        previous_in_target + float(kCursorTemplateSize) * cursor.previous.scale,
++        cursor.current.position + float(kCursorTemplateSize) * cursor.current.scale) +
++        kCursorRegionMargin;
++    return float4(low, high);
++}
++
++// The cursor where it is at this synthetic's instant: the current frame's own
++// pixels, moved by a whole number of pixels so they stay exactly as drawn.
++float4 cursor_draw(CursorComposite cursor, float2 pixel, float4 colour) {
++    float4 output = colour;
++    if (cursor.valid != 0u) {
++        float2 previous_in_target = cursor.previous.position -
++            PreviousMappings[ViewIndex].SourceRect.xy +
++            PreviousMappings[ViewIndex].TargetRect.xy;
++        float2 at = lerp(previous_in_target, cursor.current.position, synthesis_fraction());
++        float2 source = pixel - round(at - cursor.current.position);
++        float alpha = cursor_texel_alpha(
++            cursor.current.template_index, cursor_texel(cursor.current, source));
++        bool inside = all(source >= float2(0.0, 0.0)) &&
++            source.x < float(Width) && source.y < float(Height);
++        if (alpha > 0.0 && inside) {
++            output = saturate(lerp(
++                output,
++                CurrentFrame.Load(int4(int2(source), int(Slice), 0)),
++                alpha));
++        }
++    }
++    return output;
++}
++
+ struct FullscreenVertex {
+     float4 position : SV_Position;
+ };
+@@ -888,6 +1042,43 @@ float4 synthesize_midpoint(
+     return output_color;
+ }
+ 
++// DCS VR Control (0010): the cursor pass. Two triangles over cursor_region in
++// the view's viewport, or none (all six vertices at one point) when the gate
++// did not accept the pair.
++FullscreenVertex CursorRegionVS(uint vertex_id : SV_VertexID) {
++    FullscreenVertex output;
++    CursorComposite cursor = load_cursor_composite(ViewIndex);
++    float4 rect = PreviousMappings[ViewIndex].TargetRect;
++    float4 region = cursor_region(cursor);
++    float2 low = clamp(region.xy, rect.xy, rect.xy + rect.zw);
++    float2 high = clamp(region.zw, rect.xy, rect.xy + rect.zw);
++    static const float2 corners[6] = {
++        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
++        float2(1.0, 0.0), float2(1.0, 1.0), float2(0.0, 1.0)};
++    float2 at = cursor.valid != 0u ? lerp(low, high, corners[min(vertex_id, 5u)]) : low;
++    float2 uv = (at - rect.xy) / max(rect.zw, float2(1.0, 1.0));
++    output.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
++    return output;
++}
++
++float4 CursorCompositePS(FullscreenVertex input) : SV_Target {
++    uint2 integer_pixel = uint2(input.position.xy);
++    float2 pixel = float2(integer_pixel);
++    CursorComposite cursor = load_cursor_composite(ViewIndex);
++    CameraSample current = sample_current_target(pixel, Slice, ViewIndex);
++    float4 output_color = saturate(current.color);
++    MappedCoordinate previous_coverage = map_target_to_source(
++        pixel, PreviousMappings[ViewIndex]);
++    if (previous_coverage.valid >= 0.5) {
++        float4 previous_colour = sample_previous_target(pixel, Slice, ViewIndex).color;
++        float4 current_colour = current.color;
++        cursor_clean_pair(cursor, previous_coverage.coordinate, pixel,
++            previous_colour, current_colour);
++        output_color = saturate(lerp(previous_colour, current_colour, synthesis_fraction()));
++    }
++    return cursor_draw(cursor, pixel, output_color);
++}
++
+ float4 SynthesizeMidpointPS(FullscreenVertex input) : SV_Target {
+     return synthesize_midpoint(input, 1.0, false, false, false, false, false);
+ }
+diff --git a/src/d3d12/smooth_cursor.hlsl b/src/d3d12/smooth_cursor.hlsl
+new file mode 100644
+index 0000000..ddd6bad
+--- /dev/null
++++ b/src/d3d12/smooth_cursor.hlsl
+@@ -0,0 +1,906 @@
++// DCS VR Control (0010): smooth mouse cursor - detection.
++//
++// DCS draws its VR mouse cursor after DLSS as a small view-locked sprite that
++// follows the absolute Windows cursor. Optical flow cannot carry it: every
++// generated pixel samples the flow at its own position, and a sprite that
++// moves further than its own size between two real frames has no flow vector
++// that lands on it, so a generated frame shows it faded at both places. The
++// synthesis fixes that per pixel (see frame_synthesis.hlsl, cursor_*): it
++// removes the cursor from whichever real frame a sample came from and draws
++// it again at its position for the generated frame's instant. These passes
++// find it, in both real frames of a pair, per view, and decide whether that
++// is safe:
++//
++//   CursorBeginCS   one thread: clears this frame's entry and picks its mode -
++//                   tracking (a window around the other frame's position,
++//                   moved by the mouse; its tiles are listed for the search)
++//                   or acquisition
++//   CursorMotionCS  acquisition only (an indirect dispatch Begin sizes): lists
++//                   the tiles where the pose-compensated frame difference says
++//                   something moved
++//   CursorArgumentsCS one thread: sizes the search's indirect dispatch
++//   CursorSearchCS  one group per listed 32x32 tile of candidate positions and
++//                   template: zero-mean normalised correlation of the
++//                   template's opaque pixels only (so the background never
++//                   takes part), coarse positions, the tracked scale or all
++//                   eight
++//   CursorVerifyCS  one group per view: refines the best candidate with every
++//                   sample and measures the best look-alike elsewhere in a
++//                   window around it (the margin)
++//   CursorGateCS    one thread: accepts the pair only when both frames found
++//                   it confidently, unambiguously, consistently between the
++//                   eyes and without an impossible jump; otherwise the
++//                   generated frames are drawn exactly as without the feature
++//
++// Nothing is read back on the CPU in the frame: the gate writes the record the
++// synthesis reads, and the running counters are copied to a readback buffer
++// that is read when the work slot is reused.
++
++Texture2DArray<float4> PreviousFrame : register(t0);
++Texture2DArray<float4> CurrentFrame : register(t1);
++StructuredBuffer<uint> CursorTemplates : register(t2);
++RWStructuredBuffer<uint> CursorState : register(u0);
++RWStructuredBuffer<uint> CursorCandidates : register(u1);
++// Two dispatches' arguments: the motion pass's, then the search's.
++RWStructuredBuffer<uint> CursorArguments : register(u2);
++
++struct CameraMapping {
++    float4 TargetToSourceRotation;
++    float4 SourceTangents;
++    float4 TargetTangents;
++    float4 SourceRect;
++    float4 TargetRect;
++};
++
++cbuffer CursorParameters : register(b0) {
++    uint Width;
++    uint Height;
++    // Bit 0: the frames are read through an sRGB view (linear values), so
++    // the templates' bytes are linearised to match. Bit 1: this pass detects
++    // in the previous frame. Bit 2: the mouse delta is known.
++    uint Flags;
++    uint TemplateCount;
++    uint EntryIndex;
++    // The ring entry of the other frame: tracked from by Begin, the previous
++    // frame's result in Gate. 2 or more: none.
++    uint TrackIndex;
++    uint TilesX;
++    uint TilesY;
++    // The Windows cursor's movement from the other frame to this one, in
++    // screen pixels (Gate: from the previous frame to the current).
++    float2 MouseDelta;
++    // The views (bits 0-7) and each one's array slice (bits 8-15, 16-23).
++    uint ViewInfo;
++    uint Padding;
++    // Target: the current frame's camera. Source: the previous frame's.
++    CameraMapping Mappings[2];
++};
++
++// Shared layout; d3d12_frame_synthesizer.cpp and frame_synthesis.hlsl
++// mirror these values.
++static const uint kTemplateSize = 32;
++static const uint kTemplateTexels = 1024;
++static const uint kMaxTemplates = 16;
++static const uint kSamplesPerTemplate = 64;
++static const uint kCoarseSamples = 32;
++static const uint kSampleBase = kMaxTemplates * kTemplateTexels;
++static const uint kInfoBase = kSampleBase + kMaxTemplates * kSamplesPerTemplate;
++
++static const uint kEntryStride = 32;
++static const uint kEntryStatus = 0;
++static const uint kEntryX = 1;
++static const uint kEntryY = 2;
++static const uint kEntryTemplate = 3;
++static const uint kEntryScale = 4;
++static const uint kEntryScore = 5;
++static const uint kEntrySecond = 6;
++static const uint kEntryKey = 7;
++static const uint kEntryHot = 8;
++static const uint kEntryMode = 9;
++static const uint kEntryWindowX0 = 10;
++static const uint kEntryWindowY0 = 11;
++static const uint kEntryWindowX1 = 12;
++static const uint kEntryWindowY1 = 13;
++static const uint kEntryOverflow = 14;
++
++static const uint kStatusNone = 0;
++static const uint kStatusFound = 1;
++static const uint kStatusBusy = 2;
++static const uint kStatusNotSearched = 3;
++
++static const uint kModeOff = 0;
++static const uint kModeTrack = 1;
++static const uint kModeAcquire = 2;
++
++static const uint kLearnBase = 128;     // per view: gain x, gain y, known
++static const uint kStereoBase = 144;    // learned vertical offset, known
++static const uint kCompositeBase = 160; // per view, 16
++static const uint kStatsBase = 192;
++static const uint kStatPairs = 0;
++static const uint kStatDrawn = 1;
++static const uint kStatNotFound = 2;
++static const uint kStatScore = 3;
++static const uint kStatMargin = 4;
++static const uint kStatStereo = 5;
++static const uint kStatJump = 6;
++static const uint kStatBusy = 7;
++static const uint kStatAcquired = 8;
++static const uint kStatTracked = 9;
++// The tiles the search visits: (view << 16) | tile.
++static const uint kListCount = 256;
++static const uint kListEntries = 260;
++static const uint kMaxListEntries = 400;
++
++// The sprite's size in the eye image against the 32x32 cursor image: DCS has
++// no size option, but the size in pixels follows the headset's resolution.
++static const uint kScaleCount = 8;
++static const float kScales[8] = {0.4, 0.5, 0.63, 0.794, 1.0, 1.26, 1.587, 2.0};
++
++static const uint kMaxHotTiles = 24;
++static const float kHotDifference = 0.08;
++static const uint kHotSamples = 3;
++// A detection the gate accepts, and how far ahead of the next best
++// look-alike near it. The research emulation matched the true cursor at
++// 0.9+ under blur, noise and 0.85-1.25x scale; an identical arrow 30 px away
++// matched as well as the cursor itself, which only the margin rejects.
++static const float kAcceptScore = 0.72;
++static const float kAcceptMargin = 0.15;
++static const float kTrackScore = 0.6;
++static const float kCandidateScore = 0.3;
++
++#define ViewCount (ViewInfo & 0xffu)
++
++uint view_slice(uint view) {
++    return (ViewInfo >> (view == 0u ? 8 : 16)) & 0xffu;
++}
++
++uint entry_base(uint ring, uint view) {
++    return (ring * 2u + view) * kEntryStride;
++}
++
++bool detecting_previous() {
++    return (Flags & 2u) != 0u;
++}
++
++float4 view_rect(uint view) {
++    return detecting_previous() ? Mappings[view].SourceRect : Mappings[view].TargetRect;
++}
++
++float3 rotate_by_quaternion(float4 quaternion, float3 input_vector) {
++    return input_vector + 2.0 * cross(
++        quaternion.xyz,
++        cross(quaternion.xyz, input_vector) + quaternion.w * input_vector);
++}
++
++// As frame_synthesis.hlsl's map_target_to_source / map_source_to_target,
++// nearest pixel and without the validity bookkeeping it does not need here.
++float2 target_to_source(float2 target, CameraMapping mapping, out bool valid) {
++    float2 uv = (target - mapping.TargetRect.xy + 0.5) / mapping.TargetRect.zw;
++    float3 ray = float3(
++        lerp(mapping.TargetTangents.x, mapping.TargetTangents.y, uv.x),
++        lerp(mapping.TargetTangents.z, mapping.TargetTangents.w, uv.y),
++        -1.0);
++    float3 source_ray = rotate_by_quaternion(mapping.TargetToSourceRotation, ray);
++    valid = source_ray.z < -1.0e-5;
++    float2 tangent = source_ray.xy / max(-source_ray.z, 1.0e-5);
++    float2 source_uv = float2(
++        (tangent.x - mapping.SourceTangents.x) /
++            max(mapping.SourceTangents.y - mapping.SourceTangents.x, 1.0e-7),
++        (tangent.y - mapping.SourceTangents.z) /
++            (mapping.SourceTangents.w - mapping.SourceTangents.z));
++    return mapping.SourceRect.xy + source_uv * mapping.SourceRect.zw - 0.5;
++}
++
++float2 source_to_target(float2 source, CameraMapping mapping, out bool valid) {
++    float2 uv = (source - mapping.SourceRect.xy + 0.5) / mapping.SourceRect.zw;
++    float3 ray = float3(
++        lerp(mapping.SourceTangents.x, mapping.SourceTangents.y, uv.x),
++        lerp(mapping.SourceTangents.z, mapping.SourceTangents.w, uv.y),
++        -1.0);
++    float4 inverse = float4(-mapping.TargetToSourceRotation.xyz, mapping.TargetToSourceRotation.w);
++    float3 target_ray = rotate_by_quaternion(inverse, ray);
++    valid = target_ray.z < -1.0e-5;
++    float2 tangent = target_ray.xy / max(-target_ray.z, 1.0e-5);
++    float2 target_uv = float2(
++        (tangent.x - mapping.TargetTangents.x) /
++            max(mapping.TargetTangents.y - mapping.TargetTangents.x, 1.0e-7),
++        (tangent.y - mapping.TargetTangents.z) /
++            (mapping.TargetTangents.w - mapping.TargetTangents.z));
++    return mapping.TargetRect.xy + target_uv * mapping.TargetRect.zw - 0.5;
++}
++
++float luma(float3 colour) {
++    return dot(colour, float3(0.2126, 0.7152, 0.0722));
++}
++
++float frame_luma(int2 pixel, uint slice) {
++    int2 bounded = clamp(pixel, int2(0, 0), int2(int(Width) - 1, int(Height) - 1));
++    float4 colour = detecting_previous()
++        ? PreviousFrame.Load(int4(bounded, int(slice), 0))
++        : CurrentFrame.Load(int4(bounded, int(slice), 0));
++    return luma(colour.rgb);
++}
++
++// The frame this pass searches against the other one brought into its
++// camera (so head rotation does not count as motion; the view-locked cursor
++// does, since rotation moves the world past it).
++float temporal_difference(int2 pixel, uint view) {
++    uint slice = view_slice(view);
++    bool valid = false;
++    float other = 0.0;
++    if (detecting_previous()) {
++        float2 target = source_to_target(float2(pixel), Mappings[view], valid);
++        int2 at = int2(round(target));
++        valid = valid && all(at >= int2(0, 0)) && at.x < int(Width) && at.y < int(Height);
++        if (valid) {
++            other = luma(CurrentFrame.Load(int4(at, int(slice), 0)).rgb);
++        }
++    } else {
++        float2 source = target_to_source(float2(pixel), Mappings[view], valid);
++        int2 at = int2(round(source));
++        valid = valid && all(at >= int2(0, 0)) && at.x < int(Width) && at.y < int(Height);
++        if (valid) {
++            other = luma(PreviousFrame.Load(int4(at, int(slice), 0)).rgb);
++        }
++    }
++    return valid ? abs(frame_luma(pixel, slice) - other) : 0.0;
++}
++
++float srgb_to_linear(float value) {
++    return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
++}
++
++float template_luma(uint template_index, uint2 texel) {
++    uint rgba = CursorTemplates[template_index * kTemplateTexels + texel.y * kTemplateSize + texel.x];
++    float3 colour = float3(
++        float(rgba & 0xffu),
++        float((rgba >> 8) & 0xffu),
++        float((rgba >> 16) & 0xffu)) / 255.0;
++    if ((Flags & 1u) != 0u) {
++        colour = float3(srgb_to_linear(colour.r), srgb_to_linear(colour.g), srgb_to_linear(colour.b));
++    }
++    return luma(colour);
++}
++
++// A template is matched one of two ways (the info word's bit 16). One with
++// inner contrast - DCS's white arrow with its dark outline - on its own
++// opaque pixels' brightness, so the background never takes part. One of a
++// single colour - DCS's green and yellow control markers, the outlined set -
++// has no inner contrast to match: it is matched on its shape, its opaque
++// pixels (weight 255) against a ring of the transparent ones around them
++// (weight 0), either way round (a bright marker on a dark panel or a dark
++// one on the sky), and its colour is checked in the verification.
++uint template_sample_count(uint template_index) {
++    return min(CursorTemplates[kInfoBase + template_index] & 0xffffu, kSamplesPerTemplate);
++}
++
++bool template_is_shape(uint template_index) {
++    return (CursorTemplates[kInfoBase + template_index] & 0x10000u) != 0u;
++}
++
++// x, y and the sample's weight (a shape template's mask value).
++uint3 template_sample(uint template_index, uint sample_index) {
++    uint packed = CursorTemplates[kSampleBase + template_index * kSamplesPerTemplate + sample_index];
++    return uint3(packed & 0xffu, (packed >> 8) & 0xffu, (packed >> 16) & 0xffu);
++}
++
++int2 sample_offset(uint2 texel, float scale) {
++    return int2(floor((float2(texel) + 0.5) * scale));
++}
++
++groupshared float gs_luma[64];
++groupshared uint gs_texel[64];
++groupshared float gs_score[1024];
++groupshared uint gs_position[1024];
++groupshared uint gs_meta[1024];
++groupshared uint gs_flag;
++groupshared uint gs_shape;
++groupshared uint gs_mode;
++groupshared uint gs_view;
++groupshared int2 gs_origin;
++groupshared int4 gs_window;
++groupshared uint gs_scale;
++
++// Loads one template's samples for the whole group and returns how many
++// there are. Every thread must call it.
++uint load_template(uint template_index, uint thread_index) {
++    GroupMemoryBarrierWithGroupSync();
++    uint count = template_sample_count(template_index);
++    bool shape = template_is_shape(template_index);
++    if (thread_index == 0u) {
++        gs_shape = shape ? 1u : 0u;
++    }
++    if (thread_index < count) {
++        uint3 texel = template_sample(template_index, thread_index);
++        gs_texel[thread_index] = texel.x | (texel.y << 8);
++        gs_luma[thread_index] = shape ? float(texel.z) / 255.0 : template_luma(template_index, texel.xy);
++    }
++    GroupMemoryBarrierWithGroupSync();
++    return count;
++}
++
++// Zero-mean normalised correlation of the first `count` loaded template
++// samples (the first half is the coarse set) against the image at
++// `position` (the template box's top-left) and `scale`. A flat image patch
++// scores 0.
++float correlation(int2 position, float scale, uint slice, uint count,
++    float template_mean, float template_spread) {
++    float sum = 0.0;
++    float sum_squares = 0.0;
++    float cross_sum = 0.0;
++    for (uint i = 0; i < count; ++i) {
++        uint packed = gs_texel[i];
++        uint2 texel = uint2(packed & 0xffu, packed >> 8);
++        float value = frame_luma(position + sample_offset(texel, scale), slice);
++        sum += value;
++        sum_squares += value * value;
++        cross_sum += value * gs_luma[i];
++    }
++    float n = float(max(count, 1u));
++    float mean = sum / n;
++    float spread = sum_squares - n * mean * mean;
++    bool structured = spread >= n * 1.0e-4 && template_spread > 0.0;
++    float score = structured
++        ? (cross_sum - n * mean * template_mean) * rsqrt(max(spread * template_spread, 1.0e-12))
++        : 0.0;
++    return gs_shape != 0u ? abs(score) : score;
++}
++
++// A shape template's colour against the image's under its opaque samples, as
++// chromaticity (so brightness does not count): 1 the same, falling to 0 at a
++// clearly different hue. Inner-contrast templates are not checked.
++float shape_colour_match(uint template_index, int2 position, float scale, uint slice, uint count) {
++    float3 image = float3(0.0, 0.0, 0.0);
++    float3 sprite = float3(0.0, 0.0, 0.0);
++    for (uint i = 0; i < count; ++i) {
++        if (gs_luma[i] > 0.5) {
++            uint packed = gs_texel[i];
++            uint2 texel = uint2(packed & 0xffu, packed >> 8);
++            int2 pixel = clamp(position + sample_offset(texel, scale), int2(0, 0),
++                int2(int(Width) - 1, int(Height) - 1));
++            float4 colour = detecting_previous()
++                ? PreviousFrame.Load(int4(pixel, int(slice), 0))
++                : CurrentFrame.Load(int4(pixel, int(slice), 0));
++            image += colour.rgb;
++            uint rgba = CursorTemplates[template_index * kTemplateTexels + texel.y * kTemplateSize + texel.x];
++            float3 own = float3(float(rgba & 0xffu), float((rgba >> 8) & 0xffu),
++                float((rgba >> 16) & 0xffu)) / 255.0;
++            if ((Flags & 1u) != 0u) {
++                own = float3(srgb_to_linear(own.r), srgb_to_linear(own.g), srgb_to_linear(own.b));
++            }
++            sprite += own;
++        }
++    }
++    float3 image_chroma = image / max(image.r + image.g + image.b, 1.0e-4);
++    float3 sprite_chroma = sprite / max(sprite.r + sprite.g + sprite.b, 1.0e-4);
++    float distance = abs(image_chroma.r - sprite_chroma.r) + abs(image_chroma.g - sprite_chroma.g) +
++        abs(image_chroma.b - sprite_chroma.b);
++    return template_is_shape(template_index) ? saturate(1.0 - distance * 4.0) : 1.0;
++}
++
++void template_statistics(uint count, out float mean, out float spread) {
++    float sum = 0.0;
++    float sum_squares = 0.0;
++    for (uint i = 0; i < count; ++i) {
++        sum += gs_luma[i];
++        sum_squares += gs_luma[i] * gs_luma[i];
++    }
++    float n = float(max(count, 1u));
++    mean = sum / n;
++    spread = count >= 8u ? sum_squares - n * mean * mean : 0.0;
++    // Too little structure to match on its own: a plain dot.
++    if (spread < n * 4.0e-3) {
++        spread = 0.0;
++    }
++}
++
++void append_tile(uint view, uint tile) {
++    uint index = kMaxListEntries;
++    InterlockedAdd(CursorState[kListCount], 1u, index);
++    if (index < kMaxListEntries) {
++        CursorState[kListEntries + index] = (view << 16) | (tile & 0xffffu);
++    }
++}
++
++[numthreads(1, 1, 1)]
++void CursorBeginCS() {
++    CursorState[kListCount] = 0u;
++    bool acquiring = false;
++    for (uint view = 0; view < ViewCount; ++view) {
++        uint entry = entry_base(EntryIndex, view);
++        CursorState[entry + kEntryStatus] = kStatusNotSearched;
++        CursorState[entry + kEntryKey] = 0u;
++        CursorState[entry + kEntryHot] = 0u;
++        CursorState[entry + kEntryOverflow] = 0u;
++        CursorState[entry + kEntryScore] = asuint(0.0);
++        CursorState[entry + kEntrySecond] = asuint(0.0);
++        uint mode = kModeAcquire;
++        float4 rect = view_rect(view);
++        int2 rect_min = int2(rect.xy);
++        int2 window_min = rect_min;
++        int2 window_max = int2(rect.xy + rect.zw);
++        if (TrackIndex < 2u) {
++            uint other = entry_base(TrackIndex, view);
++            if (CursorState[other + kEntryStatus] == kStatusFound &&
++                asfloat(CursorState[other + kEntryScore]) >= kTrackScore) {
++                mode = kModeTrack;
++                float2 centre = float2(
++                    float(asint(CursorState[other + kEntryX])),
++                    float(asint(CursorState[other + kEntryY])));
++                // Only the frames' own image rectangles differ between the
++                // two (double-wide views); the cursor is view-locked.
++                float4 other_rect = detecting_previous()
++                    ? Mappings[view].TargetRect
++                    : Mappings[view].SourceRect;
++                centre += rect.xy - other_rect.xy;
++                float radius = 72.0;
++                uint learn = kLearnBase + view * 8u;
++                if ((Flags & 4u) != 0u && CursorState[learn + 2u] != 0u) {
++                    float2 predicted = MouseDelta * float2(
++                        asfloat(CursorState[learn]), asfloat(CursorState[learn + 1u]));
++                    centre += predicted;
++                    radius = 24.0 + 0.35 * length(predicted);
++                }
++                radius = min(radius, 192.0);
++                window_min = max(window_min, int2(floor(centre - radius)));
++                window_max = min(window_max, int2(ceil(centre + radius)) + 1);
++                CursorState[entry + kEntryScale] = CursorState[other + kEntryScale];
++                // The tiles of candidate positions the window touches.
++                if (all(window_max > window_min)) {
++                    uint2 first = uint2(window_min - rect_min) / 32u;
++                    uint2 last = uint2(window_max - 1 - rect_min) / 32u;
++                    for (uint ty = first.y; ty <= last.y; ++ty) {
++                        for (uint tx = first.x; tx <= last.x; ++tx) {
++                            append_tile(view, ty * TilesX + tx);
++                        }
++                    }
++                }
++            }
++        }
++        acquiring = acquiring || mode == kModeAcquire;
++        CursorState[entry + kEntryMode] = mode;
++        CursorState[entry + kEntryWindowX0] = asuint(window_min.x);
++        CursorState[entry + kEntryWindowY0] = asuint(window_min.y);
++        CursorState[entry + kEntryWindowX1] = asuint(window_max.x);
++        CursorState[entry + kEntryWindowY1] = asuint(window_max.y);
++        CursorState[kStatsBase + (mode == kModeTrack ? kStatTracked : kStatAcquired)] += 1u;
++    }
++    // The motion pass runs only when a view acquires.
++    CursorArguments[0] = acquiring ? TilesX : 0u;
++    CursorArguments[1] = acquiring ? TilesY : 1u;
++    CursorArguments[2] = acquiring ? ViewCount : 1u;
++}
++
++// Acquisition: one group per 32x32 tile of candidate positions per view,
++// listed for the search where the pose-compensated frame difference says
++// something moved against the scene (the tile and the template's reach
++// beyond it, every fourth pixel). At most kMaxHotTiles per view: past that
++// the frame is too busy to search and the view says so.
++[numthreads(64, 1, 1)]
++void CursorMotionCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupIndex) {
++    uint view = min(group_id.z, 1u);
++    uint entry = entry_base(EntryIndex, view);
++    float4 rect = view_rect(view);
++    int2 rect_max = int2(rect.xy + rect.zw);
++    int2 tile_origin = int2(rect.xy) + int2(group_id.xy) * 32;
++    if (thread_index == 0u) {
++        bool wanted = group_id.z < ViewCount && all(tile_origin < rect_max) &&
++            CursorState[entry + kEntryMode] == kModeAcquire;
++        gs_mode = wanted ? kModeAcquire : kModeOff;
++        gs_flag = 0u;
++    }
++    GroupMemoryBarrierWithGroupSync();
++    if (gs_mode == kModeOff) {
++        return;
++    }
++    uint local = 0u;
++    for (uint i = 0; i < 4u; ++i) {
++        uint s = thread_index * 4u + i;
++        int2 p = tile_origin + int2(int(s % 16u), int(s / 16u)) * 4;
++        if (all(p < rect_max) && temporal_difference(p, view) > kHotDifference) {
++            ++local;
++        }
++    }
++    InterlockedAdd(gs_flag, local);
++    GroupMemoryBarrierWithGroupSync();
++    if (thread_index == 0u && gs_flag >= kHotSamples) {
++        uint order = kMaxHotTiles;
++        InterlockedAdd(CursorState[entry + kEntryHot], 1u, order);
++        if (order < kMaxHotTiles) {
++            append_tile(view, group_id.y * TilesX + group_id.x);
++        } else {
++            CursorState[entry + kEntryOverflow] = 1u;
++        }
++    }
++}
++
++[numthreads(1, 1, 1)]
++void CursorArgumentsCS() {
++    uint count = min(CursorState[kListCount], kMaxListEntries);
++    CursorArguments[3] = count;
++    CursorArguments[4] = count != 0u ? max(TemplateCount, 1u) : 1u;
++    CursorArguments[5] = 1u;
++}
++
++// One group per listed tile and template: every coarse candidate position
++// of the tile (every second pixel, one per thread), at the tracked scale or
++// all eight, against the template's coarse samples.
++[numthreads(256, 1, 1)]
++void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupIndex) {
++    uint list_index = group_id.x;
++    uint template_index = group_id.y;
++    if (thread_index == 0u) {
++        uint packed = CursorState[kListEntries + min(list_index, kMaxListEntries - 1u)];
++        uint view = min(packed >> 16, 1u);
++        uint tile = packed & 0xffffu;
++        uint entry = entry_base(EntryIndex, view);
++        float4 rect = view_rect(view);
++        gs_view = view;
++        gs_origin = int2(rect.xy) + int2(int(tile % max(TilesX, 1u)), int(tile / max(TilesX, 1u))) * 32;
++        gs_mode = CursorState[entry + kEntryMode];
++        gs_window = int4(
++            asint(CursorState[entry + kEntryWindowX0]),
++            asint(CursorState[entry + kEntryWindowY0]),
++            asint(CursorState[entry + kEntryWindowX1]),
++            asint(CursorState[entry + kEntryWindowY1]));
++        gs_scale = min(CursorState[entry + kEntryScale], kScaleCount - 1u);
++    }
++    GroupMemoryBarrierWithGroupSync();
++    uint view = gs_view;
++    uint mode = gs_mode;
++    int2 tile_origin = gs_origin;
++    int2 window_min = gs_window.xy;
++    int2 window_max = gs_window.zw;
++    uint scale_first = mode == kModeTrack ? gs_scale : 0u;
++    uint scale_last = mode == kModeTrack ? gs_scale : kScaleCount - 1u;
++    uint slice = view_slice(view);
++    float4 rect = view_rect(view);
++    int2 rect_min = int2(rect.xy);
++    int2 rect_max = int2(rect.xy + rect.zw);
++
++    uint count = min(load_template(template_index, thread_index), kCoarseSamples);
++    float template_mean = 0.0;
++    float template_spread = 0.0;
++    template_statistics(count, template_mean, template_spread);
++    float best = -2.0;
++    uint best_position = 0u;
++    int2 position = tile_origin + int2(int(thread_index % 16u), int(thread_index / 16u)) * 2;
++    bool inside = mode != kModeOff && template_index < TemplateCount && template_spread > 0.0 &&
++        all(position >= window_min) && all(position < window_max) && all(position >= rect_min);
++    uint best_scale = scale_first;
++    if (inside) {
++        for (uint scale_index = scale_first; scale_index <= scale_last; ++scale_index) {
++            float scale = kScales[scale_index];
++            int extent = int(ceil(float(kTemplateSize) * scale));
++            if (all(position + extent <= rect_max)) {
++                float score = correlation(position, scale, slice, count, template_mean, template_spread);
++                if (score > best) {
++                    best = score;
++                    best_scale = scale_index;
++                }
++            }
++        }
++        best_position = uint(position.x) | (uint(position.y) << 16);
++    }
++    gs_score[thread_index] = best;
++    gs_position[thread_index] = best_position;
++    gs_meta[thread_index] = template_index | (best_scale << 8);
++    GroupMemoryBarrierWithGroupSync();
++    for (uint stride = 128u; stride > 0u; stride >>= 1) {
++        if (thread_index < stride && gs_score[thread_index + stride] > gs_score[thread_index]) {
++            gs_score[thread_index] = gs_score[thread_index + stride];
++            gs_position[thread_index] = gs_position[thread_index + stride];
++            gs_meta[thread_index] = gs_meta[thread_index + stride];
++        }
++        GroupMemoryBarrierWithGroupSync();
++    }
++    if (thread_index == 0u && gs_score[0] > kCandidateScore) {
++        uint slot = list_index * kMaxTemplates + min(template_index, kMaxTemplates - 1u);
++        CursorCandidates[slot * 2u] = gs_position[0];
++        CursorCandidates[slot * 2u + 1u] = gs_meta[0];
++        uint quantised = uint(saturate(gs_score[0]) * 65535.0);
++        InterlockedMax(CursorState[entry_base(EntryIndex, view) + kEntryKey],
++            (quantised << 16) | (slot & 0xffffu));
++    }
++}
++
++// One group per view: the best candidate refined to the pixel with every
++// sample, and the best look-alike within 48 px that is not the cursor itself
++// (more than a quarter of the template box away on either axis) - every
++// second position on the coarse samples, its best refined with all of them,
++// so an identical sprite is found at its full score.
++[numthreads(1024, 1, 1)]
++void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupIndex) {
++    uint view = min(group_id.z, 1u);
++    uint entry = entry_base(EntryIndex, view);
++    uint mode = group_id.z < ViewCount ? CursorState[entry + kEntryMode] : kModeOff;
++    uint key = CursorState[entry + kEntryKey];
++    uint slice = view_slice(view);
++    float4 rect = view_rect(view);
++    int2 rect_min = int2(rect.xy);
++    int2 rect_max = int2(rect.xy + rect.zw);
++    bool found = mode != kModeOff && key != 0u;
++    uint slot = min(key & 0xffffu, kMaxListEntries * kMaxTemplates - 1u);
++    uint packed = found ? CursorCandidates[slot * 2u] : 0u;
++    uint meta = found ? CursorCandidates[slot * 2u + 1u] : 0u;
++    int2 position = int2(int(packed & 0xffffu), int(packed >> 16));
++    uint template_index = min(meta & 0xffu, max(TemplateCount, 1u) - 1u);
++    uint scale_index = min((meta >> 8) & 0xffu, kScaleCount - 1u);
++    float scale = kScales[scale_index];
++    int extent = int(ceil(float(kTemplateSize) * scale));
++
++    uint count = load_template(template_index, thread_index);
++    uint coarse = min(count, kCoarseSamples);
++    float template_mean = 0.0;
++    float template_spread = 0.0;
++    template_statistics(count, template_mean, template_spread);
++    float coarse_mean = 0.0;
++    float coarse_spread = 0.0;
++    template_statistics(coarse, coarse_mean, coarse_spread);
++
++    float score = -2.0;
++    int2 refined = position;
++    if (found && thread_index < 25u) {
++        int2 candidate = position + int2(int(thread_index % 5u) - 2, int(thread_index / 5u) - 2);
++        if (all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
++            score = correlation(candidate, scale, slice, count, template_mean, template_spread);
++            refined = candidate;
++        }
++    }
++    // A shape template must also be the sprite's colour.
++    if (found && thread_index < 25u && score > 0.0) {
++        score *= shape_colour_match(template_index, refined, scale, slice, count);
++    }
++    gs_score[thread_index] = score;
++    gs_position[thread_index] = uint(refined.x) | (uint(refined.y) << 16);
++    GroupMemoryBarrierWithGroupSync();
++    for (uint stride = 512u; stride > 0u; stride >>= 1) {
++        if (thread_index < stride && gs_score[thread_index + stride] > gs_score[thread_index]) {
++            gs_score[thread_index] = gs_score[thread_index + stride];
++            gs_position[thread_index] = gs_position[thread_index + stride];
++        }
++        GroupMemoryBarrierWithGroupSync();
++    }
++    float best = gs_score[0];
++    uint best_packed = gs_position[0];
++    int2 best_position = int2(int(best_packed & 0xffffu), int(best_packed >> 16));
++    GroupMemoryBarrierWithGroupSync();
++
++    int exclusion = max(4, int(ceil(8.0 * scale)));
++    float second = 0.0;
++    int2 second_position = best_position;
++    if (found) {
++        for (uint i = thread_index; i < 49u * 49u; i += 1024u) {
++            int2 offset = int2(int(i % 49u) * 2 - 48, int(i / 49u) * 2 - 48);
++            if (max(abs(offset.x), abs(offset.y)) > exclusion) {
++                int2 candidate = best_position + offset;
++                if (all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
++                    float value = correlation(candidate, scale, slice, coarse, coarse_mean, coarse_spread);
++                    if (value > second) {
++                        second = value;
++                        second_position = candidate;
++                    }
++                }
++            }
++        }
++    }
++    gs_score[thread_index] = second;
++    gs_position[thread_index] = uint(second_position.x) | (uint(second_position.y) << 16);
++    GroupMemoryBarrierWithGroupSync();
++    for (uint stride2 = 512u; stride2 > 0u; stride2 >>= 1) {
++        if (thread_index < stride2 && gs_score[thread_index + stride2] > gs_score[thread_index]) {
++            gs_score[thread_index] = gs_score[thread_index + stride2];
++            gs_position[thread_index] = gs_position[thread_index + stride2];
++        }
++        GroupMemoryBarrierWithGroupSync();
++    }
++    float coarse_second = gs_score[0];
++    uint coarse_packed = gs_position[0];
++    int2 coarse_position = int2(int(coarse_packed & 0xffffu), int(coarse_packed >> 16));
++    GroupMemoryBarrierWithGroupSync();
++    float refined_second = 0.0;
++    if (found && coarse_second > 0.0 && thread_index < 9u) {
++        int2 candidate = coarse_position + int2(int(thread_index % 3u) - 1, int(thread_index / 3u) - 1);
++        int2 apart = abs(candidate - best_position);
++        if (max(apart.x, apart.y) > exclusion &&
++            all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
++            refined_second = correlation(candidate, scale, slice, count, template_mean, template_spread);
++        }
++    }
++    gs_score[thread_index] = refined_second;
++    GroupMemoryBarrierWithGroupSync();
++    for (uint stride3 = 512u; stride3 > 0u; stride3 >>= 1) {
++        if (thread_index < stride3) {
++            gs_score[thread_index] = max(gs_score[thread_index], gs_score[thread_index + stride3]);
++        }
++        GroupMemoryBarrierWithGroupSync();
++    }
++
++    if (thread_index == 0u && mode != kModeOff) {
++        uint status = kStatusNone;
++        if (found && best > kCandidateScore) {
++            status = kStatusFound;
++        } else if (CursorState[entry + kEntryOverflow] != 0u) {
++            status = kStatusBusy;
++        }
++        CursorState[entry + kEntryStatus] = status;
++        CursorState[entry + kEntryX] = asuint(best_position.x);
++        CursorState[entry + kEntryY] = asuint(best_position.y);
++        CursorState[entry + kEntryTemplate] = template_index;
++        CursorState[entry + kEntryScale] = scale_index;
++        CursorState[entry + kEntryScore] = asuint(found ? best : 0.0);
++        // The coarse score alone stands where the refinement found nothing
++        // better (it is never above the refined one at the same place).
++        CursorState[entry + kEntrySecond] = asuint(max(gs_score[0], coarse_second));
++    }
++}
++
++// Why a pair was not drawn, in the order the gate tests.
++static const uint kReasonNone = 0;
++static const uint kReasonBusy = 1;
++static const uint kReasonNotFound = 2;
++static const uint kReasonScore = 3;
++static const uint kReasonMargin = 4;
++static const uint kReasonStereo = 5;
++static const uint kReasonJump = 6;
++
++struct Detection {
++    uint status;
++    float2 position;
++    uint template_index;
++    uint scale_index;
++    float score;
++    float second;
++};
++
++Detection load_detection(uint ring, uint view) {
++    uint entry = entry_base(ring, view);
++    Detection output;
++    output.status = CursorState[entry + kEntryStatus];
++    output.position = float2(
++        float(asint(CursorState[entry + kEntryX])),
++        float(asint(CursorState[entry + kEntryY])));
++    output.template_index = CursorState[entry + kEntryTemplate];
++    output.scale_index = min(CursorState[entry + kEntryScale], kScaleCount - 1u);
++    output.score = asfloat(CursorState[entry + kEntryScore]);
++    output.second = asfloat(CursorState[entry + kEntrySecond]);
++    return output;
++}
++
++uint judge_detection(Detection detection) {
++    uint reason = kReasonNone;
++    if (detection.status == kStatusBusy) {
++        reason = kReasonBusy;
++    } else if (detection.status != kStatusFound) {
++        reason = kReasonNotFound;
++    } else if (detection.score < kAcceptScore) {
++        reason = kReasonScore;
++    } else if (detection.score - detection.second < kAcceptMargin) {
++        reason = kReasonMargin;
++    }
++    return reason;
++}
++
++// EntryIndex: the current frame's entry; TrackIndex: the previous frame's.
++[numthreads(1, 1, 1)]
++void CursorGateCS() {
++    uint reason = kReasonNone;
++    Detection previous[2];
++    Detection current[2];
++    float2 moved[2];
++    uint views = min(ViewCount, 2u);
++    [unroll] for (uint v = 0; v < 2u; ++v) {
++        previous[v] = load_detection(min(TrackIndex, 1u), v);
++        current[v] = load_detection(EntryIndex, v);
++        // The previous position in the current frame's image rectangle
++        // (they differ only for double-wide views).
++        moved[v] = current[v].position -
++            (previous[v].position - Mappings[v].SourceRect.xy + Mappings[v].TargetRect.xy);
++    }
++    for (uint view = 0; view < views && reason == kReasonNone; ++view) {
++        uint a = judge_detection(previous[view]);
++        uint b = judge_detection(current[view]);
++        reason = a != kReasonNone ? a : b;
++    }
++    if (TrackIndex >= 2u) {
++        reason = kReasonNotFound;
++    }
++    float limit = 0.3 * float(Width);
++    if (reason == kReasonNone) {
++        for (uint view2 = 0; view2 < views; ++view2) {
++            float distance = length(moved[view2]);
++            // View-locked: it moves only with the mouse. Still mouse, moving
++            // match: not the cursor.
++            bool still_mouse = (Flags & 4u) != 0u && all(MouseDelta == float2(0.0, 0.0));
++            if (distance > limit || (still_mouse && distance > 4.0)) {
++                reason = kReasonJump;
++            }
++        }
++    }
++    if (reason == kReasonNone && views == 2u) {
++        // Both eyes see the same sprite: the same template at about the same
++        // size, at a plausible offset, moving by the same amount.
++        float dy = current[1].position.y - Mappings[1].TargetRect.y -
++            (current[0].position.y - Mappings[0].TargetRect.y);
++        float dx = current[1].position.x - Mappings[1].TargetRect.x -
++            (current[0].position.x - Mappings[0].TargetRect.x);
++        float scale_ratio = kScales[current[1].scale_index] / kScales[current[0].scale_index];
++        bool stereo_known = CursorState[kStereoBase + 1u] != 0u;
++        float vertical_tolerance = stereo_known
++            ? 4.0 + 0.01 * float(Height)
++            : 0.06 * float(Height);
++        float expected_dy = stereo_known ? asfloat(CursorState[kStereoBase]) : 0.0;
++        if (current[0].template_index != current[1].template_index ||
++            previous[0].template_index != previous[1].template_index ||
++            scale_ratio < 0.75 || scale_ratio > 1.34 ||
++            abs(dy - expected_dy) > vertical_tolerance ||
++            abs(dx) > 0.3 * float(Width)) {
++            reason = kReasonStereo;
++        } else {
++            float disagreement = length(moved[1] - moved[0]);
++            if (disagreement > 3.0 + 0.15 * max(length(moved[0]), length(moved[1]))) {
++                reason = kReasonJump;
++            }
++        }
++    }
++
++    CursorState[kStatsBase + kStatPairs] += 1u;
++    for (uint view3 = 0; view3 < 2u; ++view3) {
++        uint record = kCompositeBase + view3 * 16u;
++        bool draw = reason == kReasonNone && view3 < views;
++        CursorState[record + 0u] = draw ? 1u : 0u;
++        CursorState[record + 1u] = asuint(previous[view3].position.x);
++        CursorState[record + 2u] = asuint(previous[view3].position.y);
++        CursorState[record + 3u] = asuint(current[view3].position.x);
++        CursorState[record + 4u] = asuint(current[view3].position.y);
++        CursorState[record + 5u] = min(previous[view3].template_index, kMaxTemplates - 1u);
++        CursorState[record + 6u] = min(current[view3].template_index, kMaxTemplates - 1u);
++        CursorState[record + 7u] = asuint(kScales[previous[view3].scale_index]);
++        CursorState[record + 8u] = asuint(kScales[current[view3].scale_index]);
++    }
++    if (reason == kReasonNone) {
++        CursorState[kStatsBase + kStatDrawn] += 1u;
++        // Learn the mouse-to-image gain (for the next tracking window) and
++        // the eyes' vertical offset (for the stereo test).
++        for (uint view4 = 0; view4 < views; ++view4) {
++            uint learn = kLearnBase + view4 * 8u;
++            bool known = CursorState[learn + 2u] != 0u;
++            float2 gain = float2(asfloat(CursorState[learn]), asfloat(CursorState[learn + 1u]));
++            if ((Flags & 4u) != 0u) {
++                [unroll] for (uint axis = 0; axis < 2u; ++axis) {
++                    float mouse = MouseDelta[axis];
++                    float image = moved[view4][axis];
++                    if (abs(mouse) >= 3.0 && abs(image) >= 2.0 && sign(mouse) == sign(image)) {
++                        float sample_gain = clamp(image / mouse, 0.05, 20.0);
++                        gain[axis] = known && gain[axis] > 0.0 ? lerp(gain[axis], sample_gain, 0.3) : sample_gain;
++                        CursorState[learn + 2u] = 1u;
++                    }
++                }
++            }
++            CursorState[learn] = asuint(gain.x);
++            CursorState[learn + 1u] = asuint(gain.y);
++        }
++        if (views == 2u) {
++            float dy = current[1].position.y - Mappings[1].TargetRect.y -
++                (current[0].position.y - Mappings[0].TargetRect.y);
++            bool stereo_known = CursorState[kStereoBase + 1u] != 0u;
++            float learned = stereo_known ? lerp(asfloat(CursorState[kStereoBase]), dy, 0.2) : dy;
++            CursorState[kStereoBase] = asuint(learned);
++            CursorState[kStereoBase + 1u] = 1u;
++        }
++    } else {
++        uint counter = kStatNotFound;
++        if (reason == kReasonBusy) {
++            counter = kStatBusy;
++        } else if (reason == kReasonScore) {
++            counter = kStatScore;
++        } else if (reason == kReasonMargin) {
++            counter = kStatMargin;
++        } else if (reason == kReasonStereo) {
++            counter = kStatStereo;
++        } else if (reason == kReasonJump) {
++            counter = kStatJump;
++        }
++        CursorState[kStatsBase + counter] += 1u;
++    }
++}
+diff --git a/src/d3d12/smooth_cursor_templates.cpp b/src/d3d12/smooth_cursor_templates.cpp
+new file mode 100644
+index 0000000..f15ae66
+--- /dev/null
++++ b/src/d3d12/smooth_cursor_templates.cpp
+@@ -0,0 +1,249 @@
++#include "xrfg/smooth_cursor_templates.hpp"
++
++#include <windows.h>
++
++#include <array>
++#include <cstring>
++
++namespace xrfg {
++namespace {
++
++constexpr std::array<std::uint16_t, 16> kCockpitCursorIds{
++    116, 132, 145, 146, 147, 148, 149, 151,
++    301, 302, 303, 306, 307, 308, 309, 310,
++};
++
++[[nodiscard]] std::uint32_t read_u32(std::span<const std::uint8_t> bytes, std::size_t at) noexcept {
++    return static_cast<std::uint32_t>(bytes[at]) |
++        (static_cast<std::uint32_t>(bytes[at + 1]) << 8U) |
++        (static_cast<std::uint32_t>(bytes[at + 2]) << 16U) |
++        (static_cast<std::uint32_t>(bytes[at + 3]) << 24U);
++}
++
++[[nodiscard]] std::uint16_t read_u16(std::span<const std::uint8_t> bytes, std::size_t at) noexcept {
++    return static_cast<std::uint16_t>(
++        bytes[at] | (static_cast<std::uint16_t>(bytes[at + 1]) << 8U));
++}
++
++[[nodiscard]] std::span<const std::uint8_t> resource_bytes(
++    HMODULE module, LPCWSTR name, LPCWSTR type) noexcept {
++    HRSRC found = FindResourceW(module, name, type);
++    if (found == nullptr) {
++        return {};
++    }
++    HGLOBAL loaded = LoadResource(module, found);
++    const DWORD size = SizeofResource(module, found);
++    const void* data = loaded == nullptr ? nullptr : LockResource(loaded);
++    if (data == nullptr || size == 0) {
++        return {};
++    }
++    return {static_cast<const std::uint8_t*>(data), size};
++}
++
++// One cursor group's 32x32 image, decoded.
++[[nodiscard]] bool load_group(HMODULE module, std::uint16_t id, D3D12CursorTemplate* output) noexcept {
++    const auto group = resource_bytes(
++        module, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(12) /* RT_GROUP_CURSOR */);
++    if (group.size() < 6U || read_u16(group, 2) != 2U) {
++        return false;
++    }
++    const std::uint16_t count = read_u16(group, 4);
++    for (std::uint16_t entry = 0; entry < count; ++entry) {
++        const std::size_t at = 6U + static_cast<std::size_t>(entry) * 14U;
++        if (at + 14U > group.size()) {
++            break;
++        }
++        // CURSORDIR: width, height (doubled), planes, bit count, bytes, id.
++        if (read_u16(group, at) != kD3D12CursorTemplateSize) {
++            continue;
++        }
++        const std::uint16_t image = read_u16(group, at + 12U);
++        const auto bits = resource_bytes(
++            module, MAKEINTRESOURCEW(image), MAKEINTRESOURCEW(1) /* RT_CURSOR */);
++        if (decode_cursor_resource(bits, output)) {
++            output->source_id = id;
++            return true;
++        }
++    }
++    return false;
++}
++
++[[nodiscard]] std::vector<D3D12CursorTemplate> load_module(HMODULE module) noexcept {
++    std::vector<D3D12CursorTemplate> templates;
++    try {
++        for (const std::uint16_t id : kCockpitCursorIds) {
++            D3D12CursorTemplate decoded{};
++            if (load_group(module, id, &decoded)) {
++                templates.push_back(decoded);
++            }
++        }
++    } catch (...) {
++        templates.clear();
++    }
++    return templates;
++}
++
++}  // namespace
++
++std::span<const std::uint16_t> dcs_cockpit_cursor_ids() noexcept {
++    return kCockpitCursorIds;
++}
++
++bool decode_cursor_resource(
++    std::span<const std::uint8_t> bits,
++    D3D12CursorTemplate* output) noexcept {
++    if (output == nullptr || bits.size() < 4U + 40U) {
++        return false;
++    }
++    // A hotspot (two words), then BITMAPINFOHEADER with the height doubled
++    // (XOR image above the AND mask). A PNG cursor is not decoded.
++    const auto dib = bits.subspan(4U);
++    const std::uint32_t header_size = read_u32(dib, 0);
++    const auto width = static_cast<std::int32_t>(read_u32(dib, 4));
++    const auto doubled_height = static_cast<std::int32_t>(read_u32(dib, 8));
++    const std::uint16_t bit_count = read_u16(dib, 14);
++    const std::uint32_t compression = read_u32(dib, 16);
++    std::uint32_t colours_used = read_u32(dib, 32);
++    constexpr auto kSize = static_cast<std::int32_t>(kD3D12CursorTemplateSize);
++    if (header_size < 40U || width != kSize || doubled_height != 2 * kSize ||
++        compression != 0U /* BI_RGB */ ||
++        (bit_count != 1U && bit_count != 4U && bit_count != 8U &&
++         bit_count != 24U && bit_count != 32U)) {
++        return false;
++    }
++    if (colours_used == 0U && bit_count <= 8U) {
++        colours_used = 1U << bit_count;
++    }
++    const std::size_t palette_at = header_size;
++    const std::size_t pixels_at = palette_at + static_cast<std::size_t>(colours_used) * 4U;
++    const std::size_t stride = ((static_cast<std::size_t>(kSize) * bit_count + 31U) / 32U) * 4U;
++    const std::size_t mask_at = pixels_at + stride * kSize;
++    const std::size_t mask_stride = ((static_cast<std::size_t>(kSize) + 31U) / 32U) * 4U;
++    if (dib.size() < mask_at + mask_stride * kSize) {
++        return false;
++    }
++    bool any_alpha = false;
++    std::array<std::uint32_t, kD3D12CursorTemplateSize * kD3D12CursorTemplateSize> rgba{};
++    std::array<bool, kD3D12CursorTemplateSize * kD3D12CursorTemplateSize> masked{};
++    for (std::int32_t y = 0; y < kSize; ++y) {
++        // Bottom-up rows.
++        const std::size_t row = pixels_at + stride * static_cast<std::size_t>(kSize - 1 - y);
++        const std::size_t mask_row = mask_at + mask_stride * static_cast<std::size_t>(kSize - 1 - y);
++        for (std::int32_t x = 0; x < kSize; ++x) {
++            std::uint32_t r = 0;
++            std::uint32_t g = 0;
++            std::uint32_t b = 0;
++            std::uint32_t a = 255;
++            if (bit_count == 32U) {
++                const std::size_t at = row + static_cast<std::size_t>(x) * 4U;
++                b = dib[at];
++                g = dib[at + 1];
++                r = dib[at + 2];
++                a = dib[at + 3];
++                any_alpha = any_alpha || a != 0U;
++            } else if (bit_count == 24U) {
++                const std::size_t at = row + static_cast<std::size_t>(x) * 3U;
++                b = dib[at];
++                g = dib[at + 1];
++                r = dib[at + 2];
++            } else {
++                const std::size_t bit = static_cast<std::size_t>(x) * bit_count;
++                const std::uint8_t byte = dib[row + bit / 8U];
++                const std::uint32_t index = (byte >> (8U - bit_count - (bit % 8U))) &
++                    ((1U << bit_count) - 1U);
++                if (index >= colours_used) {
++                    return false;
++                }
++                const std::size_t at = palette_at + static_cast<std::size_t>(index) * 4U;
++                b = dib[at];
++                g = dib[at + 1];
++                r = dib[at + 2];
++            }
++            const std::size_t texel = static_cast<std::size_t>(y) * kSize + static_cast<std::size_t>(x);
++            masked[texel] = ((dib[mask_row + static_cast<std::size_t>(x) / 8U] >>
++                                 (7U - static_cast<std::uint32_t>(x) % 8U)) & 1U) != 0U;
++            rgba[texel] = r | (g << 8U) | (b << 16U) | (a << 24U);
++        }
++    }
++    for (std::size_t texel = 0; texel < rgba.size(); ++texel) {
++        // Without alpha the AND mask says what is transparent. (An inverting
++        // pixel - mask set, colour non-zero - is left out: DCS has none.)
++        if (!any_alpha || bit_count != 32U) {
++            const std::uint32_t alpha = masked[texel] ? 0U : 255U;
++            rgba[texel] = (rgba[texel] & 0x00ffffffU) | (alpha << 24U);
++        }
++    }
++    output->rgba = rgba;
++    return true;
++}
++
++D3D12CursorTemplate built_in_arrow_template() noexcept {
++    // The arrow's body: rows 0-15 widen one texel per row; the tail runs
++    // down from the notch. Outlined by one dark texel.
++    constexpr auto kSize = static_cast<int>(kD3D12CursorTemplateSize);
++    std::array<bool, kD3D12CursorTemplateSize * kD3D12CursorTemplateSize> body{};
++    const auto inside = [](int x, int y) {
++        const bool head = y >= 1 && y <= 16 && x >= 1 && x <= 1 + (y - 1) * 6 / 10;
++        const bool tail = y >= 12 && y <= 19 && x >= 4 + (y - 12) / 2 && x <= 6 + (y - 12) / 2;
++        return head || tail;
++    };
++    for (int y = 0; y < kSize; ++y) {
++        for (int x = 0; x < kSize; ++x) {
++            body[static_cast<std::size_t>(y * kSize + x)] = inside(x, y);
++        }
++    }
++    D3D12CursorTemplate output{};
++    for (int y = 0; y < kSize; ++y) {
++        for (int x = 0; x < kSize; ++x) {
++            const std::size_t texel = static_cast<std::size_t>(y * kSize + x);
++            bool outline = false;
++            for (int dy = -1; dy <= 1 && !body[texel]; ++dy) {
++                for (int dx = -1; dx <= 1; ++dx) {
++                    const int nx = x + dx;
++                    const int ny = y + dy;
++                    if (nx >= 0 && ny >= 0 && nx < kSize && ny < kSize &&
++                        body[static_cast<std::size_t>(ny * kSize + nx)]) {
++                        outline = true;
++                    }
++                }
++            }
++            output.rgba[texel] = body[texel] ? 0xffffffffU : (outline ? 0xff141414U : 0U);
++        }
++    }
++    output.source_id = 0;
++    return output;
++}
++
++CursorTemplateSet load_dcs_cursor_templates(const std::filesystem::path& directory) noexcept {
++    CursorTemplateSet output{};
++    if (HMODULE in_process = GetModuleHandleW(L"Visualizer.dll"); in_process != nullptr) {
++        output.templates = load_module(in_process);
++        if (!output.templates.empty()) {
++            output.source = CursorTemplateSource::dcs_process;
++            return output;
++        }
++    }
++    try {
++        if (!directory.empty()) {
++            const std::filesystem::path file = directory / L"Visualizer.dll";
++            HMODULE data = LoadLibraryExW(file.c_str(), nullptr,
++                LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
++            if (data != nullptr) {
++                output.templates = load_module(data);
++                FreeLibrary(data);
++                if (!output.templates.empty()) {
++                    output.source = CursorTemplateSource::dcs_file;
++                    return output;
++                }
++            }
++        }
++        output.templates.assign(1, built_in_arrow_template());
++        output.source = CursorTemplateSource::built_in;
++    } catch (...) {
++        output.templates.clear();
++        output.source = CursorTemplateSource::none;
++    }
++    return output;
++}
++
++}  // namespace xrfg
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+index 9c53c9f..262621e 100644
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -110,6 +110,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "visibility_mask";
+     case BridgeFlightOperation::scene_change: // DCS VR Control (0009)
+         return "scene_change";
++    case BridgeFlightOperation::smooth_cursor: // DCS VR Control (0010)
++        return "smooth_cursor";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 825c22f..028c92c 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -9,6 +9,7 @@
+ #include "xrfg/bridge_flight_logger.hpp"
+ #include "xrfg/generation_backpressure.hpp"
+ #include "xrfg/implicit_layer.hpp"
++#include "xrfg/smooth_cursor_templates.hpp"
+ #include "xrfg/latency_control.hpp"
+ #include "xrfg/embedded_control.hpp"
+ #include "xrfg/provider_api.hpp"
+@@ -1680,6 +1681,12 @@ struct SessionState {
+     std::uint32_t skip_ready_second{};
+     // `[ofxr] late_frame_skip`. Fixed for the session.
+     bool late_frame_skip_enabled{false};
++    // DCS VR Control (0010): `[ofxr] smooth_cursor` and the cursor images,
++    // read once per session (on the first synthesizer that wants them).
++    bool smooth_cursor{false};
++    std::filesystem::path cursor_templates_directory;
++    std::mutex cursor_templates_mutex;
++    std::optional<xrfg::CursorTemplateSet> cursor_templates;
+     // DCS VR Control (0007): 3X can take the deeper pipeline on this binding
+     // (D3D12, the D3D11 bridge's included): deep_pipeline=1 then applies to
+     // 3X as well. Fixed for the session.
+@@ -2993,6 +3000,39 @@ struct SynthesisInitializeRecord {
+     std::uint32_t array_size{};
+ };
+ 
++// DCS VR Control (0010): turns the smooth cursor on for a new synthesizer when
++// the ini asks for it, with the game's own cursor images (loaded once a
++// session; see load_dcs_cursor_templates). Logged as smooth_cursor result=2.
++void configure_smooth_cursor(
++    SessionState& session,
++    xrfg::D3D12FrameSynthesizer& synthesizer) noexcept {
++    if (!session.smooth_cursor) {
++        return;
++    }
++    try {
++        xrfg::D3D12SmoothCursorOptions options{};
++        xrfg::CursorTemplateSource source = xrfg::CursorTemplateSource::none;
++        {
++            std::scoped_lock lock(session.cursor_templates_mutex);
++            if (!session.cursor_templates) {
++                session.cursor_templates =
++                    xrfg::load_dcs_cursor_templates(session.cursor_templates_directory);
++            }
++            options.templates = session.cursor_templates->templates;
++            source = session.cursor_templates->source;
++        }
++        options.enabled = !options.templates.empty();
++        const HRESULT result = synthesizer.set_smooth_cursor(options);
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::smooth_cursor,
++            2,
++            options.templates.size(),
++            static_cast<std::uint64_t>(source),
++            static_cast<std::uint64_t>(static_cast<std::uint32_t>(result)));
++    } catch (...) {
++    }
++}
++
+ template <typename Initialize>
+ [[nodiscard]] HRESULT initialize_synthesis_with_fallback(
+     SessionState& session,
+@@ -3337,6 +3377,9 @@ create_d3d12_frame_generation_swapchains(
+         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
++        if (state && state->session) {
++            configure_smooth_cursor(*state->session, *synthesizer); // 0010
++        }
+         generation->synthesizer = std::move(synthesizer);
+         if (failure_reason != nullptr) {
+             *failure_reason = SwapchainEligibilityReason::ready;
+@@ -3535,6 +3578,9 @@ create_d3d11_frame_generation_swapchains(
+         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
++        if (state && state->session) {
++            configure_smooth_cursor(*state->session, *synthesizer); // 0010
++        }
+         generation->synthesizer = std::move(synthesizer);
+         generation->interop = std::move(interop);
+         {
+@@ -3808,6 +3854,9 @@ create_vulkan_frame_generation_swapchains(
+         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
++        if (state && state->session) {
++            configure_smooth_cursor(*state->session, *synthesizer); // 0010
++        }
+         generation->synthesizer = std::move(synthesizer);
+         generation->interop = std::move(interop);
+         {
+@@ -5036,6 +5085,11 @@ XrResult layer_create_session_impl(
+     // DCS VR Control (0006).
+     state->late_frame_skip_enabled =
+         xrfg::implicit_layer::read_late_frame_skip(current_layer_directory());
++    // DCS VR Control (0010).
++    state->smooth_cursor =
++        xrfg::implicit_layer::read_smooth_cursor(current_layer_directory());
++    state->cursor_templates_directory =
++        xrfg::implicit_layer::read_cursor_templates(current_layer_directory());
+     // DCS VR Control (0007).
+     state->diag_vram =
+         xrfg::implicit_layer::read_diag_vram(current_layer_directory());
+@@ -11922,6 +11976,15 @@ struct PreparedProjectionFrame {
+                 }
+                 generation->visibility_mask_version = mask_version;
+             }
++            // DCS VR Control (0010): the Windows cursor as this frame goes
++            // in (the layer runs in the game's process).
++            if (state->session->smooth_cursor) {
++                POINT pointer{};
++                if (GetCursorPos(&pointer)) {
++                    generation->synthesizer->note_cursor_position(
++                        pointer.x, pointer.y, GetTickCount64());
++                }
++            }
+             if (!generation->interop || SUCCEEDED(submit_result)) {
+                 submit_result = request_pair
+                                     ? generation->synthesizer->submit_pair(
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+index d64ca16..ddfb55b 100644
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -223,6 +223,13 @@ int main(int argc, char** argv) {
+             3,
+             2ULL | (1ULL << 16),
+             44444);
++        // DCS VR Control (0010): the smooth cursor's second.
++        enabled.event(
++            xrfg::BridgeFlightOperation::smooth_cursor,
++            1,
++            45ULL | (44ULL << 16),
++            1ULL << 16,
++            7ULL << 48);
+         enabled.shutdown();
+ 
+         const std::string log = read(log_path);
+@@ -282,6 +289,10 @@ int main(int argc, char** argv) {
+             log.find("op=scene_change result=33640 dur_us=0 a=3 b=65538 c=44444") !=
+                 std::string::npos,
+             "bridge log is missing the 0009 scene change record");
++        require(
++            log.find("op=smooth_cursor result=1 dur_us=0 a=2883629 b=65536 c=1970324836974592") !=
++                std::string::npos,
++            "bridge log is missing the 0010 smooth cursor record");
+ 
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index 5b9f759..d9e18fa 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -4,6 +4,7 @@
+ #include <filesystem>
+ #include <fstream>
+ #include "xrfg/d3d12_frame_synthesizer.hpp"
++#include "xrfg/smooth_cursor_templates.hpp"
+ 
+ #include <windows.h>
+ #include <d3d12.h>
+@@ -21,6 +22,7 @@
+ #include <future>
+ #include <iostream>
+ #include <limits>
++#include <optional>
+ #include <span>
+ #include <stdexcept>
+ #include <string>
+@@ -4287,6 +4289,669 @@ void test_nvidia_serialized_eye_context_stress(
+ 
+ }  // namespace
+ 
++// DCS VR Control (0010): the smooth mouse cursor. A small arrow that moves
++// further than its own size between two real frames over a textured,
++// otherwise still image: in the generated frames it must appear exactly once,
++// at its position for that frame's instant, with neither real frame's copy
++// left behind; and wherever the detection cannot be sure (a look-alike next
++// to it, no cursor, an idle mouse) every generated pixel must come out exactly
++// as with the feature off.
++constexpr UINT kCursorWidth = 320;
++constexpr UINT kCursorHeight = 240;
++
++[[nodiscard]] RgbaBytes cursor_background_texel(UINT x, UINT y, UINT eye) noexcept {
++    // A panel-like texture: soft shading, grain and a few hard-edged blocks.
++    std::uint32_t hash = (x * 73856093U) ^ (y * 19349663U) ^ (eye * 83492791U);
++    hash ^= hash >> 13U;
++    hash *= 0x5bd1e995U;
++    hash ^= hash >> 15U;
++    const float grain = static_cast<float>(hash & 31U) - 16.0F;
++    const float xf = static_cast<float>(x);
++    const float yf = static_cast<float>(y);
++    float base = 70.0F + 30.0F * std::sin(xf * 0.05F) * std::cos(yf * 0.07F) + grain;
++    if (((x / 40U) + (y / 30U)) % 5U == 0U) {
++        base += 60.0F;
++    }
++    const auto channel = [](float value) noexcept {
++        return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 255.0F)));
++    };
++    return {channel(base + 6.0F), channel(base), channel(base * 0.8F + 10.0F), 255};
++}
++
++[[nodiscard]] StereoPattern cursor_background() {
++    StereoPattern pattern;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        pattern[eye].resize(static_cast<std::size_t>(kCursorWidth) * kCursorHeight * kBytesPerPixel);
++        for (UINT y = 0; y < kCursorHeight; ++y) {
++            for (UINT x = 0; x < kCursorWidth; ++x) {
++                const RgbaBytes texel = cursor_background_texel(x, y, eye);
++                std::copy(texel.begin(), texel.end(), pattern[eye].begin() +
++                    static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * kCursorWidth + x) * kBytesPerPixel));
++            }
++        }
++    }
++    return pattern;
++}
++
++using CursorPosition = std::array<int, 2>;
++
++// A control marker in the manner of DCS's: a plain green cross, one colour
++// and no outline, so it can only be matched by its shape.
++[[nodiscard]] xrfg::D3D12CursorTemplate marker_template() noexcept {
++    xrfg::D3D12CursorTemplate marker{};
++    for (UINT y = 4; y < 19; ++y) {
++        for (UINT x = 4; x < 19; ++x) {
++            const bool bar = (x >= 10 && x < 13) || (y >= 10 && y < 13);
++            marker.rgba[y * xrfg::kD3D12CursorTemplateSize + x] = bar ? 0xff28dc00U : 0U;
++        }
++    }
++    return marker;
++}
++
++// A cursor image as drawn: the template resized by nearest texel, the way
++// the detection and the composition map pixels to texels.
++struct Sprite {
++    int size{};
++    std::vector<std::uint32_t> rgba;
++};
++
++[[nodiscard]] Sprite make_sprite(const xrfg::D3D12CursorTemplate& source, float scale = 1.0F) {
++    Sprite sprite;
++    sprite.size = static_cast<int>(std::ceil(static_cast<float>(xrfg::kD3D12CursorTemplateSize) * scale));
++    sprite.rgba.assign(static_cast<std::size_t>(sprite.size) * static_cast<std::size_t>(sprite.size), 0U);
++    for (int y = 0; y < sprite.size; ++y) {
++        for (int x = 0; x < sprite.size; ++x) {
++            const int tx = static_cast<int>(std::floor((static_cast<float>(x) + 0.5F) / scale));
++            const int ty = static_cast<int>(std::floor((static_cast<float>(y) + 0.5F) / scale));
++            if (tx < static_cast<int>(xrfg::kD3D12CursorTemplateSize) &&
++                ty < static_cast<int>(xrfg::kD3D12CursorTemplateSize)) {
++                sprite.rgba[static_cast<std::size_t>(y * sprite.size + x)] =
++                    source.rgba[static_cast<std::size_t>(ty) * xrfg::kD3D12CursorTemplateSize +
++                        static_cast<std::size_t>(tx)];
++            }
++        }
++    }
++    return sprite;
++}
++
++void draw_cursor_sized(StereoPattern* pattern, UINT eye, UINT width, UINT height,
++    CursorPosition at, const Sprite& sprite) {
++    for (int ty = 0; ty < sprite.size; ++ty) {
++        for (int tx = 0; tx < sprite.size; ++tx) {
++            const std::uint32_t rgba = sprite.rgba[static_cast<std::size_t>(ty * sprite.size + tx)];
++            const std::uint32_t alpha = rgba >> 24U;
++            const int x = at[0] + tx;
++            const int y = at[1] + ty;
++            if (alpha == 0U || x < 0 || y < 0 || x >= static_cast<int>(width) ||
++                y >= static_cast<int>(height)) {
++                continue;
++            }
++            const std::size_t offset =
++                (static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * kBytesPerPixel;
++            for (UINT channel = 0; channel < 3U; ++channel) {
++                const std::uint32_t colour = (rgba >> (8U * channel)) & 0xffU;
++                const std::uint32_t under = (*pattern)[eye][offset + channel];
++                (*pattern)[eye][offset + channel] = static_cast<std::uint8_t>(
++                    (colour * alpha + under * (255U - alpha) + 127U) / 255U);
++            }
++        }
++    }
++}
++
++void draw_cursor(StereoPattern* pattern, UINT eye, CursorPosition at, const Sprite& sprite) {
++    draw_cursor_sized(pattern, eye, kCursorWidth, kCursorHeight, at, sprite);
++}
++
++void draw_cursor_into(StereoPattern* pattern, UINT width, UINT height, CursorPosition at,
++    const Sprite& sprite) {
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        draw_cursor_sized(pattern, eye, width, height, at, sprite);
++    }
++}
++
++struct CursorScenario {
++    // The cursor's top-left corner in the previous frame, per eye, and how
++    // far it moves (the same in both eyes: it is view-locked).
++    std::array<CursorPosition, kEyeCount> previous{CursorPosition{60, 70}, CursorPosition{48, 70}};
++    CursorPosition motion{24, 10};
++    bool draw{true};
++    // A second, identical arrow that does not move, relative to the
++    // previous position.
++    std::optional<CursorPosition> distractor;
++    bool feature{true};
++    bool mouse_moves{true};
++    bool triple{false};
++    // The cursor is the green marker rather than the arrow (both are
++    // offered to the detection).
++    bool marker{false};
++    // How large DCS draws it against the 32x32 image.
++    float scale{1.0F};
++    // Head yaw between the two frames (radians): the scene turns past the
++    // view-locked cursor and the previous frame is warped into the current
++    // camera.
++    float yaw{0.0F};
++};
++
++struct CursorRun {
++    // The current camera's view without the cursor: what the generated
++    // frame must show wherever the cursor is not.
++    StereoPattern background;
++    StereoPattern previous_frame;
++    StereoPattern current_frame;
++    StereoPattern current_output;
++    std::array<StereoPattern, 2> synthetic;
++    std::array<float, 2> fractions{0.5F, 0.5F};
++    xrfg::D3D12SmoothCursorStats stats{};
++};
++
++[[nodiscard]] CursorRun run_cursor_scenario(
++    D3D12WarpFixture& fixture,
++    xrfg::D3D12OpticalFlowBackend backend,
++    xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options,
++    const CursorScenario& scenario) {
++    const Sprite sprite = make_sprite(
++        scenario.marker ? marker_template() : xrfg::built_in_arrow_template(), scenario.scale);
++    CursorRun run;
++    const ReprojectionViews previous_views = make_reprojection_views();
++    const ReprojectionViews current_views = make_reprojection_views(scenario.yaw);
++    run.previous_frame = scenario.yaw == 0.0F
++        ? cursor_background()
++        : ray_direction_pattern(kCursorWidth, kCursorHeight, previous_views);
++    run.current_frame = scenario.yaw == 0.0F
++        ? run.previous_frame
++        : ray_direction_pattern(kCursorWidth, kCursorHeight, current_views);
++    run.background = run.current_frame;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        const CursorPosition from = scenario.previous[eye];
++        const CursorPosition to{from[0] + scenario.motion[0], from[1] + scenario.motion[1]};
++        if (scenario.distractor) {
++            const CursorPosition still{from[0] + (*scenario.distractor)[0], from[1] + (*scenario.distractor)[1]};
++            draw_cursor(&run.previous_frame, eye, still, sprite);
++            draw_cursor(&run.current_frame, eye, still, sprite);
++        }
++        if (scenario.draw) {
++            draw_cursor(&run.previous_frame, eye, from, sprite);
++            draw_cursor(&run.current_frame, eye, to, sprite);
++        }
++    }
++    std::array<ComPtr<ID3D12Resource>, 2> sources{
++        create_source_texture(fixture, kCursorWidth, kCursorHeight),
++        create_source_texture(fixture, kCursorWidth, kCursorHeight)};
++    std::array<ComPtr<ID3D12Resource>, 2> currents{
++        create_source_texture(fixture, kCursorWidth, kCursorHeight),
++        create_source_texture(fixture, kCursorWidth, kCursorHeight)};
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics{
++        create_source_texture(fixture, kCursorWidth, kCursorHeight),
++        create_source_texture(fixture, kCursorWidth, kCursorHeight)};
++    upload_pattern(fixture, sources[0].Get(), run.previous_frame);
++    upload_pattern(fixture, sources[1].Get(), run.current_frame);
++    std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 2> current_pointers{currents[0].Get(), currents[1].Get()};
++    std::array<ID3D12Resource*, 2> synthetic_pointers{synthetics[0].Get(), synthetics[1].Get()};
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require(operation_succeeded(history->initialize(
++                fixture.device(), fixture.queue(),
++                std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                D3D12_RESOURCE_STATE_RENDER_TARGET)),
++        "cursor: history initialization");
++    xrfg::D3D12FrameSynthesizer synthesizer;
++    require(operation_succeeded(synthesizer.initialize(
++                fixture.device(), fixture.queue(), history,
++                std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET, backend, nvidia_options)),
++        "cursor: synthesizer initialization");
++    if (scenario.feature) {
++        xrfg::D3D12SmoothCursorOptions options{};
++        options.enabled = true;
++        options.templates.push_back(xrfg::built_in_arrow_template());
++        options.templates.push_back(marker_template());
++        require(synthesizer.set_smooth_cursor(options) == S_OK, "cursor: set_smooth_cursor");
++    }
++    synthesizer.note_cursor_position(1200, 700, 100'000);
++    xrfg::D3D12HistoryCaptureTicket capture{};
++    xrfg::D3D12FrameSynthesisTicket ticket{};
++    require(operation_succeeded(history->capture(0, &capture)) &&
++                operation_succeeded(history->commit(capture)) &&
++                operation_succeeded(synthesizer.submit_prime(capture, previous_views, 0, &ticket)),
++        "cursor: prime");
++    if (scenario.feature) {
++        xrfg::D3D12SmoothCursorOptions again{};
++        again.enabled = true;
++        again.templates.push_back(xrfg::built_in_arrow_template());
++        require(synthesizer.set_smooth_cursor(again) == E_ILLEGAL_METHOD_CALL,
++            "cursor: the templates were replaced after a submission");
++    }
++    require_frame_start_gate(synthesizer, "cursor: frame-start gate");
++    synthesizer.note_cursor_position(
++        scenario.mouse_moves ? 1200 + scenario.motion[0] : 1200,
++        scenario.mouse_moves ? 700 + scenario.motion[1] : 700,
++        100'011);
++    std::optional<xrfg::D3D12ExtraSynthetic> extra;
++    if (scenario.triple) {
++        run.fractions = {1.0F / 3.0F, 2.0F / 3.0F};
++        extra = xrfg::D3D12ExtraSynthetic{1, run.fractions[1]};
++    }
++    require(operation_succeeded(history->capture(1, &capture)) &&
++                operation_succeeded(history->commit(capture)) &&
++                operation_succeeded(synthesizer.submit_pair(
++                    capture, current_views, current_views, 0, 1, &ticket, std::nullopt, {}, false,
++                    run.fractions[0], extra)),
++        "cursor: pair");
++    require(operation_succeeded(synthesizer.wait_for_idle()), "cursor: idle");
++    run.current_output = readback_pattern(fixture, currents[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    run.synthetic[0] = readback_pattern(fixture, synthetics[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    if (scenario.triple) {
++        run.synthetic[1] = readback_pattern(fixture, synthetics[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    }
++    require(operation_succeeded(synthesizer.smooth_cursor_stats(&run.stats)), "cursor: stats");
++    require(operation_succeeded(synthesizer.retire_previous()), "cursor: retire");
++    return run;
++}
++
++struct CursorMeasure {
++    // Opaque cursor texels at the expected position that differ from the
++    // cursor's colour by more than 2/255, and the offset (within 2 px) where
++    // the cursor matches best.
++    std::size_t cursor_mismatches{};
++    CursorPosition best_offset{};
++    // Pixels near either real frame's position (but away from the expected
++    // one): their mean distance from the true background, and the share of
++    // them more than 40/255 away - a ghost.
++    double ghost_mean{};
++    double ghost_share{};
++    // The same distance everywhere well away from the cursor: the
++    // synthesis's own error on this scene, which the ghost region shares.
++    double rest_mean{};
++};
++
++[[nodiscard]] CursorMeasure measure_cursor(
++    const StereoPattern& output, const StereoPattern& background, UINT eye,
++    CursorPosition from, CursorPosition to, CursorPosition expected, const Sprite& sprite) {
++    const int kSize = sprite.size;
++    const auto pixel = [&](const StereoPattern& pattern, int x, int y, UINT channel) {
++        return static_cast<int>(pattern[eye][(static_cast<std::size_t>(y) * kCursorWidth +
++            static_cast<std::size_t>(x)) * kBytesPerPixel + channel]);
++    };
++    const auto covered = [&](CursorPosition at, int x, int y, int grow) {
++        for (int dy = -grow; dy <= grow; ++dy) {
++            for (int dx = -grow; dx <= grow; ++dx) {
++                const int tx = x + dx - at[0];
++                const int ty = y + dy - at[1];
++                if (tx >= 0 && ty >= 0 && tx < kSize && ty < kSize &&
++                    (sprite.rgba[static_cast<std::size_t>(ty * kSize + tx)] >> 24U) != 0U) {
++                    return true;
++                }
++            }
++        }
++        return false;
++    };
++    CursorMeasure measure{};
++    std::size_t best = std::numeric_limits<std::size_t>::max();
++    for (int oy = -2; oy <= 2; ++oy) {
++        for (int ox = -2; ox <= 2; ++ox) {
++            std::size_t mismatches = 0;
++            for (int ty = 0; ty < kSize; ++ty) {
++                for (int tx = 0; tx < kSize; ++tx) {
++                    const std::uint32_t rgba = sprite.rgba[static_cast<std::size_t>(ty * kSize + tx)];
++                    if ((rgba >> 24U) != 255U) {
++                        continue;
++                    }
++                    const int x = expected[0] + ox + tx;
++                    const int y = expected[1] + oy + ty;
++                    for (UINT channel = 0; channel < 3U; ++channel) {
++                        if (std::abs(pixel(output, x, y, channel) -
++                                static_cast<int>((rgba >> (8U * channel)) & 0xffU)) > 2) {
++                            ++mismatches;
++                            break;
++                        }
++                    }
++                }
++            }
++            if (ox == 0 && oy == 0) {
++                measure.cursor_mismatches = mismatches;
++            }
++            if (mismatches < best) {
++                best = mismatches;
++                measure.best_offset = {ox, oy};
++            }
++        }
++    }
++    double total = 0.0;
++    std::size_t count = 0;
++    std::size_t ghosts = 0;
++    double rest_total = 0.0;
++    std::size_t rest_count = 0;
++    for (int y = 16; y + 16 < static_cast<int>(kCursorHeight); ++y) {
++        for (int x = 16; x + 16 < static_cast<int>(kCursorWidth); ++x) {
++            int distance = 0;
++            for (UINT channel = 0; channel < 3U; ++channel) {
++                distance = std::max(distance,
++                    std::abs(pixel(output, x, y, channel) - pixel(background, x, y, channel)));
++            }
++            if (!covered(from, x, y, 8) && !covered(to, x, y, 8) && !covered(expected, x, y, 8)) {
++                rest_total += distance;
++                ++rest_count;
++            }
++            if (!(covered(from, x, y, 1) || covered(to, x, y, 1)) || covered(expected, x, y, 2)) {
++                continue;
++            }
++            total += distance;
++            ghosts += distance > 40 ? 1U : 0U;
++            ++count;
++        }
++    }
++    require(count > 0 && rest_count > 0, "cursor: no ghost region");
++    measure.ghost_mean = total / static_cast<double>(count) / 255.0;
++    measure.ghost_share = static_cast<double>(ghosts) / static_cast<double>(count);
++    measure.rest_mean = rest_total / static_cast<double>(rest_count) / 255.0;
++    return measure;
++}
++
++void test_smooth_cursor(
++    D3D12WarpFixture& fixture,
++    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx,
++    xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options = {}) {
++    const char* label = backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "NVIDIA" : "FidelityFX";
++    for (const int variant : {0, 1, 2, 3, 4, 5}) {
++        // 2X, 3X, 2X while the head turns, the green marker in 2X, and the
++        // arrow drawn a quarter larger and a fifth smaller than its image.
++        const bool triple = variant == 1;
++        CursorScenario on{};
++        on.triple = triple;
++        on.yaw = variant == 2 ? 0.03F : 0.0F;
++        on.marker = variant == 3;
++        on.scale = variant == 4 ? 1.26F : variant == 5 ? 0.794F : 1.0F;
++        const Sprite sprite = make_sprite(
++            on.marker ? marker_template() : xrfg::built_in_arrow_template(), on.scale);
++        CursorScenario off = on;
++        off.feature = false;
++        const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, on);
++        const CursorRun without = run_cursor_scenario(fixture, backend, nvidia_options, off);
++        // Real frames are never touched.
++        require(with.current_output == with.current_frame && without.current_output == with.current_output,
++            "cursor: the real frame changed");
++        require(with.stats.pairs == 1 && with.stats.drawn == 1,
++            std::string("cursor: the gate did not accept a clean moving cursor (") + label +
++                ", pairs " + std::to_string(with.stats.pairs) + ", drawn " +
++                std::to_string(with.stats.drawn) + ", not found " +
++                std::to_string(with.stats.not_found) + ", score " +
++                std::to_string(with.stats.low_score) + ", margin " +
++                std::to_string(with.stats.ambiguous) + ", stereo " +
++                std::to_string(with.stats.stereo) + ", jump " + std::to_string(with.stats.jump) +
++                ", busy " + std::to_string(with.stats.busy) + ")");
++        for (UINT output = 0; output < (triple ? 2U : 1U); ++output) {
++            const float t = with.fractions[output];
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                const CursorPosition from = on.previous[eye];
++                const CursorPosition to{from[0] + on.motion[0], from[1] + on.motion[1]};
++                const CursorPosition expected{
++                    to[0] + static_cast<int>(std::lround((from[0] - to[0]) * (1.0F - t))),
++                    to[1] + static_cast<int>(std::lround((from[1] - to[1]) * (1.0F - t)))};
++                const CursorMeasure good = measure_cursor(
++                    with.synthetic[output], with.background, eye, from, to, expected, sprite);
++                const CursorMeasure bad = measure_cursor(
++                    without.synthetic[output], with.background, eye, from, to, expected, sprite);
++                std::cout << "smooth cursor " << label << (triple ? " 3X" : " 2X")
++                          << (on.yaw != 0.0F ? " turning" : "") << (on.marker ? " marker" : "")
++                          << (on.scale != 1.0F ? " scale=" + std::to_string(on.scale) : std::string())
++                          << " t=" << t
++                          << " eye=" << eye << ": on mismatches=" << good.cursor_mismatches
++                          << " best_offset=(" << good.best_offset[0] << "," << good.best_offset[1]
++                          << ") ghost_mean=" << good.ghost_mean << " ghost_share=" << good.ghost_share
++                          << " rest_mean=" << good.rest_mean
++                          << " | off mismatches=" << bad.cursor_mismatches
++                          << " ghost_mean=" << bad.ghost_mean << " ghost_share=" << bad.ghost_share << '\n';
++                require(good.cursor_mismatches == 0 && good.best_offset == CursorPosition{0, 0},
++                    "cursor: not drawn exactly at its position for the generated instant");
++                require(good.ghost_mean < good.rest_mean + 0.02 && good.ghost_share < 0.02,
++                    "cursor: a stale copy is left in the generated frame");
++                require(bad.ghost_share > 0.2 || bad.cursor_mismatches > 0,
++                    "cursor: the scene does not show the problem without the feature");
++            }
++        }
++    }
++
++    // A second identical arrow that stays still 34 px below: either could be
++    // the cursor, so the gate must leave the frame exactly as without.
++    {
++        CursorScenario on{};
++        on.distractor = CursorPosition{0, 34};
++        CursorScenario off = on;
++        off.feature = false;
++        const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, on);
++        const CursorRun without = run_cursor_scenario(fixture, backend, nvidia_options, off);
++        require(with.stats.pairs == 1 && with.stats.drawn == 0 &&
++                    with.stats.ambiguous + with.stats.low_score + with.stats.jump > 0,
++            "cursor: a look-alike next to the cursor was not rejected");
++        require(with.synthetic[0] == without.synthetic[0],
++            "cursor: a rejected pair changed the generated frame");
++        std::cout << "smooth cursor " << label << ": look-alike rejected (ambiguous "
++                  << with.stats.ambiguous << ", score " << with.stats.low_score << ", jump "
++                  << with.stats.jump << "), output identical to off\n";
++    }
++
++    // No cursor in the frames, the mouse moving: nothing found, nothing
++    // changed. The cursor moving, the mouse idle: nothing runs at all.
++    {
++        CursorScenario absent{};
++        absent.draw = false;
++        CursorScenario absent_off = absent;
++        absent_off.feature = false;
++        const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, absent);
++        const CursorRun without = run_cursor_scenario(fixture, backend, nvidia_options, absent_off);
++        require(with.stats.pairs == 1 && with.stats.drawn == 0 && with.stats.not_found == 1 &&
++                    with.synthetic[0] == without.synthetic[0],
++            "cursor: frames without a cursor changed");
++        CursorScenario idle{};
++        idle.mouse_moves = false;
++        CursorScenario idle_off = idle;
++        idle_off.feature = false;
++        const CursorRun idle_with = run_cursor_scenario(fixture, backend, nvidia_options, idle);
++        const CursorRun idle_without = run_cursor_scenario(fixture, backend, nvidia_options, idle_off);
++        require(idle_with.stats.idle_pairs == 1 && idle_with.stats.pairs == 0 &&
++                    idle_with.synthetic[0] == idle_without.synthetic[0] &&
++                    idle_with.current_output == idle_without.current_output,
++            "cursor: an idle mouse changed the generated frame");
++        std::cout << "smooth cursor " << label
++                  << ": no cursor and idle mouse leave the output identical to off\n";
++    }
++}
++
++void test_cursor_template_decoding() {
++    // A 32-bit cursor resource as Windows stores it: hotspot, header,
++    // bottom-up BGRA rows, then the AND mask.
++    constexpr std::size_t kSize = xrfg::kD3D12CursorTemplateSize;
++    std::vector<std::uint8_t> bits(4U + 40U + kSize * kSize * 4U + kSize * 4U, 0U);
++    const auto put32 = [&](std::size_t at, std::uint32_t value) {
++        for (std::size_t i = 0; i < 4U; ++i) {
++            bits[at + i] = static_cast<std::uint8_t>(value >> (8U * i));
++        }
++    };
++    put32(4, 40);
++    put32(8, 32);
++    put32(12, 64);
++    bits[4 + 12] = 1;
++    bits[4 + 14] = 32;
++    // Texel (3, 5): opaque blue-ish; everything else transparent.
++    const std::size_t row = 4U + 40U + (kSize - 1U - 5U) * kSize * 4U;
++    bits[row + 3U * 4U + 0U] = 200; // B
++    bits[row + 3U * 4U + 1U] = 100; // G
++    bits[row + 3U * 4U + 2U] = 50;  // R
++    bits[row + 3U * 4U + 3U] = 255; // A
++    xrfg::D3D12CursorTemplate decoded{};
++    require(xrfg::decode_cursor_resource(bits, &decoded), "cursor template: 32-bit decode");
++    require(decoded.rgba[5 * kSize + 3] == (50U | (100U << 8U) | (200U << 16U) | (255U << 24U)) &&
++                decoded.rgba[0] == 0U,
++        "cursor template: 32-bit texels");
++    bits[4 + 14] = 16;
++    require(!xrfg::decode_cursor_resource(bits, &decoded), "cursor template: 16-bit refused");
++    const xrfg::D3D12CursorTemplate arrow = xrfg::built_in_arrow_template();
++    std::size_t opaque = 0;
++    for (const std::uint32_t rgba : arrow.rgba) {
++        opaque += (rgba >> 24U) == 255U ? 1U : 0U;
++    }
++    require(opaque > 100U && opaque < 400U, "cursor template: built-in arrow");
++    // With a directory that holds no Visualizer.dll (and none loaded in this
++    // process) the built-in arrow stands in.
++    const xrfg::CursorTemplateSet fallback =
++        xrfg::load_dcs_cursor_templates(std::filesystem::temp_directory_path());
++    require(fallback.source == xrfg::CursorTemplateSource::built_in && fallback.templates.size() == 1,
++        "cursor template: fallback");
++    // XRFG_TEST_DCS_BIN: a DCS bin directory, read for the game's cursors.
++    std::array<wchar_t, 512> dcs_bin{};
++    const DWORD length = GetEnvironmentVariableW(L"XRFG_TEST_DCS_BIN", dcs_bin.data(),
++        static_cast<DWORD>(dcs_bin.size()));
++    if (length > 0 && length < dcs_bin.size()) {
++        const xrfg::CursorTemplateSet dcs =
++            xrfg::load_dcs_cursor_templates(std::filesystem::path(dcs_bin.data()));
++        require(dcs.source == xrfg::CursorTemplateSource::dcs_file && !dcs.templates.empty(),
++            "cursor template: DCS's Visualizer.dll");
++        std::cout << "cursor templates from DCS: " << dcs.templates.size() << " (ids";
++        for (const auto& item : dcs.templates) {
++            std::cout << ' ' << item.source_id;
++        }
++        std::cout << ")\n";
++    }
++    std::cout << "cursor template decoding and fallback passed\n";
++}
++
++// XRFG_TEST_CURSOR_BENCH=1 on NVIDIA hardware: the detection's and the
++// composition's GPU time at a headset's resolution, the cursor moving every
++// frame (one acquisition, then tracking), against the feature off.
++void bench_smooth_cursor(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    // Two identical pipelines, one with the feature and one without, driven
++    // alternately so both see the same clocks. Three frames cycle with the
++    // cursor 30 px apart in each (and the mouse moving with it), so after
++    // the first pair every detection tracks.
++    const xrfg::D3D12CursorTemplate arrow = xrfg::built_in_arrow_template();
++    const Sprite sprite = make_sprite(arrow);
++    constexpr UINT kFrames = 3;
++    constexpr int kPairs = 240;
++    const std::array<CursorPosition, kFrames> positions{
++        CursorPosition{static_cast<int>(width / 2), static_cast<int>(height / 2)},
++        CursorPosition{static_cast<int>(width / 2) + 30, static_cast<int>(height / 2)},
++        CursorPosition{static_cast<int>(width / 2) + 15, static_cast<int>(height / 2) + 26}};
++    struct Pipeline {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{};
++        std::array<ComPtr<ID3D12Resource>, 2> synthetics{};
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++        std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++        std::vector<std::uint64_t> composition;
++        std::vector<std::uint64_t> total;
++        std::vector<std::uint64_t> detection;
++        std::uint64_t first_detection{};
++    };
++    std::array<Pipeline, 2> pipelines{};
++    StereoPattern background;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        background[eye].resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const RgbaBytes texel = cursor_background_texel(x % kCursorWidth, y % kCursorHeight, eye);
++                std::copy(texel.begin(), texel.end(), background[eye].begin() +
++                    static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * width + x) * kBytesPerPixel));
++            }
++        }
++    }
++    for (UINT index = 0; index < pipelines.size(); ++index) {
++        Pipeline& pipeline = pipelines[index];
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            pipeline.sources[frame] = create_source_texture(fixture, width, height);
++            StereoPattern image = background;
++            draw_cursor_into(&image, width, height, positions[frame], sprite);
++            upload_pattern(fixture, pipeline.sources[frame].Get(), image);
++        }
++        for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++        for (auto& s : pipeline.synthetics) s = create_source_texture(fixture, width, height);
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = pipeline.sources[i].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++        std::array<ID3D12Resource*, 2> synthetic_pointers{pipeline.synthetics[0].Get(), pipeline.synthetics[1].Get()};
++        pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "bench: history");
++        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                    pipeline.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, {}, true)), "bench: synthesizer");
++        if (index == 1) {
++            xrfg::D3D12SmoothCursorOptions options{};
++            options.enabled = true;
++            // The full cockpit set's worth of templates: the built-in arrow
++            // and fifteen shifted copies, so the cost is the real one.
++            for (UINT i = 0; i < xrfg::kD3D12MaxCursorTemplates; ++i) {
++                xrfg::D3D12CursorTemplate copy{};
++                for (UINT t = 0; t < copy.rgba.size(); ++t) {
++                    const UINT x = t % 32U;
++                    const UINT y = t / 32U;
++                    copy.rgba[t] = x >= i % 4U && y >= i / 4U
++                        ? arrow.rgba[(y - i / 4U) * 32U + (x - i % 4U)] : 0U;
++                }
++                options.templates.push_back(copy);
++            }
++            require(pipeline.synthesizer->set_smooth_cursor(options) == S_OK, "bench: set_smooth_cursor");
++        }
++    }
++    const ReprojectionViews views = make_reprojection_views();
++    for (int frame = 0; frame <= kPairs; ++frame) {
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        for (Pipeline& pipeline : pipelines) {
++            pipeline.synthesizer->note_cursor_position(positions[slot][0], positions[slot][1],
++                200'000U + static_cast<std::uint64_t>(frame) * 11U);
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require(operation_succeeded(pipeline.history->capture(slot, &capture)) &&
++                        operation_succeeded(pipeline.history->commit(capture)), "bench: capture");
++            const HRESULT submitted = frame == 0
++                ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                : pipeline.synthesizer->submit_pair(capture, views, views, 0,
++                      static_cast<std::uint32_t>(frame % 2), &ticket, std::nullopt, {}, false, 0.5F);
++            require(operation_succeeded(submitted), "bench: submission");
++            require_frame_start_gate(*pipeline.synthesizer, "bench: frame-start gate");
++            xrfg::D3D12NvidiaGpuTiming timing{};
++            while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                if (timing.previous_serial == 0) {
++                    continue;
++                }
++                pipeline.composition.push_back(timing.composition_microseconds);
++                pipeline.total.push_back(timing.total_microseconds);
++                if (timing.cursor_microseconds != 0) {
++                    if (pipeline.first_detection == 0) {
++                        pipeline.first_detection = timing.cursor_microseconds;
++                    } else {
++                        pipeline.detection.push_back(timing.cursor_microseconds);
++                    }
++                }
++            }
++        }
++    }
++    const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++        if (values.empty()) return 0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    xrfg::D3D12SmoothCursorStats stats{};
++    require(operation_succeeded(pipelines[1].synthesizer->wait_for_idle()) &&
++                operation_succeeded(pipelines[0].synthesizer->wait_for_idle()), "bench: idle");
++    static_cast<void>(pipelines[1].synthesizer->smooth_cursor_stats(&stats));
++    std::cout << "cursor bench " << width << "x" << height << " x2: composition median off "
++              << median(pipelines[0].composition) << " us, on " << median(pipelines[1].composition)
++              << " us (" << pipelines[1].composition.size() << " pairs); whole pair median off "
++              << median(pipelines[0].total) << " us, on " << median(pipelines[1].total)
++              << " us; detection: acquisition "
++              << pipelines[1].first_detection << " us, tracking median " << median(pipelines[1].detection)
++              << " us (" << pipelines[1].detection.size() << "); gate pairs " << stats.pairs << " drawn "
++              << stats.drawn << " acquired " << stats.acquired << " tracked " << stats.tracked
++              << " not_found " << stats.not_found << " margin " << stats.ambiguous << " jump "
++              << stats.jump << " busy " << stats.busy << '\n';
++}
++
+ int main() {
+     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
+     const auto trace_dir = std::filesystem::temp_directory_path() /
+@@ -4302,6 +4967,27 @@ int main() {
+             run_nvidia_fast_controls();
+             return 0;
+         }
++        // DCS VR Control (0010): the smooth cursor on the optical-flow engine
++        // alone, and its GPU cost on hardware.
++        if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_CURSOR", nullptr, 0)) {
++            D3D12WarpFixture nvidia_fixture(true);
++            test_smooth_cursor(nvidia_fixture, xrfg::D3D12OpticalFlowBackend::nvidia);
++            xrfg::D3D12NvidiaOpticalFlowOptions full_bidirectional{};
++            full_bidirectional.input_scale = xrfg::D3D12NvidiaInputScale::full;
++            full_bidirectional.bidirectional = true;
++            test_smooth_cursor(nvidia_fixture, xrfg::D3D12OpticalFlowBackend::nvidia,
++                full_bidirectional);
++            nvidia_fixture.require_no_debug_errors();
++            std::cout << "D3D12 NVIDIA smooth cursor tests passed\n";
++            return 0;
++        }
++        if (GetEnvironmentVariableA("XRFG_TEST_CURSOR_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            bench_smooth_cursor(bench_fixture, 2560, 2560);
++            bench_smooth_cursor(bench_fixture, 3200, 3200);
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
+         D3D12WarpFixture fixture;
+         test_stereo_capture_ring(fixture);
+         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
+@@ -4317,6 +5003,8 @@ int main() {
+         test_dlss_motion_vector_gpu_ingress(fixture);
+         test_dlss_motion_vector_strafe_rejects_double_edges(fixture);
+         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
++        test_cursor_template_decoding(); // DCS VR Control (0010)
++        test_smooth_cursor(fixture); // 0010
+         test_submission_backpressure_and_recovery(
+             fixture,
+             xrfg::D3D12OpticalFlowBackend::fidelity_fx);
+@@ -4391,6 +5079,10 @@ int main() {
+             test_dlss_motion_vector_gpu_ingress(
+                 nvidia_fixture,
+                 xrfg::D3D12OpticalFlowBackend::nvidia);
++            test_smooth_cursor( // DCS VR Control (0010)
++                nvidia_fixture,
++                xrfg::D3D12OpticalFlowBackend::nvidia,
++                nvidia_options);
+             test_submission_backpressure_and_recovery(
+                 nvidia_fixture,
+                 xrfg::D3D12OpticalFlowBackend::nvidia,

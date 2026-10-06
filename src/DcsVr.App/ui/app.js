@@ -442,6 +442,7 @@ function buildFields() {
   field(c,'frameGen','Frame generation','NVIDIA needs an RTX GPU; FidelityFX works on any GPU.','select',[['Off','Off'],['Nvidia','OFXR · NVIDIA Optical Flow'],['FidelityFx','OFXR · FidelityFX Optical Flow']]);
   field(c,'frameGenFactor','Generated frames','Auto renders at half the refresh rate and adds a second generated frame only while DCS cannot keep up. 3× always renders a third: more latency and more artifacts in sideways motion.','select',[[0,'Auto · 2×, 3× when DCS falls behind'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off');
   field(c,'frameGenDeepPipeline','Smoothness buffer','On: OFXR keeps one more frame in flight, which is smoother when DCS frame times vary but adds about 11 ms of latency (one refresh at 90 Hz). In 3× it takes the extra slot only when needed. Off: lower latency, more stutter when DCS frame times vary. Applies to 2×, 3× and Auto.','toggle',null,p => p.frameGen !== 'Off');
+  field(c,'smoothCursor','Smooth mouse cursor','Draws the cursor at its in-between position in generated frames, so it moves at the headset\'s rate. Where you click doesn\'t change.','toggle',null,p => p.frameGen !== 'Off');
   field(c,'nvidiaFlowScale','Optical flow resolution','Resolution used to estimate motion. Higher costs more GPU.','select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow);
   field(c,'flowPreset','Optical flow quality','More analysis costs more GPU.','select',[['Fast','Fast'],['Medium','Medium · default'],['Slow','Slow · most analysis']],flow);
   field(c,'bidirectionalFlow','Bidirectional flow','Estimate motion in both directions. Adds GPU work.','toggle',null,flow);
@@ -495,7 +496,7 @@ function buildFeatureList() {
 function navigate(id) {
   const entry = pages.find(p => p[0] === id); if (!entry) return; page = id;
   pages.forEach(p => { $('page-'+p[0]).hidden = p[0] !== id; $('nav-'+p[0]).classList.toggle('selected',p[0] === id); $('nav-'+p[0]).setAttribute('aria-current',p[0] === id ? 'page' : 'false'); });
-  $('crumb').textContent = entry[1]; $('pageTitle').textContent = entry[1]; $('pageDescription').textContent = entry[2]; $('pageNumber').textContent = String(pages.indexOf(entry)+1).padStart(2,'0')+' / CONFIGURE'; $('scrollArea').scrollTop = 0;
+  $('crumb').textContent = entry[1]; $('pageTitle').textContent = entry[1]; $('pageDescription').textContent = id === 'dlss' && profile && profile.quadViews !== 'None' ? 'DLSS 5 neural rendering on the Quad Views focus area.' : entry[2]; $('pageNumber').textContent = String(pages.indexOf(entry)+1).padStart(2,'0')+' / CONFIGURE'; $('scrollArea').scrollTop = 0;
   if (id === 'foveation' && profile) rereadPimax(false);
   if (id === 'boost' && profile) refreshBoostPlan(0);
   if (id === 'overview' && profile) loadFlight();

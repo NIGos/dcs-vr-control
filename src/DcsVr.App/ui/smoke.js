@@ -16,7 +16,7 @@ window.runWebSmoke = async function() {
   try {
     check('Real WebView2 bridge bootstrap with the feature checklist',document.querySelectorAll('#featureList input[type=checkbox]').length === 4 && !$('profilePreset'));
     check('One primary action: Launch DCS, with Review files, Apply without launching and Restore originals as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
-    check('All editable profile controls available',ui.fields.length === 67 && document.querySelectorAll('#routeSwitch [data-route]').length === 2);
+    check('All editable profile controls available',ui.fields.length === 68 && document.querySelectorAll('#routeSwitch [data-route]').length === 2);
     check('Quality presets, self-reported limiters and the unused Sboys folder are gone',!$('tuningPreset') && !$('undoTune') && !$('tuningDialog') && !$('budgets') && !['externalLimiter','externalLimiterFps','runtimeReprojection','sboysDriverDirectory'].some(p => ui.fields.some(f => f.path === p)));
     check('Rarely changed settings start folded away',[...document.querySelectorAll('details.advanced')].length === 4 && [...document.querySelectorAll('details.advanced')].every(d => !d.open) && $('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details'));
     // Pimax Play's page exactly as Pimax Play shows it (labels, order, rounding), from the fixture's Quick 33 % or Fine 33/10 · 33/33.
@@ -88,6 +88,8 @@ window.runWebSmoke = async function() {
       check('A key saved by an earlier version still shows and works',nrKey.textContent === 'Ctrl+Alt+Shift+F10' && ui.parseKey(ui.profile.neuralToggleKey).join(':') === '121:7');
       nrKey.click(); press(121,'cas'); check('Recording the same combination keeps the saved spelling',ui.profile.neuralToggleKey === 'Ctrl+Alt+Shift+F10');
       ui.profile.neuralToggleKey = before; ui.invalidate(); ui.showProfile(); }
+    { const cursor = ui.fields.find(f => f.path === 'smoothCursor');
+      check('Smooth mouse cursor sits under Frame generation, off by default, and says the click does not move',cursor.page === 'framegen' && cursor.type === 'toggle' && ui.profile.smoothCursor === false && !$('setting-smoothCursor').closest('details') && $('setting-smoothCursor').textContent.includes("Where you click doesn't change")); }
     { const vram = ui.fields.find(f => f.path === 'diagnosticVram');
       check('The VRAM counter sits with the diagnostic panel settings on the Framegen page, off by default',vram.page === 'framegen' && vram.type === 'toggle' && $('setting-diagnosticVram').closest('details') === $('setting-diagnosticOverlayKey').closest('details') && ui.profile.diagnosticVram === false); }
     // The draft on screen is saved a moment after an edit, so it survives an app restart.

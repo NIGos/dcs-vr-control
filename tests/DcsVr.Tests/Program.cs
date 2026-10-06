@@ -403,6 +403,25 @@ Test("The OFXR VRAM counter is off by default and written as diag_vram", () =>
     Require(on.Contains("diag_vram=1") && on.IndexOf("diag_vram=1", StringComparison.Ordinal) < on.IndexOf("[diagnostics]", StringComparison.Ordinal), "in the [ofxr] section");
     Require(JsonData.Deserialize<VrProfile>("{\"id\":\"legacy\"}").DiagnosticVram == false);
 });
+Test("Smooth mouse cursor is off by default, written as smooth_cursor with DCS.exe's folder for the cursor images", () =>
+{
+    Require(!new VrProfile().SmoothCursor && JsonData.Deserialize<VrProfile>("{\"id\":\"legacy\"}").SmoothCursor == false);
+    var off = ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia });
+    Require(off.Contains("\nsmooth_cursor=0") && off.Split('\n').Any(l => l.TrimEnd('\r') == "cursor_templates="), "off, no folder");
+    var on = ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia, SmoothCursor = true }, @"E:\DCS World\bin");
+    Require(on.Contains("smooth_cursor=1") && on.Contains(@"cursor_templates=E:\DCS World\bin")
+        && on.IndexOf("smooth_cursor=1", StringComparison.Ordinal) < on.IndexOf("[diagnostics]", StringComparison.Ordinal), "in the [ofxr] section");
+    var round = JsonData.Deserialize<VrProfile>(JsonData.Serialize(new VrProfile { SmoothCursor = true }));
+    Require(round.SmoothCursor, "kept in the profile");
+    // Without DCS's cursor images next to DCS.exe the layer falls back; validation says so, as information only.
+    var bin = Path.Combine(root, "smooth-cursor/bin"); Directory.CreateDirectory(bin); var exe = Path.Combine(bin, "DCS.exe"); File.WriteAllText(exe, "fixture");
+    var inventory = new InventorySnapshot { DcsExecutable = exe };
+    var issues = ProfileValidation.Validate(new VrProfile { FrameGen = FrameGeneration.Nvidia, SmoothCursor = true }, inventory);
+    Require(issues.Single(i => i.Code == "smooth-cursor-images").Severity == IssueSeverity.Info);
+    File.WriteAllText(Path.Combine(bin, "Visualizer.dll"), "fixture");
+    Require(ProfileValidation.Validate(new VrProfile { FrameGen = FrameGeneration.Nvidia, SmoothCursor = true }, inventory).All(i => i.Code != "smooth-cursor-images"));
+    Require(ProfileValidation.Validate(new VrProfile { FrameGen = FrameGeneration.Off, SmoothCursor = true }, new InventorySnapshot { DcsExecutable = Path.Combine(root, "smooth-cursor/none/DCS.exe") }).All(i => i.Code != "smooth-cursor-images"));
+});
 Test("The DCS launcher is refused only inside a job that forbids breakaway, before anything is written", () =>
 {
     Require(new LaunchSafety.JobState(true, 0x2000).BlocksBreakaway && !new LaunchSafety.JobState(true, 0x800).BlocksBreakaway
@@ -579,6 +598,9 @@ Test("Software Quad Views plus framegen deploys per-process configuration", () =
     // Quad Views composites its four views; the fork build creates private swapchains only for the submitted pair.
     Require(Hashing.BytesSha256(plan.Files.Single(f => f.Path.EndsWith("XR_APILAYER_XRFrameBridge_diagnostic.dll")).Content) == Hashing.FileSha256(DeferredOfxr));
     Require(Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content).Contains("d3d11_bridge=1"));
+    // 0010: the smooth cursor's images are read from DCS.exe's own folder when the game has not loaded them.
+    var ofxrIni = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content);
+    Require(ofxrIni.Contains("smooth_cursor=0") && ofxrIni.Contains("cursor_templates=" + Path.GetDirectoryName(Path.GetFullPath(exe))), "cursor_templates is DCS.exe's folder");
     var store = new OriginalsStore(Path.Combine(root, "originals/quad")); store.Apply(plan); var text = File.ReadAllText(plan.LaunchEnvironment["DCSVR_QUAD_SETTINGS"]); Require(text.Contains("[exe:DCS]")); Require(text.Contains("turbo_mode=0")); Require(text.Contains("stereo_output_multiplier=1")); Require(store.RestoreOriginals().Complete);
 });
 Test("Cheeky and OFXR stereo stack installs and restores in isolated fixture", () =>

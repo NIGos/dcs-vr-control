@@ -54,7 +54,9 @@ public static class ConfigurationWriters
 
         """;
 
-    public static string Ofxr(VrProfile p) => $"""
+    /// <summary>OFXR's ini. <paramref name="cursorTemplates"/> is the folder holding DCS's Visualizer.dll (DCS.exe's own),
+    /// where the smooth cursor finds the cursor images if the running game has not loaded them.</summary>
+    public static string Ofxr(VrProfile p, string? cursorTemplates = null) => $"""
         [ofxr]
         enabled={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         motion_vectors=off
@@ -67,6 +69,8 @@ public static class ConfigurationWriters
         nvidia_input_scale={p.NvidiaFlowScale}
         nvidia_bidirectional={(p.BidirectionalFlow ? 1 : 0)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
+        smooth_cursor={(p.SmoothCursor ? 1 : 0)}
+        cursor_templates={cursorTemplates ?? ""}
 
         [diagnostics]
         logging_enabled={(p.DiagnosticRecorder ? 1 : 0)}

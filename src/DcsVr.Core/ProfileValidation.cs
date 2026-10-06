@@ -135,6 +135,9 @@ public static class ProfileValidation
             if (GazeBridge.Required(profile) && GazeBridge.Find(inventory) is null && !GazeBridge.RuntimeProvidesGaze(inventory))
                 issues.Add(new("gaze-bridge-missing", IssueSeverity.Warning, "No enabled OpenXR gaze bridge was found. Eye-tracked focus on the Sboys route falls back to a fixed focus region until OpenXR-Eye-Trackers is installed."));
             if (inventory.DcsExecutable is null) Error("dcs-not-found", "Select the DCS executable you use for rendering.");
+            else if (profile.SmoothCursor && profile.FrameGen != FrameGeneration.Off &&
+                     !File.Exists(Path.Combine(Path.GetDirectoryName(inventory.DcsExecutable) ?? "", "Visualizer.dll")))
+                issues.Add(new("smooth-cursor-images", IssueSeverity.Info, "Smooth mouse cursor: DCS's cursor images (Visualizer.dll) are not next to DCS.exe. Frame generation reads them from the running game, or uses a plain arrow."));
             if (inventory.OptionsPath is null) Error("options-not-found", "Select your DCS Config/options.lua file.");
             if (profile.Runtime == RuntimeKind.SboysSteamVr && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
                 Error("steamvr-not-found", "SteamVR OpenXR manifest not found.");

@@ -40,6 +40,10 @@ public sealed record VrProfile
     /// which absorbs DCS frame-time spikes at the cost of about one refresh period of latency (11 ms at 90 Hz). Applies
     /// to 2×, 3× and Auto (fork patch 0007); in 3× the extra slot is taken only under sustained lateness.</summary>
     public bool FrameGenDeepPipeline { get; init; } = true;
+    /// <summary>OFXR smooth_cursor (fork patch 0010): generated frames find DCS's mouse cursor in the two real frames
+    /// and draw it at its in-between position, so it moves at the headset's rate instead of fading between two places.
+    /// Only the generated frames change; where a click lands does not. Off by default until flown.</summary>
+    public bool SmoothCursor { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored
