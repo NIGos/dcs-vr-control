@@ -85,6 +85,33 @@ The fix (`components/boost/prefetch_fix.dll`, source in `native/prefetch_fix`) i
 - Keep OFXR file flushing buffered and neural logs sampled. Recorder/overlay controls are optional; no unmeasured speedup is claimed.
 - Expose the additional focus sharpening pass instead of silently removing it. Preserve original image quality defaults and allow custom motion analysis.
 
+## Optimization round, October 2026
+
+An audit of our own code (OFXR fork, Cheeky, Quad Views edits, the app), every change measured or proved equivalent offline on the RTX 5090. Not yet flown.
+
+| Change | Where | Measured | Image |
+| --- | --- | --- | --- |
+| The composition's bilinear samples of both frames through the texture unit (one filtered fetch instead of four loads) | OFXR 0012 | Composition −15 % at 5424×5356 (1587 → 1354 µs per pair), −16 % at 2712×2678 | NVIDIA quality fixtures' error against the true intermediate the same or lower (moving scene 25.7 → 22.9 and 32.2 → 27.5 mean absolute error) |
+| 3X composes both synthetics in one pass (two render targets) | OFXR 0012 | Composition −3 to −5 % per 3X pair (75 µs at 5424×5356) | Bit-identical to one pass per synthetic on the RTX 5090 (0 differing bytes) |
+| One eye per synthesizer: no separate timing-marker list and its queue wait; composition and current copy in one submission | OFXR 0012 | 2 submissions and 1 queue wait fewer per eye per pair on the xrEndFrame path | None |
+| Per-image swapchain calls logged only when slow or failed | OFXR 0011 | About two thirds fewer log lines (each a synchronous write on DCS's render thread) | None |
+| The two focus views share the transport textures (colour, depth, motion vectors, output) | Cheeky | About 57 MB | None (the views run strictly one after the other) |
+| The two focus views share DLSS-NR's intermediate textures | Cheeky | About 34 MB | None (nothing in them outlives the frame) |
+| Idle views of earlier missions give back their private resources | Cheeky | About 1.0 GB after a light mission, 0.5 GB after a heavy one (flown) | None |
+| Transport timing read without flushing DCS's context | Cheeky | No extra command-buffer flush | None |
+| DLSS-NR encode/decode take one texel where every bilinear sample falls on a texel centre (working scale 1.0, the default) | Cheeky | Decode 3 loads per pixel instead of 9, encode's proxy 1 instead of 4 | Bit-identical |
+
+Looked at and not done, with the reason:
+
+- **Optical-flow inputs shared between work slots** (about 58 MB): the next pair's flow would overwrite buffers the previous composition may still read on another GPU queue; an intermittent corrupted flow is not worth 0.2 % of the VRAM.
+- **Both eyes' packs and flows ahead of both compositions** (about 0.85 ms less latency per pair): DCS's synthesis shares the bridge queue that also orders the D3D11 hand-over and the runtime's images; reordering it touches the image ownership transfers that once lost generated frames on their way to the headset. Not without in-headset testing.
+- **One D3D11 flush per frame instead of one per swapchain** (tens of µs): the private queue would wait on a signal still in an unflushed D3D11 command buffer, a stall or deadlock if anything waits for the GPU meanwhile.
+- **Preparing the private D3D12 device and NGX during the mission load** (the about 1 s hitch on the first focus frame): NGX initialization would run on another thread while DCS creates its own DLSS features on the render thread; NGX makes no thread-safety promise.
+- **Cheeky's final composite as a plain copy in whole-view mode** and **batched resource barriers**: the composite has too many conditions (shape, feather, debug borders, resampling) to prove the copy identical; batching saves microseconds.
+- **DLSS-NR decode reading the colour in place instead of its copy**: after the two views share the copy it saves 11 MB in all, not worth changing the decode's input.
+- **Upscaling the focus views with DCS's own DX11 DLSS instead of a private D3D12 feature** (possibly about 1 GB): the `VRAM_STAGE` lines Cheeky now logs (device + NGX init, SR feature, DLSS-NR runtime and feature) will say from the next flight how much of the first focus view's 1.4–1.7 GB is the private SR at all.
+- **Focus sharpening on top of DLSS** (two passes and two 34 MB copies): an image choice; the setting is on the Quad Views page.
+
 ## Reproducing the hardware test
 
 Build the source dependencies described in [VALIDATION.md](VALIDATION.md), then run:

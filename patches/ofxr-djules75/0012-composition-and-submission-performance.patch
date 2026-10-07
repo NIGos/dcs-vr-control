@@ -1,0 +1,580 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index dc6065d..39e07e1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -152,6 +152,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+     set(XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+     set(XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_synthesize_midpoint_pixel_shader.hpp")
+     set(XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
++    set(XRFG_NVIDIA_TRIPLE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_triple_synthesize_midpoint_pixel_shader.hpp")
++    set(XRFG_NVIDIA_TRIPLE_BIDIRECTIONAL_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader.hpp")
++    set(XRFG_NVIDIA_TRIPLE_FAST_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_triple_fast_synthesize_midpoint_pixel_shader.hpp")
++    set(XRFG_NVIDIA_TRIPLE_FAST_BIDIRECTIONAL_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp")
+     # DCS VR Control (0010): the smooth cursor's detection.
+     set(XRFG_CURSOR_BEGIN_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_begin_shader.hpp")
+     set(XRFG_CURSOR_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_motion_shader.hpp")
+@@ -174,6 +178,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+             "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+             "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
++            "${XRFG_NVIDIA_TRIPLE_PIXEL_HEADER}"
++            "${XRFG_NVIDIA_TRIPLE_BIDIRECTIONAL_PIXEL_HEADER}"
++            "${XRFG_NVIDIA_TRIPLE_FAST_PIXEL_HEADER}"
++            "${XRFG_NVIDIA_TRIPLE_FAST_BIDIRECTIONAL_PIXEL_HEADER}"
+             "${XRFG_CURSOR_BEGIN_HEADER}"
+             "${XRFG_CURSOR_MOTION_HEADER}"
+             "${XRFG_CURSOR_ARGUMENTS_HEADER}"
+@@ -225,6 +233,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaTripleMidpointPS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_NVIDIA_TRIPLE_PIXEL_HEADER}" /Vn g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaTripleBidirectionalMidpointPS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_NVIDIA_TRIPLE_BIDIRECTIONAL_PIXEL_HEADER}" /Vn g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaTripleFastMidpointPS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_NVIDIA_TRIPLE_FAST_PIXEL_HEADER}" /Vn g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeNvidiaTripleFastBidirectionalMidpointPS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_NVIDIA_TRIPLE_FAST_BIDIRECTIONAL_PIXEL_HEADER}" /Vn g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorBeginCS
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_BEGIN_HEADER}" /Vn g_xrfg_cursor_begin_shader
+@@ -285,6 +309,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
+         "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
+         "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
++        "${XRFG_NVIDIA_TRIPLE_PIXEL_HEADER}"
++        "${XRFG_NVIDIA_TRIPLE_BIDIRECTIONAL_PIXEL_HEADER}"
++        "${XRFG_NVIDIA_TRIPLE_FAST_PIXEL_HEADER}"
++        "${XRFG_NVIDIA_TRIPLE_FAST_BIDIRECTIONAL_PIXEL_HEADER}"
+         "${XRFG_CURSOR_BEGIN_HEADER}"
+         "${XRFG_CURSOR_MOTION_HEADER}"
+         "${XRFG_CURSOR_ARGUMENTS_HEADER}"
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 94312ad..5b57918 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -19,6 +19,10 @@
+ #include "nvidia_pack_flow_input_shader.hpp"
+ #include "nvidia_pack_luma_input_shader.hpp"
+ #include "nvidia_synthesize_midpoint_pixel_shader.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
+ #include "pack_flow_input_shader.hpp"
+ #include "synthesize_midpoint_pixel_shader.hpp"
+ // DCS VR Control (0010): the smooth cursor's detection (smooth_cursor.hlsl).
+@@ -1014,6 +1018,9 @@ struct D3D12FrameSynthesizer::Impl {
+     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
+     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
+     ComPtr<ID3D12PipelineState> nvidia_bidirectional_graphics_pipeline;
++    // (0011) 3X in one pass: both synthetics into two render targets.
++    ComPtr<ID3D12PipelineState> nvidia_triple_graphics_pipeline;
++    ComPtr<ID3D12PipelineState> nvidia_triple_bidirectional_graphics_pipeline;
+     ComPtr<ID3D12Resource> packed_color;
+     ComPtr<ID3D12Resource> optical_flow_vector;
+     ComPtr<ID3D12Resource> optical_flow_scene_change;
+@@ -1299,8 +1306,16 @@ struct D3D12FrameSynthesizer::Impl {
+         D3D12_ROOT_SIGNATURE_DESC root_description{};
+         root_description.NumParameters = static_cast<UINT>(parameters.size());
+         root_description.pParameters = parameters.data();
+-        root_description.NumStaticSamplers = 0;
+-        root_description.pStaticSamplers = nullptr;
++        D3D12_STATIC_SAMPLER_DESC linear_clamp{};
++        linear_clamp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
++        linear_clamp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++        linear_clamp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++        linear_clamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++        linear_clamp.MaxLOD = 0.0F;
++        linear_clamp.ShaderRegister = 0;
++        linear_clamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++        root_description.NumStaticSamplers = 1;
++        root_description.pStaticSamplers = &linear_clamp;
+         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+ 
+         ComPtr<ID3DBlob> serialized;
+@@ -1456,10 +1471,42 @@ struct D3D12FrameSynthesizer::Impl {
+                 sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader),
+             };
+         }
+-        return device->CreateGraphicsPipelineState(
++        result = device->CreateGraphicsPipelineState(
+             &graphics_description,
+             IID_PPV_ARGS(
+                 nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        // DCS VR Control (0011): the 3X single-pass variants. Without them
++        // 3X draws one pass per synthetic as before (also when the
++        // environment sets XRFG_TRIPLE_TWO_PASSES, for comparison).
++        if (GetEnvironmentVariableW(L"XRFG_TRIPLE_TWO_PASSES", nullptr, 0) != 0) {
++            return S_OK;
++        }
++        const bool fast = nvidia_options.preset == D3D12NvidiaPerformancePreset::fast;
++        graphics_description.NumRenderTargets = 2;
++        graphics_description.RTVFormats[1] = view_format;
++        graphics_description.BlendState.RenderTarget[1] = graphics_description.BlendState.RenderTarget[0];
++        graphics_description.PS = fast
++            ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader,
++                  sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader)}
++            : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader,
++                  sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader)};
++        if (FAILED(device->CreateGraphicsPipelineState(&graphics_description,
++                IID_PPV_ARGS(nvidia_triple_graphics_pipeline.GetAddressOf())))) {
++            nvidia_triple_graphics_pipeline.Reset();
++        }
++        graphics_description.PS = fast
++            ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader,
++                  sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader)}
++            : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader,
++                  sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader)};
++        if (FAILED(device->CreateGraphicsPipelineState(&graphics_description,
++                IID_PPV_ARGS(nvidia_triple_bidirectional_graphics_pipeline.GetAddressOf())))) {
++            nvidia_triple_bidirectional_graphics_pipeline.Reset();
++        }
++        return S_OK;
+     }
+ 
+     [[nodiscard]] HRESULT create_fidelityfx_resources(UINT node_mask) {
+@@ -4555,6 +4602,16 @@ struct D3D12FrameSynthesizer::Impl {
+             slot.synthesis_command_list.Get();
+         dred_marker(synthesis, "OFXR NVIDIA composition begin");
+         if (nvidia_gpu_timing_enabled) {
++            // DCS VR Control (0011): with one eye the first eye's flow ends
++            // where the composition begins (the same queue wait precedes
++            // both), so its mark is taken here and the marker list is not
++            // submitted at all.
++            if (image_description.DepthOrArraySize == 1) {
++                synthesis->EndQuery(
++                    nvidia_timestamp_heap.Get(),
++                    D3D12_QUERY_TYPE_TIMESTAMP,
++                    slot.timing_query_base + kNvidiaTimestampEye0End);
++            }
+             synthesis->EndQuery(
+                 nvidia_timestamp_heap.Get(),
+                 D3D12_QUERY_TYPE_TIMESTAMP,
+@@ -4613,7 +4670,77 @@ struct D3D12FrameSynthesizer::Impl {
+             rtv_heap->GetCPUDescriptorHandleForHeapStart();
+         // DCS VR Control (0008): each target view's visibility mask.
+         const auto view_masks = write_view_masks(slot, target_views);
+-        for (UINT output = 0; output < synthetic_output_count(); ++output) {
++        // DCS VR Control (0011): 3X composes both synthetics in one pass.
++        ID3D12PipelineState* const triple_pipeline = nvidia_options.bidirectional
++            ? nvidia_triple_bidirectional_graphics_pipeline.Get()
++            : nvidia_triple_graphics_pipeline.Get();
++        if (synthetic_output_count() == 2U && triple_pipeline != nullptr) {
++            synthesis->SetPipelineState(triple_pipeline);
++            const UINT first_rtvs[2] = {
++                synthetic_output_destination(0, synthetic_destination_index) *
++                    image_description.DepthOrArraySize,
++                synthetic_output_destination(1, synthetic_destination_index) *
++                    image_description.DepthOrArraySize};
++            const UINT second_fraction =
++                packed_synthesis_fraction(synthetic_output_fraction(1)) >> 8U;
++            for (UINT view_index = 0;
++                 view_index < static_cast<UINT>(target_views.size());
++                 ++view_index) {
++                const UINT slice = resolved_array_slice(
++                    target_views[view_index],
++                    view_index,
++                    target_views.size(),
++                    image_description.DepthOrArraySize);
++                parameters.slice = slice;
++                parameters.view_index = view_index;
++                parameters.game_motion_padding = second_fraction;
++                const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
++                    gpu_start,
++                    slice * kDescriptorBlockSize,
++                    descriptor_increment);
++                synthesis->SetGraphicsRootDescriptorTable(0, block);
++                synthesis->SetGraphicsRootDescriptorTable(
++                    1,
++                    offset_gpu_handle(
++                        block,
++                        kSrvDescriptorCount,
++                        descriptor_increment));
++                const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = {
++                    offset_cpu_handle(rtv_start, first_rtvs[0] + slice, rtv_increment),
++                    offset_cpu_handle(rtv_start, first_rtvs[1] + slice, rtv_increment)};
++                set_viewport_and_scissor(
++                    synthesis,
++                    target_views[view_index].image_rect,
++                    static_cast<UINT>(image_description.Width),
++                    image_description.Height);
++                for (UINT output = 0; output < 2U; ++output) {
++                    parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
++                        packed_synthesis_fraction(synthetic_output_fraction(output));
++                    parameters.synthesis_flags = view_masks[view_index].second != 0
++                        ? (parameters.synthesis_flags | 2U)
++                        : (parameters.synthesis_flags & ~2U);
++                    synthesis->SetGraphicsRoot32BitConstants(
++                        2,
++                        kSynthesisConstantCount,
++                        &parameters,
++                        0);
++                    if (output == 0U) {
++                        synthesis->OMSetRenderTargets(2, rtvs, FALSE, nullptr);
++                        draw_view(synthesis, view_masks[view_index]);
++                    }
++                    // The cursor and the marker are per synthetic.
++                    synthesis->OMSetRenderTargets(1, &rtvs[output], FALSE, nullptr);
++                    draw_cursor_region(synthesis, slot, triple_pipeline); // 0010
++                    clear_synthetic_marker(synthesis, rtvs[output], target_views[view_index],
++                        static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
++                }
++            }
++            parameters.game_motion_padding = 0U;
++        }
++        for (UINT output = 0;
++             !(synthetic_output_count() == 2U && triple_pipeline != nullptr) &&
++             output < synthetic_output_count();
++             ++output) {
+             parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+                 packed_synthesis_fraction(synthetic_output_fraction(output));
+             const UINT first_rtv =
+@@ -5433,7 +5560,9 @@ struct D3D12FrameSynthesizer::Impl {
+             queue->ExecuteCommandLists(1, cursor_lists);
+         }
+ 
+-        if (nvidia_gpu_timing_enabled) {
++        const bool marker_list = nvidia_gpu_timing_enabled &&
++            image_description.DepthOrArraySize > 1; // DCS VR Control (0011)
++        if (marker_list) {
+             result = slot.timing_marker_allocator->Reset();
+             if (FAILED(result)) {
+                 synthesis_enabled = false;
+@@ -5508,7 +5637,7 @@ struct D3D12FrameSynthesizer::Impl {
+             preceding_eye_value = next_nvidia_fence_value;
+             if (eye_index == 0) {
+                 eye0_fence_value = next_nvidia_fence_value;
+-                if (nvidia_gpu_timing_enabled) {
++                if (marker_list) {
+                     result = queue->Wait(
+                         nvidia_fence.Get(), eye0_fence_value);
+                     if (FAILED(result)) {
+@@ -5530,9 +5659,13 @@ struct D3D12FrameSynthesizer::Impl {
+             untracked_source = std::move(*newly_acquired);
+             return result;
+         }
++        // DCS VR Control (0011): without a deferred copy the composition and
++        // the current copy go in one submission (the same order, the same
++        // signal after both).
+         ID3D12CommandList* synthesis_lists[] = {
+-            slot.synthesis_command_list.Get()};
+-        queue->ExecuteCommandLists(1, synthesis_lists);
++            slot.synthesis_command_list.Get(),
++            slot.current_copy_command_list.Get()};
++        queue->ExecuteCommandLists(defer_current_copy ? 1U : 2U, synthesis_lists);
+ 
+         // The synthetic's pixels exist once this signals. The current copy
+         // is held back so it is not queued ahead of the synthetic frame.
+@@ -5555,9 +5688,6 @@ struct D3D12FrameSynthesizer::Impl {
+             pending_copy_slot = slot_index;
+             pending_copy_fence_value = completion_value;
+         } else {
+-            ID3D12CommandList* copy_lists[] = {
+-                slot.current_copy_command_list.Get()};
+-            queue->ExecuteCommandLists(1, copy_lists);
+             completion_value = next_fence_value;
+             ++next_fence_value;
+             last_synthetic_fence_value = completion_value;
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index 28e9776..12da1a0 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1,5 +1,10 @@
+ Texture2DArray<float4> PreviousFrame : register(t0);
+ Texture2DArray<float4> CurrentFrame : register(t1);
++// DCS VR Control (0011): the frames' bilinear samples go through the texture
++// unit (one filtered fetch instead of four loads and three lerps); the
++// composition took 15 % less GPU time at 5424x5356 and the NVIDIA quality
++// fixtures' error against the true intermediate frame was the same or lower.
++SamplerState LinearClamp : register(s0);
+ Texture2D<int2> BackwardFlow : register(t2);
+ Texture2D<uint> FlowAuxiliary : register(t3);
+ Texture2D<int2> ForwardFlow : register(t4);
+@@ -69,9 +74,14 @@ uint repeated_capture_flag() {
+ 
+ // An unset field decodes to 0.5, which is the fixed midpoint this shader
+ // used before the layer began deriving it.
++// DCS VR Control (0011): the 3X single pass sets the second synthetic's
++// instant here before composing it.
++static float g_synthesis_fraction = -1.0;
++
+ float synthesis_fraction() {
+     uint packed = (SynthesisFlags >> 8) & 0xffffu;
+-    return packed == 0u ? 0.5 : float(packed) / 65535.0;
++    float fraction = packed == 0u ? 0.5 : float(packed) / 65535.0;
++    return g_synthesis_fraction >= 0.0 ? g_synthesis_fraction : fraction;
+ }
+ 
+ float3 rotate_by_quaternion(float4 quaternion, float3 input_vector) {
+@@ -194,51 +204,15 @@ MappedCoordinate map_source_to_target(
+ }
+ 
+ float4 bilinear_previous_source(float2 coordinate, uint slice) {
+-    float2 bounded = clamp(
+-        coordinate,
+-        float2(0.0, 0.0),
+-        float2(float(Width - 1), float(Height - 1)));
+-    int2 top_left = int2(floor(bounded));
+-    int2 bottom_right = min(
+-        top_left + int2(1, 1),
+-        int2(int(Width) - 1, int(Height) - 1));
+-    float2 fraction = bounded - float2(top_left);
+-    float4 top = lerp(
+-        PreviousFrame.Load(int4(top_left, int(slice), 0)),
+-        PreviousFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
+-        fraction.x);
+-    float4 bottom = lerp(
+-        PreviousFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
+-        PreviousFrame.Load(int4(bottom_right, int(slice), 0)),
+-        fraction.x);
+-    return lerp(top, bottom, fraction.y);
++    float2 size = float2(float(Width), float(Height));
++    float2 bounded = clamp(coordinate, float2(0.0, 0.0), size - 1.0);
++    return PreviousFrame.SampleLevel(LinearClamp, float3((bounded + 0.5) / size, float(slice)), 0.0);
+ }
+ 
+ float4 bilinear_current_source(float2 coordinate, uint slice) {
+-    float2 bounded = clamp(
+-        coordinate,
+-        float2(0.0, 0.0),
+-        float2(float(Width - 1), float(Height - 1)));
+-    int2 top_left = int2(floor(bounded));
+-    int2 bottom_right = min(
+-        top_left + int2(1, 1),
+-        int2(int(Width) - 1, int(Height) - 1));
+-    float2 fraction = bounded - float2(top_left);
+-    // DCS VR Control (0011): on a pixel centre (the composition's own
+-    // fallback sample) the weights are 1, 0, 0, 0: one texel, the same bits.
+-    float4 result = CurrentFrame.Load(int4(top_left, int(slice), 0));
+-    [branch] if (any(fraction != float2(0.0, 0.0))) {
+-        float4 top = lerp(
+-            result,
+-            CurrentFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
+-            fraction.x);
+-        float4 bottom = lerp(
+-            CurrentFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
+-            CurrentFrame.Load(int4(bottom_right, int(slice), 0)),
+-            fraction.x);
+-        result = lerp(top, bottom, fraction.y);
+-    }
+-    return result;
++    float2 size = float2(float(Width), float(Height));
++    float2 bounded = clamp(coordinate, float2(0.0, 0.0), size - 1.0);
++    return CurrentFrame.SampleLevel(LinearClamp, float3((bounded + 0.5) / size, float(slice)), 0.0);
+ }
+ 
+ // The ratio the flow input was packed at, relative to the source image.
+@@ -1112,3 +1086,52 @@ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
+     FullscreenVertex input) : SV_Target {
+     return synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
+ }
++
++// DCS VR Control (0011): 3X in one pass. Both synthetics of a pair are
++// composed by the same pixel - the second at the instant the NVIDIA path
++// carries in GameMotionPadding's low 16 bits (the game-motion branch is the
++// only one that reads that field otherwise) - into two render targets, so
++// the fallback sample, the mapping, the flow, the cost and the masks are
++// fetched once per pixel with the second composition hitting the cache, and
++// the full-screen draw, its rasterization and the mask run once.
++struct TripleOutputs {
++    float4 first : SV_Target0;
++    float4 second : SV_Target1;
++};
++
++float second_synthesis_fraction() {
++    uint packed = GameMotionPadding & 0xffffu;
++    return packed == 0u ? 0.5 : float(packed) / 65535.0;
++}
++
++TripleOutputs SynthesizeNvidiaTripleMidpointPS(FullscreenVertex input) {
++    TripleOutputs output;
++    output.first = synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, true);
++    g_synthesis_fraction = second_synthesis_fraction();
++    output.second = synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, true);
++    return output;
++}
++
++TripleOutputs SynthesizeNvidiaTripleBidirectionalMidpointPS(FullscreenVertex input) {
++    TripleOutputs output;
++    output.first = synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, true);
++    g_synthesis_fraction = second_synthesis_fraction();
++    output.second = synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, true);
++    return output;
++}
++
++TripleOutputs SynthesizeNvidiaTripleFastMidpointPS(FullscreenVertex input) {
++    TripleOutputs output;
++    output.first = synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, true);
++    g_synthesis_fraction = second_synthesis_fraction();
++    output.second = synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, true);
++    return output;
++}
++
++TripleOutputs SynthesizeNvidiaTripleFastBidirectionalMidpointPS(FullscreenVertex input) {
++    TripleOutputs output;
++    output.first = synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
++    g_synthesis_fraction = second_synthesis_fraction();
++    output.second = synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
++    return output;
++}
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index 1420997..f912917 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -4737,6 +4737,29 @@ void test_smooth_cursor(
+         off.feature = false;
+         const CursorRun with = run_cursor_scenario(fixture, backend, nvidia_options, on);
+         const CursorRun without = run_cursor_scenario(fixture, backend, nvidia_options, off);
++        // (0011) The NVIDIA path composes 3X's two synthetics in one pass:
++        // the same frames as one pass per synthetic.
++        if (triple && backend == xrfg::D3D12OpticalFlowBackend::nvidia) {
++            SetEnvironmentVariableW(L"XRFG_TRIPLE_TWO_PASSES", L"1");
++            const CursorRun two_passes = run_cursor_scenario(fixture, backend, nvidia_options, on);
++            SetEnvironmentVariableW(L"XRFG_TRIPLE_TWO_PASSES", nullptr);
++            for (UINT output = 0; output < 2U; ++output) {
++                std::size_t differing = 0;
++                int largest = 0;
++                for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                    for (std::size_t i = 0; i < with.synthetic[output][eye].size(); ++i) {
++                        const int d = std::abs(static_cast<int>(with.synthetic[output][eye][i]) -
++                            static_cast<int>(two_passes.synthetic[output][eye][i]));
++                        differing += d != 0 ? 1U : 0U;
++                        largest = std::max(largest, d);
++                    }
++                }
++                std::cout << "3X single pass " << label << (on.ray ? " cockpit-spot" : "") << " output " << output
++                          << ": differing bytes " << differing << ", largest " << largest << std::endl;
++                require(differing == 0U,
++                    "3X single pass: the synthetics differ from one pass per synthetic");
++            }
++        }
+         // Real frames are never touched.
+         require(with.current_output == with.current_frame && without.current_output == with.current_output,
+             "cursor: the real frame changed");
+@@ -4934,6 +4957,99 @@ void test_cursor_template_decoding() {
+     std::cout << "cursor template decoding and fallback passed\n";
+ }
+ 
++// DCS VR Control (0011): XRFG_TEST_TRIPLE_BENCH=1 on NVIDIA hardware: 3X's
++// composition GPU time per pair, both synthetics in one pass against one
++// pass per synthetic (XRFG_TRIPLE_TWO_PASSES), alternately on the same clocks.
++void bench_triple_composition(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    constexpr UINT kFrames = 3;
++    constexpr int kPairs = 240;
++    struct Pipeline {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{};
++        std::array<ComPtr<ID3D12Resource>, 2> synthetics{};
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++        std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++        std::vector<std::uint64_t> composition;
++        std::vector<std::uint64_t> total;
++    };
++    std::array<Pipeline, 2> pipelines{};
++    StereoPattern background;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        background[eye].resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const RgbaBytes texel = cursor_background_texel((x + 7U * y / 5U) % kCursorWidth, y % kCursorHeight, eye);
++                std::copy(texel.begin(), texel.end(), background[eye].begin() +
++                    static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * width + x) * kBytesPerPixel));
++            }
++        }
++    }
++    for (UINT index = 0; index < pipelines.size(); ++index) {
++        Pipeline& pipeline = pipelines[index];
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            pipeline.sources[frame] = create_source_texture(fixture, width, height);
++            StereoPattern image = background;
++            // A scene that moves a little every frame, so the flow is not zero.
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                std::rotate(image[eye].begin(), image[eye].begin() + frame * 12U * kBytesPerPixel, image[eye].end());
++            }
++            upload_pattern(fixture, pipeline.sources[frame].Get(), image);
++        }
++        for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++        for (auto& t : pipeline.synthetics) t = create_source_texture(fixture, width, height);
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = pipeline.sources[i].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++        std::array<ID3D12Resource*, 2> synthetic_pointers{pipeline.synthetics[0].Get(), pipeline.synthetics[1].Get()};
++        pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "triple bench: history");
++        if (index == 1) SetEnvironmentVariableW(L"XRFG_TRIPLE_TWO_PASSES", L"1");
++        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                    pipeline.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, {}, true)), "triple bench: synthesizer");
++        if (index == 1) SetEnvironmentVariableW(L"XRFG_TRIPLE_TWO_PASSES", nullptr);
++    }
++    const ReprojectionViews views = make_reprojection_views();
++    for (int frame = 0; frame <= kPairs; ++frame) {
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        for (Pipeline& pipeline : pipelines) {
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require(operation_succeeded(pipeline.history->capture(slot, &capture)) &&
++                        operation_succeeded(pipeline.history->commit(capture)), "triple bench: capture");
++            const HRESULT submitted = frame == 0
++                ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                : pipeline.synthesizer->submit_pair(capture, views, views, 0, 1, &ticket, std::nullopt, {}, false,
++                      1.0F / 3.0F, xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F});
++            require(operation_succeeded(submitted), "triple bench: submission");
++            require_frame_start_gate(*pipeline.synthesizer, "triple bench: frame-start gate");
++            xrfg::D3D12NvidiaGpuTiming timing{};
++            while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                if (timing.previous_serial == 0) continue;
++                pipeline.composition.push_back(timing.composition_microseconds);
++                pipeline.total.push_back(timing.total_microseconds);
++            }
++        }
++    }
++    require(operation_succeeded(pipelines[0].synthesizer->wait_for_idle()) &&
++                operation_succeeded(pipelines[1].synthesizer->wait_for_idle()), "triple bench: idle");
++    const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++        if (values.empty()) return 0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    std::cout << "triple bench " << width << "x" << height << " x2 eyes: composition median one pass "
++              << median(pipelines[0].composition) << " us, two passes " << median(pipelines[1].composition)
++              << " us (" << pipelines[0].composition.size() << " pairs); whole pair median one pass "
++              << median(pipelines[0].total) << " us, two passes " << median(pipelines[1].total) << " us" << std::endl;
++}
++
+ // XRFG_TEST_CURSOR_BENCH=1 on NVIDIA hardware: the detection's and the
+ // composition's GPU time at a headset's resolution, the cursor moving every
+ // frame (one acquisition, then tracking), against the feature off.
+@@ -5099,6 +5215,13 @@ int main() {
+             std::cout << "D3D12 NVIDIA smooth cursor tests passed\n";
+             return 0;
+         }
++        if (GetEnvironmentVariableA("XRFG_TEST_TRIPLE_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            bench_triple_composition(bench_fixture, 2712, 2678);
++            bench_triple_composition(bench_fixture, 5424, 5356);
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_CURSOR_BENCH", nullptr, 0)) {
+             D3D12WarpFixture bench_fixture(true);
+             bench_smooth_cursor(bench_fixture, 2560, 2560);

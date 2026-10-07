@@ -489,12 +489,15 @@ value = value[:start] + re.sub(r'\bslot\.(' + texture_fields + r')\b', r'texture
 replace(transport, """    auto& slot = view->slots[view->next_slot++ % transport_slot_count];
     if (!wait_for_slot(*device, context, slot)) {""", """    auto& slot = view->slots[view->next_slot++ % transport_slot_count];
     auto& textures = view->textures;
-    if (view->unordered) {
+    // Shared textures (create_shared_texture): any unordered view orders them all.
+    const bool device_unordered = std::any_of(device->views.begin(), device->views.end(),
+        [](const TransportView& other) { return other.unordered; });
+    if (device_unordered) {
         if (!wait_for_transport_idle(*device, context)) {
             release(context4);
             return reject_transport(D3D11TransportStatus::transport_slot_busy);
         }
-        view->unordered = false;
+        for (auto& other : device->views) other.unordered = false;
     }
     if (!wait_for_slot(*device, context, slot)) {""")
 replace(transport, """    if (!slot_matches(
@@ -1159,5 +1162,190 @@ replace(transport, '''    if (context->GetData(slot.timing_disjoint, &disjoint, 
     if (context->GetData(slot.timing_disjoint, &disjoint, sizeof(disjoint), no_flush) != S_OK ||
         context->GetData(slot.timing_begin, &begin, sizeof(begin), no_flush) != S_OK ||
         context->GetData(slot.timing_end, &end, sizeof(end), no_flush) != S_OK) {''')
+
+# One set of transport textures for the device's views. Nothing in them
+# outlives a frame (every frame transitions them COMMON -> use -> COMMON), and
+# the views run strictly one after the other: D3D11 queues its wait for a
+# view's private D3D12 work before any later D3D11 command, the next view's
+# input copies included. So the two Quad Views focus views can use the same
+# textures; a view adopts another view's texture of the same role, size,
+# format and flags (one COM reference each, so either view's release keeps
+# the other's alive). An unordered view (an error path that could not queue
+# that wait) now makes every view of the device wait on the CPU.
+replace(transport, '''    if (texture.resource12 && texture.texture11 && texture.width == width &&
+        texture.height == height && texture.format == format && texture.flags == flags) return true;
+''', '''    if (texture.resource12 && texture.texture11 && texture.width == width &&
+        texture.height == height && texture.format == format && texture.flags == flags) return true;
+    // DCS VR Control: another view's texture in the same role (the same member
+    // of TransportTextures), size, format and flags, shared with one more
+    // reference instead of a new allocation.
+    const TransportTextures* own{};
+    for (const auto& view : device.views) {
+        const auto* begin = reinterpret_cast<const char*>(&view.textures);
+        const auto* at = reinterpret_cast<const char*>(&texture);
+        if (at >= begin && at < begin + sizeof(TransportTextures)) { own = &view.textures; break; }
+    }
+    if (own) {
+        const auto offset = reinterpret_cast<const char*>(&texture) - reinterpret_cast<const char*>(own);
+        for (const auto& view : device.views) {
+            if (&view.textures == own) continue;
+            const auto& other = *reinterpret_cast<const SharedTexture*>(
+                reinterpret_cast<const char*>(&view.textures) + offset);
+            if (!other.resource12 || !other.texture11 || other.width != width || other.height != height ||
+                other.format != format || other.flags != flags) continue;
+            release_shared_texture(texture);
+            texture = other;
+            texture.resource12->AddRef();
+            texture.texture11->AddRef();
+            if (texture.uav11) texture.uav11->AddRef();
+            trace_event("Transport texture %s %ux%u shared with view=%llu", label, width, height,
+                static_cast<unsigned long long>(view.view_id));
+            return true;
+        }
+    }
+''')
+
+
+# DLSS-NR's three intermediate textures (original HDR output, colour proxy,
+# neural output) hold nothing past the frame that writes them (the model's
+# history lives in the NR feature), and the private D3D12 work of the views is
+# serialized as above. Every cache entry of the same sizes on the same device
+# therefore uses one set (one COM reference each), instead of one per view.
+replace('src/dlss_nr.cpp', '''    if (!gpu.border_only) {
+        result = device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &texture,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&gpu.original_output)
+        );''', '''    // DCS VR Control: adopt another cache entry's intermediates of the same sizes.
+    bool dcs_adopted{};
+    if (!gpu.border_only) {
+        for (auto& other_view : views) {
+            for (auto& other : other_view.gpu_resources) {
+                if (dcs_adopted || &other == &gpu || other.border_only || !other.original_output ||
+                    !other.color_proxy || !other.neural_output || other.width != gpu.width ||
+                    other.height != gpu.height || other.working_width != working_width ||
+                    other.working_height != working_height) continue;
+                ID3D12Device* other_device{};
+                if (FAILED(other.original_output->GetDevice(IID_PPV_ARGS(&other_device)))) continue;
+                const bool same_device = other_device == device;
+                other_device->Release();
+                if (!same_device) continue;
+                gpu.original_output = other.original_output; gpu.original_output->AddRef();
+                gpu.color_proxy = other.color_proxy; gpu.color_proxy->AddRef();
+                gpu.neural_output = other.neural_output; gpu.neural_output->AddRef();
+                dcs_adopted = true;
+                trace_event("DLSS-NR intermediates %ux%u (working %ux%u) shared between views",
+                    gpu.width, gpu.height, working_width, working_height);
+            }
+        }
+    }
+    if (!gpu.border_only && !dcs_adopted) {
+        result = device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &texture,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&gpu.original_output)
+        );''')
+
+# DLSS-NR's encode and decode sample their textures bilinearly; at working
+# scale 1.0 (the default) every sample falls on a texel centre, where the
+# weights are 1, 0, 0, 0. One load then gives the same bits as four.
+replace('src/nr_codec_shader.hpp', '''    return lerp(
+        lerp(Source0.Load(int3(p00, 0)), Source0.Load(int3(p10, 0)), fraction.x),
+        lerp(Source0.Load(int3(p01, 0)), Source0.Load(int3(p11, 0)), fraction.x),
+        fraction.y
+    );''', '''    float4 result = Source0.Load(int3(p00, 0));
+    [branch] if (any(fraction != float2(0.0, 0.0))) {
+        result = lerp(
+            lerp(result, Source0.Load(int3(p10, 0)), fraction.x),
+            lerp(Source0.Load(int3(p01, 0)), Source0.Load(int3(p11, 0)), fraction.x),
+            fraction.y
+        );
+    }
+    return result;''')
+replace('src/nr_codec_shader.hpp', '''    return lerp(
+        lerp(Source1.Load(int3(p00, 0)), Source1.Load(int3(p10, 0)), fraction.x),
+        lerp(Source1.Load(int3(p01, 0)), Source1.Load(int3(p11, 0)), fraction.x),
+        fraction.y
+    );''', '''    float4 result = Source1.Load(int3(p00, 0));
+    [branch] if (any(fraction != float2(0.0, 0.0))) {
+        result = lerp(
+            lerp(result, Source1.Load(int3(p10, 0)), fraction.x),
+            lerp(Source1.Load(int3(p01, 0)), Source1.Load(int3(p11, 0)), fraction.x),
+            fraction.y
+        );
+    }
+    return result;''')
+replace('src/nr_codec_shader.hpp', '''    return lerp(
+        lerp(Source2.Load(int3(p00, 0)), Source2.Load(int3(p10, 0)), fraction.x),
+        lerp(Source2.Load(int3(p01, 0)), Source2.Load(int3(p11, 0)), fraction.x),
+        fraction.y
+    );''', '''    float4 result = Source2.Load(int3(p00, 0));
+    [branch] if (any(fraction != float2(0.0, 0.0))) {
+        result = lerp(
+            lerp(result, Source2.Load(int3(p10, 0)), fraction.x),
+            lerp(Source2.Load(int3(p01, 0)), Source2.Load(int3(p11, 0)), fraction.x),
+            fraction.y
+        );
+    }
+    return result;''')
+
+# VRAM_STAGE lines: what the private D3D12 path costs in video memory, stage by
+# stage (device + NGX initialization, the private SR feature, the DLSS-NR
+# runtime and feature), to tell which part a saving would come from.
+shutil.copyfile(root / 'patches/cheeky/dcs_vram_probe.hpp', source / 'src/dcs_vram_probe.hpp')
+replace(transport, '#include "depth_formats.hpp"\n', '#include "dcs_vram_probe.hpp"\n#include "depth_formats.hpp"\n')
+replace(transport, '''    TransportDevice created{};
+    if (!create_transport_device(device11, ngx, created)) {''', '''    TransportDevice created{};
+    const double dcs_vram_before = dcs_process_vram_mb();
+    const bool dcs_device_created = create_transport_device(device11, ngx, created);
+    const double dcs_vram_after = dcs_process_vram_mb();
+    trace_event("VRAM_STAGE private D3D12 device + NGX init ok=%u vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
+        dcs_device_created ? 1U : 0U, dcs_vram_before, dcs_vram_after, dcs_vram_after - dcs_vram_before);
+    if (!dcs_device_created) {''')
+backend12 = 'src/d3d12_backend.cpp'
+replace(backend12, '#include "backend.hpp"\n', '#include "backend.hpp"\n#include "dcs_vram_probe.hpp"\n')
+replace(backend12, '''            NgxHandle* created{};
+            result = callbacks.create_feature(
+                command_list,
+                contract.feature_id,
+                parameters,
+                &created
+            );''', '''            NgxHandle* created{};
+            const double dcs_vram_before = dcs_process_vram_mb();
+            result = callbacks.create_feature(
+                command_list,
+                contract.feature_id,
+                parameters,
+                &created
+            );
+            const double dcs_vram_after = dcs_process_vram_mb();
+            trace_event("VRAM_STAGE private SR feature create view=%llu output=%ux%u vram_before_mb=%.1f "
+                "vram_after_mb=%.1f delta_mb=%+.1f", static_cast<unsigned long long>(contract.view_id),
+                crop.output_width, crop.output_height, dcs_vram_before, dcs_vram_after, dcs_vram_after - dcs_vram_before);''')
+nr = 'src/dlss_nr.cpp'
+replace(nr, '#include "dlss_nr_input.hpp"\n', '#include "dlss_nr_input.hpp"\n#include "dcs_vram_probe.hpp"\n', count=1)
+replace(nr, '''    const auto result = initialize(''', '''    const double dcs_vram_before = dcs_process_vram_mb();
+    const auto result = initialize(''')
+replace(nr, '''    trace_event("DLSS-NR 310.8 feature-18 runtime initialized");''', '''    trace_event("DLSS-NR 310.8 feature-18 runtime initialized");
+    trace_event("VRAM_STAGE DLSS-NR runtime init vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
+        dcs_vram_before, dcs_process_vram_mb(), dcs_process_vram_mb() - dcs_vram_before);''')
+replace(nr, '''    constexpr std::uint32_t neural_feature_id = 18U;
+    result = runtime.create_feature(''', '''    constexpr std::uint32_t neural_feature_id = 18U;
+    const double dcs_vram_before_feature = dcs_process_vram_mb();
+    result = runtime.create_feature(''')
+replace(nr, '''    view.settings_signature = 0U;
+    trace_event(
+        "DLSS-NR feature 18 created view=%llu''', '''    view.settings_signature = 0U;
+    trace_event("VRAM_STAGE DLSS-NR feature create view=%llu input=%ux%u vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
+        static_cast<unsigned long long>(frame.view_id), working_width, working_height, dcs_vram_before_feature,
+        dcs_process_vram_mb(), dcs_process_vram_mb() - dcs_vram_before_feature);
+    trace_event(
+        "DLSS-NR feature 18 created view=%llu''')
 
 print('Applied opt-in DCS quad focus adapter to the pinned Cheeky source.')

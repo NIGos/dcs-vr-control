@@ -267,11 +267,31 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
             require(ngx_succeeded(create(context, 1, &parameters, &later)) && later &&
                 log_count("DCS deferred DX11 DLSS create") == deferred_creates + 1U &&
                 counter(core, "CheekyFakeCreates") == creates0, "Creation with DLSS 5 off is deferred too");
-            require(ngx_succeeded(release(later)) && counter(core, "CheekyFakeReleases") == releases0, "Release of the never-used feature");
+            // Two focus views on the private SR, frame after frame: the second adopts the first's
+            // transport textures (same role, size, format) and both keep producing their output.
+            const auto shared_before = log_count("shared with view=");
+            const auto allocations_before = allocations();
+            for (unsigned i = 0; i < 4; ++i) {
+                dcs_clear(device, context, output, sentinel);
+                frame(later, true);
+                require(output_written(), "The second focus view writes its output");
+                dcs_clear(device, context, output, sentinel);
+                frame(focus, true);
+                require(output_written(), "The first focus view still writes its output");
+            }
+            require(log_count("shared with view=") >= shared_before + 3U && allocations() == allocations_before,
+                "The second focus view shares the first's transport textures instead of allocating its own");
             require(command(attachment, "1\n42\nset_session\nNrEnabled=1"), "DLSS 5 key: on");
             for (unsigned i = 0; i < 6; ++i) frame(focus, true);
             require(nr_evaluates() >= nr_evaluates_off + 6U && contains(snapshot(get), "\"nr\":\"Active\"") &&
                 allocations() == with_nr, "DLSS 5 resumes on the same textures");
+            // DLSS 5 on both focus views: the second shares the first's DLSS-NR intermediates.
+            const auto nr_shared_before = log_count("shared between views");
+            for (unsigned i = 0; i < 6; ++i) { frame(later, true); frame(focus, true); }
+            require(log_count("shared between views") > nr_shared_before && output_written(),
+                "The second focus view shares the first's DLSS-NR intermediates");
+            require(ngx_succeeded(release(later)) && counter(core, "CheekyFakeReleases") == releases0,
+                "Release of the second focus view");
             require(ngx_succeeded(release(focus)) && counter(core, "CheekyFakeReleases") == releases0 &&
                 counter(core, "CheekyFakeCreates") == creates0, "The focus view never created DCS's own feature");
         }
