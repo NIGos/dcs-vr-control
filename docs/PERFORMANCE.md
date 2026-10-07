@@ -99,7 +99,7 @@ An audit of our own code (OFXR fork, Cheeky, Quad Views edits, the app), every c
 | The two focus views share DLSS-NR's intermediate textures | Cheeky | About 34 MB | None (nothing in them outlives the frame) |
 | Idle views of earlier missions give back their private resources | Cheeky | About 1.0 GB after a light mission, 0.5 GB after a heavy one (flown) | None |
 | Transport timing read without flushing DCS's context | Cheeky | No extra command-buffer flush | None |
-| DLSS-NR encode/decode take one texel where every bilinear sample falls on a texel centre (working scale 1.0, the default) | Cheeky | Decode 3 loads per pixel instead of 9, encode's proxy 1 instead of 4 | Bit-identical |
+| DLSS-NR encode/decode take one texel where every bilinear sample falls on a texel centre (working scale 1.0, the default) | Cheeky | Decode 3 loads per pixel instead of 9, encode's proxy 1 instead of 4 | Identical for every finite value |
 
 Looked at and not done, with the reason:
 

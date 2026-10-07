@@ -1305,8 +1305,9 @@ replace(transport, '''    TransportDevice created{};
     const double dcs_vram_before = dcs_process_vram_mb();
     const bool dcs_device_created = create_transport_device(device11, ngx, created);
     const double dcs_vram_after = dcs_process_vram_mb();
-    trace_event("VRAM_STAGE private D3D12 device + NGX init ok=%u vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
-        dcs_device_created ? 1U : 0U, dcs_vram_before, dcs_vram_after, dcs_vram_after - dcs_vram_before);
+    if (dcs_device_created) // Failed attempts retry every 5 s; only the one that succeeds is measured.
+        trace_event("VRAM_STAGE private D3D12 device + NGX init vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
+            dcs_vram_before, dcs_vram_after, dcs_vram_after - dcs_vram_before);
     if (!dcs_device_created) {''')
 backend12 = 'src/d3d12_backend.cpp'
 replace(backend12, '#include "backend.hpp"\n', '#include "backend.hpp"\n#include "dcs_vram_probe.hpp"\n')
@@ -1333,8 +1334,9 @@ replace(nr, '#include "dlss_nr_input.hpp"\n', '#include "dlss_nr_input.hpp"\n#in
 replace(nr, '''    const auto result = initialize(''', '''    const double dcs_vram_before = dcs_process_vram_mb();
     const auto result = initialize(''')
 replace(nr, '''    trace_event("DLSS-NR 310.8 feature-18 runtime initialized");''', '''    trace_event("DLSS-NR 310.8 feature-18 runtime initialized");
+    const double dcs_vram_after = dcs_process_vram_mb();
     trace_event("VRAM_STAGE DLSS-NR runtime init vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
-        dcs_vram_before, dcs_process_vram_mb(), dcs_process_vram_mb() - dcs_vram_before);''')
+        dcs_vram_before, dcs_vram_after, dcs_vram_after - dcs_vram_before);''')
 replace(nr, '''    constexpr std::uint32_t neural_feature_id = 18U;
     result = runtime.create_feature(''', '''    constexpr std::uint32_t neural_feature_id = 18U;
     const double dcs_vram_before_feature = dcs_process_vram_mb();
@@ -1342,9 +1344,10 @@ replace(nr, '''    constexpr std::uint32_t neural_feature_id = 18U;
 replace(nr, '''    view.settings_signature = 0U;
     trace_event(
         "DLSS-NR feature 18 created view=%llu''', '''    view.settings_signature = 0U;
+    const double dcs_vram_after_feature = dcs_process_vram_mb();
     trace_event("VRAM_STAGE DLSS-NR feature create view=%llu input=%ux%u vram_before_mb=%.1f vram_after_mb=%.1f delta_mb=%+.1f",
         static_cast<unsigned long long>(frame.view_id), working_width, working_height, dcs_vram_before_feature,
-        dcs_process_vram_mb(), dcs_process_vram_mb() - dcs_vram_before_feature);
+        dcs_vram_after_feature, dcs_vram_after_feature - dcs_vram_before_feature);
     trace_event(
         "DLSS-NR feature 18 created view=%llu''')
 
