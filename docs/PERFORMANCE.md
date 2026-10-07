@@ -100,6 +100,11 @@ An audit of our own code (OFXR fork, Cheeky, Quad Views edits, the app), every c
 | Idle views of earlier missions give back their private resources | Cheeky | About 1.0 GB after a light mission, 0.5 GB after a heavy one (flown) | None |
 | Transport timing read without flushing DCS's context | Cheeky | No extra command-buffer flush | None |
 | DLSS-NR encode/decode take one texel where every bilinear sample falls on a texel centre (working scale 1.0, the default) | Cheeky | Decode 3 loads per pixel instead of 9, encode's proxy 1 instead of 4 | Identical for every finite value |
+| Quad Views composition: pixels outside the focus area return the stereo image without the focus calculations | Quad Views | 0.01–0.03 ms per frame at 5400×5400 with a 2076 focus area on the RTX 5090 (5.960 → 5.926 ms without sharpening) | Identical (0 differing pixels, 8 cases: round and rectangular, offsets, sharpening on and off) |
+| Quad Views composition and sharpening views created once per swapchain image instead of every frame (10 D3D11 views per frame) | Quad Views | CPU time on DCS's render thread, not measured on its own | None |
+| Focus sharpening skips the tiles wholly outside the round focus area | Quad Views | About a fifth of the sharpening dispatch; inside the GPU time above | Identical (same harness) |
+| Cheeky's focus composite reuses its shader and UAV views (6 created per frame before) | Cheeky | CPU time on DCS's render thread; views dropped with idle views between missions | None |
+| Cheeky captures and restores only the DLSS creation parameters DCS actually set | Cheeky | Fewer NGX parameter calls per feature push | None (unset keys stay unset) |
 
 Looked at and not done, with the reason:
 
@@ -110,6 +115,12 @@ Looked at and not done, with the reason:
 - **Cheeky's final composite as a plain copy in whole-view mode** and **batched resource barriers**: the composite has too many conditions (shape, feather, debug borders, resampling) to prove the copy identical; batching saves microseconds.
 - **DLSS-NR decode reading the colour in place instead of its copy**: after the two views share the copy it saves 11 MB in all, not worth changing the decode's input.
 - **Upscaling the focus views with DCS's own DX11 DLSS instead of a private D3D12 feature** (possibly about 1 GB): the `VRAM_STAGE` lines Cheeky now logs (device + NGX init, SR feature, DLSS-NR runtime and feature) will say from the next flight how much of the first focus view's 1.4–1.7 GB is the private SR at all.
+- **Skipping Cheeky's save and restore of its private DLSS parameters**: Reset and the exposure texture would stick across calls.
+- **Caching Cheeky's environment switches**: the tests and the hotkey change them while running; a few microseconds.
+- **Trimming Cheeky's D3D11 binding save and restore**: the render target has to be unbound around its copies; the rest is microseconds.
+- **Reordering Cheeky's feature adoption ahead of the cheaper checks**: it changes which feature a view adopts in edge cases.
+- **OFXR writing the real frame during synthesis instead of a separate copy** (about 0.07 ms per eye): touches many paths and the sRGB formats; after a flight with the current build.
+- **Sharpening merged into the composition, 8-bit sharpening, a visibility mask in the optical flow**: each changes the image.
 - **Focus sharpening on top of DLSS** (two passes and two 34 MB copies): an image choice; the setting is on the Quad Views page.
 
 ## Reproducing the hardware test

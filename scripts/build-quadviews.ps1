@@ -245,5 +245,209 @@ if (-not $pixelShaderText.Contains('focusViewShape')) {
     }
     [IO.File]::WriteAllText($pixelShaderSource, $pixelShaderText)
 }
+# Early out: about nine pixels in ten of the composited image lie outside the focus area (a 0.34 x 0.34 focus section,
+# smaller still inside the round shape). There the focus view's alpha is exactly 0 - outside the rectangle by
+# isInside, outside the circle because smoothstep(1 - width, 1, r) is exactly 1 for r >= 1 - so the composition is
+# the stereo colour through the same alpha handling. Those pixels now skip the focus sample and the mask maths. The
+# debug view of the focus layer keeps the full path. The focus sample is taken at level 0 (the view has one mip
+# level; the sampler is the same), as gradients are not available in the branch.
+$pixelShaderText = [IO.File]::ReadAllText($pixelShaderSource)
+if (-not $pixelShaderText.Contains('DCSVR early out')) {
+    $nl = if ($pixelShaderText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        ,@('    float4 color1 = sourceFocusTexture.Sample(sourceSampler, layer1TexCoord);',
+          (('    // DCSVR early out: no focus contribution here, the stereo colour as the full path would leave it.',
+            '    bool focusVisible = all(abs(layer1ProjectedCoordNdc) < 1);',
+            '    if (focusVisible && focusViewShape >= 1) {',
+            '        float2 e = abs(layer1ProjectedCoordNdc);',
+            '        focusVisible = pow(pow(e.x, focusViewShape) + pow(e.y, focusViewShape), 1 / focusViewShape) < 1;',
+            '    }',
+            '    [branch] if (!focusVisible && !debugFocusView) {',
+            '        if (ignoreAlpha) {',
+            '            color0.a = 1;',
+            '        }',
+            '        if (!isUnpremultipliedAlpha) {',
+            '            color0 = unpremultiplyAlpha(color0);',
+            '        }',
+            '        color0 = premultiplyAlpha(color0);',
+            '        return float4(color0.rgb, color0.a);',
+            '    }',
+            '    float4 color1 = sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0);') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($pixelShaderText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views shader changed: $(($edit[0] -split "`n")[0])" }
+        $pixelShaderText = $pixelShaderText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($pixelShaderSource, $pixelShaderText)
+}
+# Cached views: upstream creates the composition's views every frame on the game's render thread (the direct source
+# views, the sharpening UAV and SRV, the composition RTV: five per eye). A view of the same resource with the same
+# description is the same view, so each is created once and kept with the swapchain whose images it views (they live
+# exactly as long as it does) or with the sharpening texture it views (dropped when that is recreated).
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('dcsvrSourceSrv')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @('            ComPtr<ID3D11Texture2D> sharpenedImage[xr::StereoView::Count];',
+          (('            ComPtr<ID3D11Texture2D> sharpenedImage[xr::StereoView::Count];',
+            '            // DCSVR cached views of this swapchain''s images and of the sharpened textures.',
+            '            std::map<ID3D11Texture2D*, ComPtr<ID3D11ShaderResourceView>> dcsvrSourceSrv;',
+            '            std::map<ID3D11Texture2D*, ComPtr<ID3D11RenderTargetView>> dcsvrRtv;',
+            '            ComPtr<ID3D11UnorderedAccessView> dcsvrSharpenedUav[xr::StereoView::Count];',
+            '            ComPtr<ID3D11ShaderResourceView> dcsvrSharpenedSrv[xr::StereoView::Count];') -join $nl)),
+        @((('                            if (SUCCEEDED(m_applicationDevice->CreateShaderResourceView(',
+            '                                    image, &srvDesc, sourceSrv.ReleaseAndGetAddressOf()))) {',
+            '                                swapchain.flatImage[startSlot + viewIndex].Reset();',
+            '                                return sourceSrv;',
+            '                            }') -join $nl),
+          (('                            auto& cachedSrv = swapchain.dcsvrSourceSrv[image];',
+            '                            if (cachedSrv || SUCCEEDED(m_applicationDevice->CreateShaderResourceView(',
+            '                                    image, &srvDesc, cachedSrv.ReleaseAndGetAddressOf()))) {',
+            '                                swapchain.flatImage[startSlot + viewIndex].Reset();',
+            '                                return cachedSrv;',
+            '                            }') -join $nl)),
+        @((('                        CHECK_HRCMD(m_applicationDevice->CreateTexture2D(',
+            '                            &desc, nullptr, swapchainForFocusView.sharpenedImage[viewIndex].ReleaseAndGetAddressOf()));') -join $nl),
+          (('                        CHECK_HRCMD(m_applicationDevice->CreateTexture2D(',
+            '                            &desc, nullptr, swapchainForFocusView.sharpenedImage[viewIndex].ReleaseAndGetAddressOf()));',
+            '                        swapchainForFocusView.dcsvrSharpenedUav[viewIndex].Reset();',
+            '                        swapchainForFocusView.dcsvrSharpenedSrv[viewIndex].Reset();') -join $nl)),
+        @((('                ComPtr<ID3D11UnorderedAccessView> uav;',
+            '                {',
+            '                    D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};',
+            '                    desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;',
+            '                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(',
+            '                        swapchainForFocusView.sharpenedImage[viewIndex].Get(), &desc, uav.ReleaseAndGetAddressOf()));',
+            '                }') -join $nl),
+          (('                ComPtr<ID3D11UnorderedAccessView>& uav = swapchainForFocusView.dcsvrSharpenedUav[viewIndex];',
+            '                if (!uav) {',
+            '                    D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};',
+            '                    desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;',
+            '                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(',
+            '                        swapchainForFocusView.sharpenedImage[viewIndex].Get(), &desc, uav.ReleaseAndGetAddressOf()));',
+            '                }') -join $nl)),
+        @((('                if (m_sharpenFocusView) {',
+            '                    D3D11_SHADER_RESOURCE_VIEW_DESC desc{};',
+            '                    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;',
+            '                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                    desc.Texture2D.MipLevels = 1;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(',
+            '                        swapchainForFocusView.sharpenedImage[viewIndex].Get(),',
+            '                        &desc,',
+            '                        srvForFocusView.ReleaseAndGetAddressOf()));',
+            '                }') -join $nl),
+          (('                if (m_sharpenFocusView) {',
+            '                    ComPtr<ID3D11ShaderResourceView>& sharpenedSrv = swapchainForFocusView.dcsvrSharpenedSrv[viewIndex];',
+            '                    if (!sharpenedSrv) {',
+            '                        D3D11_SHADER_RESOURCE_VIEW_DESC desc{};',
+            '                        desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;',
+            '                        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                        desc.Texture2D.MipLevels = 1;',
+            '                        CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(',
+            '                            swapchainForFocusView.sharpenedImage[viewIndex].Get(),',
+            '                            &desc,',
+            '                            sharpenedSrv.ReleaseAndGetAddressOf()));',
+            '                    }',
+            '                    srvForFocusView = sharpenedSrv;',
+            '                }') -join $nl)),
+        @((('                ComPtr<ID3D11RenderTargetView> rtv;',
+            '                {',
+            '                    D3D11_RENDER_TARGET_VIEW_DESC desc{};',
+            '                    desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;',
+            '                    desc.Format = (DXGI_FORMAT)swapchainForStereoView.createInfo.format;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateRenderTargetView(',
+            '                        destinationImage, &desc, rtv.ReleaseAndGetAddressOf()));',
+            '                }') -join $nl),
+          (('                ComPtr<ID3D11RenderTargetView>& rtv = swapchainForStereoView.dcsvrRtv[destinationImage];',
+            '                if (!rtv) {',
+            '                    D3D11_RENDER_TARGET_VIEW_DESC desc{};',
+            '                    desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;',
+            '                    desc.Format = (DXGI_FORMAT)swapchainForStereoView.createInfo.format;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateRenderTargetView(',
+            '                        destinationImage, &desc, rtv.ReleaseAndGetAddressOf()));',
+            '                }') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
+# Sharpening only what is shown: with the round focus area the composition never reads the focus view outside the
+# circle (alpha exactly 0, early out above), so the sharpening pass skips its 16x16 tiles that lie wholly outside
+# the circle widened by two texels (the composition's bilinear reach). About a fifth of the focus view. The sharpened
+# texture is cleared once when it is created, so a skipped texel holds zero. Off for the rectangle and while the
+# focus layer debug view (which shows the whole focus view) is on.
+$sharpenSource = Join-Path $quadRoot 'openxr-api-layer/SharpeningCS.hlsl'
+$sharpenText = [IO.File]::ReadAllText($sharpenSource)
+if (-not $sharpenText.Contains('dcsvrSkip')) {
+    $nl = if ($sharpenText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @((('    uint4 const0;', '    uint4 const1;', '};') -join $nl),
+          (('    uint4 const0;', '    uint4 const1;',
+            '    // DCSVR: x the round shape exponent (0: off), y the margin in texels, zw the focus view size.',
+            '    float4 dcsvrSkip;', '};') -join $nl)),
+        @('    AU2 gxy = ARmp8x8(LocalThreadId.x) + AU2(WorkGroupId.x << 4u, WorkGroupId.y << 4u);',
+          (('    AU2 gxy = ARmp8x8(LocalThreadId.x) + AU2(WorkGroupId.x << 4u, WorkGroupId.y << 4u);',
+            '    if (dcsvrSkip.x >= 1) {',
+            '        // The tile''s texel nearest the centre, in the composition''s normalized coordinates.',
+            '        float2 size = dcsvrSkip.zw;',
+            '        float2 tileMin = float2(WorkGroupId.xy) * 16.0;',
+            '        float2 nearest = clamp(size * 0.5, tileMin, tileMin + 16.0);',
+            '        float2 e = abs(nearest / size * 2.0 - 1.0);',
+            '        float r = pow(pow(e.x, dcsvrSkip.x) + pow(e.y, dcsvrSkip.x), 1.0 / dcsvrSkip.x);',
+            '        if (r >= 1.0 + 2.0 * dcsvrSkip.y / min(size.x, size.y)) {',
+            '            return;',
+            '        }',
+            '    }') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($sharpenText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views sharpening shader changed: $(($edit[0] -split "`n")[0])" }
+        $sharpenText = $sharpenText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($sharpenSource, $sharpenText)
+}
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('DcsvrSkip')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @((('        alignas(4) uint32_t Const1[4];', '    };') -join $nl),
+          (('        alignas(4) uint32_t Const1[4];', '        alignas(4) float DcsvrSkip[4];', '    };') -join $nl)),
+        @((('                    CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(',
+            '                        swapchainForFocusView.sharpenedImage[viewIndex].Get(), &desc, uav.ReleaseAndGetAddressOf()));',
+            '                }') -join $nl),
+          (('                    CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(',
+            '                        swapchainForFocusView.sharpenedImage[viewIndex].Get(), &desc, uav.ReleaseAndGetAddressOf()));',
+            '                    // A new sharpened texture: zero where the sharpening may skip.',
+            '                    const float zero[4] = {0.f, 0.f, 0.f, 0.f};',
+            '                    m_renderContext->ClearUnorderedAccessViewFloat(uav.Get(), zero);',
+            '                }') -join $nl)),
+        @((('                         (AF1)focusView.subImage.imageRect.extent.width,',
+            '                         (AF1)focusView.subImage.imageRect.extent.height);',
+            '                {') -join $nl),
+          (('                         (AF1)focusView.subImage.imageRect.extent.width,',
+            '                         (AF1)focusView.subImage.imageRect.extent.height);',
+            '                sharpening.DcsvrSkip[0] = m_debugFocusView ? 0.f : m_focusViewShape;',
+            '                sharpening.DcsvrSkip[1] = 2.f;',
+            '                sharpening.DcsvrSkip[2] = (float)focusView.subImage.imageRect.extent.width;',
+            '                sharpening.DcsvrSkip[3] = (float)focusView.subImage.imageRect.extent.height;',
+            '                {') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }
+# The composition with our performance edits against the same shaders without them, on this machine's GPU (WARP
+# without one): every pixel identical for the round and rectangular focus area, with and without sharpening.
+$compositionTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/qv_composition_test.exe'
+New-Item -ItemType Directory -Path (Split-Path -Parent $compositionTest) -Force | Out-Null
+& (Join-Path $PSScriptRoot 'msvc.cmd') cl /nologo /std:c++20 /EHsc /O2 "/Fe:$compositionTest" "/Fo:$(Split-Path -Parent $compositionTest)\" (Join-Path $workspaceRoot 'tests/quadviews-composition/qv_composition_test.cpp') d3d11.lib d3dcompiler.lib
+if ($LASTEXITCODE -ne 0) { throw 'Quad Views composition test build failed.' }
+& $compositionTest (Join-Path $quadRoot 'openxr-api-layer') (Join-Path $quadRoot 'external/FidelityFX-CAS/ffx-cas')
+if ($LASTEXITCODE -ne 0) { throw 'Quad Views composition test failed.' }

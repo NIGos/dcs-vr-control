@@ -81,6 +81,22 @@ using DcsCreateValues = std::array<DcsCreateValue, dcs_create_key_count>;
     return values;
 }
 
+// The current value of one creation key (index into DcsCreateValues).
+void dcs_capture_create_value(const NgxParameters* parameters, std::size_t index, DcsCreateValue& v) noexcept {
+    const bool uint_key = index < std::size(dcs_create_uint_keys);
+    v = {};
+    v.name = uint_key ? dcs_create_uint_keys[index] : dcs_create_int_keys[index - std::size(dcs_create_uint_keys)];
+    unsigned u{}; int i{};
+    if (uint_key) {
+        if (parameters && ngx_succeeded(parameters->Get(v.name, &u))) { v.present = true; v.value = u; }
+        else if (parameters && ngx_succeeded(parameters->Get(v.name, &i))) { v.present = v.is_int = true; v.value = static_cast<unsigned>(i); }
+    } else {
+        v.is_int = true;
+        if (parameters && ngx_succeeded(parameters->Get(v.name, &i))) { v.present = true; v.value = static_cast<unsigned>(i); }
+        else if (parameters && ngx_succeeded(parameters->Get(v.name, &u))) { v.present = true; v.is_int = false; v.value = u; }
+    }
+}
+
 void dcs_apply_create_value(NgxParameters* parameters, const DcsCreateValue& v) noexcept {
     if (v.is_int) parameters->Set(v.name, static_cast<int>(v.value));
     else parameters->Set(v.name, v.value);
@@ -215,7 +231,10 @@ bool dcs_deferred_push_create_values(const NgxHandle* const handle, const NgxPar
     }
     DcsCreateValuesSaved saved{};
     saved.bag = const_cast<NgxParameters*>(parameters);
-    saved.current = dcs_capture_create_values(saved.bag);
+    // Only the keys DCS set at creation are replayed and restored, so only
+    // those are read now (an absent key costs two failed lookups).
+    for (std::size_t i{}; i < create.size(); ++i)
+        if (create[i].present) dcs_capture_create_value(saved.bag, i, saved.current[i]);
     unsigned replayed{};
     for (std::size_t i{}; i < create.size(); ++i) {
         if (!create[i].present) continue;

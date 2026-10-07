@@ -185,6 +185,8 @@ void dcs_trace_feature_create(unsigned route, std::uint32_t feature, const NgxPa
 constexpr std::uint64_t dcs_idle_view_ms = 5000;
 
 void dcs_release_idle_views(const void* created) noexcept {
+    // The composite's cached views may hold the previous mission's targets.
+    dcs_flush_composite_views();
     struct Idle { const void* handle; double idle_s; std::uint64_t evaluations; };
     std::vector<Idle> idle;
     {

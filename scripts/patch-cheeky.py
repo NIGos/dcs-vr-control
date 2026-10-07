@@ -1252,6 +1252,76 @@ replace('src/dlss_nr.cpp', '''    if (!gpu.border_only) {
             IID_PPV_ARGS(&gpu.original_output)
         );''')
 
+# The final composite's views (the game's colour, our DLSS output, the game's
+# output) were created and released on every focus evaluation, six creations a
+# frame on DCS's render thread. A view of the same resource with the default
+# description is the same view: a small ring keeps them. Each kept view holds
+# its resource, so an address cannot be reused while it is cached; an evicted
+# view lets its resource go.
+replace('src/d3d11_backend.cpp', '''bool composite_d3d11_crop(
+    ID3D11DeviceContext* const context,''', '''// DCS VR Control: cached default views for composite_d3d11_crop.
+template<class View>
+struct DcsCompositeViewRing {
+    struct Entry { ID3D11Resource* resource{}; View* view{}; std::uint64_t last_use{}; };
+    std::array<Entry, 8> entries{};
+    std::size_t next{};
+    std::uint64_t uses{};
+};
+std::mutex dcs_composite_view_mutex;
+DcsCompositeViewRing<ID3D11ShaderResourceView> dcs_composite_srvs;
+DcsCompositeViewRing<ID3D11UnorderedAccessView> dcs_composite_uavs;
+
+template<class View, class Create>
+[[nodiscard]] HRESULT dcs_cached_composite_view(DcsCompositeViewRing<View>& ring, ID3D11Resource* const resource,
+    View*& view, Create create) noexcept {
+    std::lock_guard lock(dcs_composite_view_mutex);
+    const std::uint64_t now = ++ring.uses;
+    View* found{};
+    for (auto& entry : ring.entries) {
+        if (!entry.view) continue;
+        if (entry.resource == resource) { entry.last_use = now; found = entry.view; continue; }
+        // A view unused for 64 composites (a few frames) lets its resource go:
+        // the game recreates its targets between missions.
+        if (now - entry.last_use > 64U) { entry.view->Release(); entry = {}; }
+    }
+    if (found) { view = found; view->AddRef(); return S_OK; }
+    const HRESULT result = create(&view);
+    if (FAILED(result)) return result;
+    auto& slot = ring.entries[ring.next++ % ring.entries.size()];
+    if (slot.view) slot.view->Release();
+    slot = {resource, view, now};
+    view->AddRef();
+    return result;
+}
+
+void dcs_flush_composite_views() noexcept {
+    std::lock_guard lock(dcs_composite_view_mutex);
+    for (auto& entry : dcs_composite_srvs.entries) { if (entry.view) entry.view->Release(); entry = {}; }
+    for (auto& entry : dcs_composite_uavs.entries) { if (entry.view) entry.view->Release(); entry = {}; }
+}
+
+bool composite_d3d11_crop(
+    ID3D11DeviceContext* const context,''')
+replace('src/backend.hpp', '''    const Settings& settings
+) noexcept;
+
+[[nodiscard]] D3D11Evaluation* prepare_d3d11(''', '''    const Settings& settings
+) noexcept;
+// DCS VR Control: drops the composite's cached views (a new mission's features).
+void dcs_flush_composite_views() noexcept;
+
+[[nodiscard]] D3D11Evaluation* prepare_d3d11(''')
+replace('src/d3d11_backend.cpp', '''    const bool views_ready = device != nullptr &&
+        SUCCEEDED(device->CreateShaderResourceView(game_color, nullptr, &color_srv)) &&
+        SUCCEEDED(device->CreateShaderResourceView(packed_dlss_output, nullptr, &dlss_srv)) &&
+        SUCCEEDED(device->CreateUnorderedAccessView(game_output, nullptr, &output_uav));''', '''    const bool views_ready = device != nullptr &&
+        SUCCEEDED(dcs_cached_composite_view(dcs_composite_srvs, game_color, color_srv,
+            [&](ID3D11ShaderResourceView** created) { return device->CreateShaderResourceView(game_color, nullptr, created); })) &&
+        SUCCEEDED(dcs_cached_composite_view(dcs_composite_srvs, packed_dlss_output, dlss_srv,
+            [&](ID3D11ShaderResourceView** created) { return device->CreateShaderResourceView(packed_dlss_output, nullptr, created); })) &&
+        SUCCEEDED(dcs_cached_composite_view(dcs_composite_uavs, game_output, output_uav,
+            [&](ID3D11UnorderedAccessView** created) { return device->CreateUnorderedAccessView(game_output, nullptr, created); }));''')
+
 # DLSS-NR's encode and decode sample their textures bilinearly; at working
 # scale 1.0 (the default) every sample falls on a texel centre, where the
 # weights are 1, 0, 0, 0. One load then gives the same bits as four.
