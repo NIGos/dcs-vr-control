@@ -1,0 +1,200 @@
+// DcsQvCull loader: loaded once by Saved Games\DCS\Scripts\Hooks\DcsQvCull.lua.
+// Loads payload\DcsQvCullPayload.dll and reloads it whenever the file changes
+// while DCS runs, so measurements and optimisations can be updated without
+// restarting the game. See loader_api.h for the hook registry contract.
+
+#include <windows.h>
+#include <share.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <map>
+#include <mutex>
+#include <string>
+
+#include "loader_api.h"
+
+namespace {
+
+std::wstring g_dir;
+std::mutex g_logMutex;
+FILE* g_log = nullptr;
+
+void LogLine(const char* line) {
+  std::lock_guard<std::mutex> lock(g_logMutex);
+  if (!g_log) return;
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  fprintf(g_log, "%02d:%02d:%02d.%03d %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, line);
+  fflush(g_log);
+}
+
+void Logf(const char* fmt, ...) {
+  char buf[1024];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  LogLine(buf);
+}
+
+// ---- hook registry ----
+struct Entry {
+  void* original;
+  uint32_t generation;  // payload generation that last patched the slot
+};
+std::mutex g_regMutex;
+std::map<void**, Entry> g_registry;
+uint32_t g_generation = 0;
+
+bool WriteSlot(void** slot, void* value) {
+  DWORD old;
+  if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+  InterlockedExchangePointer(slot, value);
+  VirtualProtect(slot, sizeof(void*), old, &old);
+  return true;
+}
+
+bool ApiPatch(void** slot, void* hook, void** original) {
+  std::lock_guard<std::mutex> lock(g_regMutex);
+  auto it = g_registry.find(slot);
+  if (it == g_registry.end()) it = g_registry.emplace(slot, Entry{*slot, 0}).first;
+  it->second.generation = g_generation;
+  if (original) *original = it->second.original;
+  return WriteSlot(slot, hook);
+}
+
+void* ApiOriginal(void** slot) {
+  std::lock_guard<std::mutex> lock(g_regMutex);
+  auto it = g_registry.find(slot);
+  return it != g_registry.end() ? it->second.original : *slot;
+}
+
+void ApiRestore(void** slot) {
+  std::lock_guard<std::mutex> lock(g_regMutex);
+  auto it = g_registry.find(slot);
+  if (it == g_registry.end()) return;
+  WriteSlot(slot, it->second.original);
+  g_registry.erase(it);
+}
+
+// Restores slots the current generation did not patch.
+void RestoreStale() {
+  std::lock_guard<std::mutex> lock(g_regMutex);
+  for (auto it = g_registry.begin(); it != g_registry.end();) {
+    if (it->second.generation != g_generation) {
+      WriteSlot(it->first, it->second.original);
+      it = g_registry.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+DcsQvLoaderApi g_api;
+
+// ---- payload management ----
+DcsQvPayloadStopFn g_stopActive = nullptr;
+FILETIME g_payloadTime{};
+
+bool LoadPayload(const std::wstring& src) {
+  // Load a uniquely named copy so the deployed file is never locked.
+  wchar_t name[64];
+  swprintf_s(name, L"active_%llu.dll", GetTickCount64());
+  std::wstring copy = g_dir + L"payload\\" + name;
+  if (!CopyFileW(src.c_str(), copy.c_str(), FALSE)) {
+    Logf("loader: copy of payload failed (%lu)", GetLastError());
+    return false;
+  }
+  HMODULE m = LoadLibraryW(copy.c_str());
+  if (!m) {
+    Logf("loader: LoadLibrary of payload failed (%lu)", GetLastError());
+    return false;
+  }
+  auto start = reinterpret_cast<DcsQvPayloadStartFn>(GetProcAddress(m, "DcsQvPayload_Start"));
+  auto stop = reinterpret_cast<DcsQvPayloadStopFn>(GetProcAddress(m, "DcsQvPayload_Stop"));
+  if (!start || !stop) {
+    Logf("loader: payload exports missing");
+    return false;  // module stays loaded but inert
+  }
+  DcsQvPayloadStopFn previous = g_stopActive;
+  if (previous) {
+    Logf("loader: stopping previous payload");
+    previous();  // its worker threads exit; its hooks stay valid until repointed
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_regMutex);
+    ++g_generation;
+  }
+  Logf("loader: starting payload %ls (generation %u)", name, g_generation);
+  if (start(&g_api) != 0) Logf("loader: payload start reported an error");
+  g_stopActive = stop;
+  // The new payload patches from its own worker thread; slots it does not
+  // claim within 60 s are restored by the watcher (see Watcher()).
+  return true;
+}
+
+DWORD WINAPI Watcher(void*) {
+  std::wstring payloadDir = g_dir + L"payload\\";
+  CreateDirectoryW(payloadDir.c_str(), nullptr);
+  // Remove copies left by earlier sessions (not loaded now).
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((payloadDir + L"active_*.dll").c_str(), &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do DeleteFileW((payloadDir + fd.cFileName).c_str());
+    while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  const std::wstring deployed = payloadDir + L"DcsQvCullPayload.dll";
+  const std::wstring ini = g_dir + L"DcsQvCull.ini";
+  std::wstring lastSrc;
+  ULONGLONG staleCheckAt = 0;
+  for (;;) {
+    // Dev mode: [Dev] PayloadPath in the ini points at a developer build
+    // (for example the build folder), hot-reloaded from there; the deployed
+    // payload is used again when the key is cleared or the file is missing.
+    wchar_t dev[MAX_PATH] = {};
+    GetPrivateProfileStringW(L"Dev", L"PayloadPath", L"", dev, MAX_PATH, ini.c_str());
+    std::wstring src = deployed;
+    if (dev[0] && GetFileAttributesW(dev) != INVALID_FILE_ATTRIBUTES) src = dev;
+    if (src != lastSrc) {
+      if (!lastSrc.empty() || src != deployed) Logf("loader: payload source %ls", src.c_str());
+      lastSrc = src;
+      g_payloadTime = FILETIME{};  // force a load from the new source
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(src.c_str(), GetFileExInfoStandard, &fad) &&
+        CompareFileTime(&fad.ftLastWriteTime, &g_payloadTime) != 0) {
+      Sleep(500);  // let the writer finish
+      g_payloadTime = fad.ftLastWriteTime;
+      if (LoadPayload(src)) staleCheckAt = GetTickCount64() + 60000;
+    }
+    if (staleCheckAt && GetTickCount64() > staleCheckAt) {
+      staleCheckAt = 0;
+      RestoreStale();
+    }
+    Sleep(2000);
+  }
+}
+
+}  // namespace
+
+extern "C" __declspec(dllexport) int luaopen_DcsQvCull(void* /*lua_State*/) { return 0; }
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+  if (reason == DLL_PROCESS_ATTACH) {
+    DisableThreadLibraryCalls(module);
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(module, path, MAX_PATH);
+    g_dir = path;
+    g_dir = g_dir.substr(0, g_dir.find_last_of(L"\\/") + 1);
+    g_log = _wfsopen((g_dir + L"DcsQvCull.log").c_str(), L"w", _SH_DENYWR);
+    g_api = DcsQvLoaderApi{kDcsQvLoaderApiVersion, &ApiPatch, &ApiOriginal, &ApiRestore, &LogLine, nullptr};
+    static std::wstring dirCopy = g_dir;
+    g_api.dir = dirCopy.c_str();
+    Logf("DcsQvCull loader started from %ls", path);
+    HANDLE t = CreateThread(nullptr, 0, Watcher, nullptr, 0, nullptr);
+    if (t) CloseHandle(t);
+  }
+  return TRUE;
+}

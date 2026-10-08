@@ -698,6 +698,100 @@ Test("CPU Boost prefetch fix deploys as the loader's dxgi2.dll, only when enable
     Make("prefetch/bin/dxgi2.dll", "other-mod");
     Require(planner.Build(boost, inventory, Path.Combine(root, "prefetch/managed-other")).Files.Single(f => f.Path == Path.Combine(bin, "dxgi2.dll")).ExpectedSha256 == Hashing.BytesSha256(Encoding.UTF8.GetBytes("other-mod")));
 });
+Test("DCS engine optimizations install in Saved Games Scripts with every ini key explicit, and restore removes them and what they wrote", () =>
+{
+    var exe = Make("engine/game/bin/DCS.exe", "fixture"); var options = Make("engine/sg/DCS/Config/options.lua", Lua);
+    var runtime = Make("engine/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("engine/runtime.dll", "fixture");
+    var components = Path.GetDirectoryName(Make("engine/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("engine/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("engine/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+    var otherHook = Make("engine/sg/DCS/Scripts/Hooks/OtherHook.lua", "-- user's own hook");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
+    var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: components));
+    var scripts = Path.GetFullPath(Path.Combine(root, "engine/sg/DCS/Scripts")); var module = Path.Combine(scripts, "DcsQvCull");
+    var off = new VrProfile { QuadViews = QuadProvider.None };
+    Require(planner.Build(off, inventory, Path.Combine(root, "engine/managed-off")).Files.All(f => !f.Path.StartsWith(scripts, StringComparison.OrdinalIgnoreCase)));
+    var on = off with { EngineOptimizations = true };
+    var plan = planner.Build(on, inventory, Path.Combine(root, "engine/managed"));
+    var engineFiles = plan.Files.Where(f => f.Path.StartsWith(scripts, StringComparison.OrdinalIgnoreCase)).Select(f => Path.GetRelativePath(scripts, f.Path)).ToArray();
+    // The hook is written last, so restore removes it first; nothing goes to the DCS install.
+    Require(engineFiles.SequenceEqual([@"DcsQvCull\DcsQvCull.dll", @"DcsQvCull\payload\DcsQvCullPayload.dll", @"DcsQvCull\DcsQvCull.ini", @"Hooks\DcsQvCull.lua"]));
+    Require(plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(exe)!, StringComparison.OrdinalIgnoreCase)));
+    var ini = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content);
+    foreach (var line in new[] { "[General]\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=1\nBenchPartition=1\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
+        Require(ini.ReplaceLineEndings("\n").Contains(line), "DcsQvCull.ini lacks " + line);
+    var tuned = ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false, EnginePartitionBoost = false, EngineTimerRefreshUs = 500, EngineDiagnosticHooks = true });
+    Require(tuned.Contains("ShaderTimeCache=0") && tuned.Contains("PartitionBoost=0") && tuned.Contains("CacheUs=500") && tuned.Contains("Diagnostics=1"));
+    Require(ProfileValidation.Validate(on with { EngineTimerRefreshUs = 100 }).Any(i => i.Code == "engine-timer") && !ProfileValidation.Validate(on).Any(i => i.Code == "engine-timer"));
+    // The in-flight switch: Alt+Shift+F11 by default, Off writes 0:0; the module's own developer keys stay off.
+    Require(ini.Contains("Toggle=122:6") && ini.Contains("DeveloperKeys=0") && ConfigurationWriters.DcsQvCull(on with { EngineToggleKey = "Off" }).Contains("Toggle=0:0"));
+    Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
+    Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
+    Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0" })
+        Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
+    var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false });
+    Require(trimmed.Contains("SlabBytes=4096") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0")
+        && ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false }).Contains("TaskQueueClock=0"));
+    // Developer mode: [Dev] paths only while it is on; full paths to existing files, otherwise refused or flagged.
+    Require(ini.Contains("PayloadPath=\r\n") || ini.Contains("PayloadPath=\n"));
+    var devPayload = Make("engine/dev/build/DcsQvCullPayload.dll", "dev"); var devIni = Make("engine/dev/DcsQvCull.dev.ini", "[Timing]");
+    var dev = on with { EngineDevMode = true, EngineDevPayloadPath = devPayload, EngineDevIniPath = devIni };
+    var devText = ConfigurationWriters.DcsQvCull(dev);
+    Require(devText.Contains("PayloadPath=" + devPayload) && devText.Contains("IniPath=" + devIni) && !ConfigurationWriters.DcsQvCull(dev with { EngineDevMode = false }).Contains(devPayload));
+    Require(!ProfileValidation.Validate(dev).Any(i => i.Code.StartsWith("engine-dev")));
+    Require(ProfileValidation.Validate(dev with { EngineDevIniPath = null }).Any(i => i.Code == "engine-dev" && i.Severity == IssueSeverity.Error));
+    Require(ProfileValidation.Validate(dev with { EngineDevPayloadPath = "relative.dll" }).Any(i => i.Code == "engine-dev"));
+    Require(ProfileValidation.Validate(dev with { EngineDevPayloadPath = devPayload + "\nx.dll" }).Any(i => i.Code == "engine-dev"));
+    Require(ProfileValidation.Validate(dev with { EngineDevPayloadPath = Path.Combine(root, "engine/none.dll") }).Any(i => i.Code == "engine-dev-missing" && i.Severity == IssueSeverity.Warning));
+    Require(ProfileValidation.Validate(on with { NeuralRendering = true, EngineToggleKey = NeuralHotkeys.Default }).Any(i => i.Code == "hotkey-conflict"));
+    Require(!ProfileValidation.Validate(on with { EngineOptimizations = false, NeuralRendering = true, EngineToggleKey = NeuralHotkeys.Default }).Any(i => i.Code == "hotkey-conflict"));
+    // Without the bundled component the profile cannot be planned.
+    Throws<InvalidDataException>(() => new DeploymentPlanner(new(null, null, null)).Build(on, inventory, Path.Combine(root, "engine/managed-missing")));
+
+    var store = new OriginalsStore(Path.Combine(root, "originals/engine"));
+    store.Apply(plan);
+    Require(File.ReadAllText(Path.Combine(scripts, "Hooks", "DcsQvCull.lua")) == "-- hook" && File.ReadAllText(Path.Combine(module, "payload", "DcsQvCullPayload.dll")) == "payload");
+    // Status before DCS ran: installed, not loaded.
+    var dcsLog = Make("engine/sg/DCS/Logs/dcs.log", "");
+    Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: false) is { State: "installed" });
+    // DCS reported a load failure after the install.
+    File.WriteAllText(dcsLog, "2026-10-07 21:00:00.000 ERROR   DcsQvCull (Main): failed to load native module: error loading module\n");
+    File.SetLastWriteTimeUtc(dcsLog, DateTime.UtcNow.AddMinutes(1));
+    Require(EngineOptimizations.Read(options, dcsLog, false) is { State: "failed" } failed && failed.Summary.Contains("failed to load native module"));
+    // What the module writes while DCS runs.
+    var log = Path.Combine(module, "DcsQvCull.log");
+    File.WriteAllText(log, string.Join("\n", "21:00:00.000 loader: starting payload active_1.dll (generation 1)", "21:00:00.100 timer cache: dx11backend!ED_get_time redirected (refresh every 1000 us)",
+        "21:00:01.000 scene: DCSScene at 0000", "21:00:02.000 partition boost: unexpected scene layout (value 7); disabled", "21:00:03.000 stats: OFF timer=cache refresh/s=1000",
+        @"21:00:03.500 loader: payload source C:\dev\build\DcsQvCullPayload.dll", @"21:00:03.600 config: dev mode, settings from C:\dev\DcsQvCull.dev.ini",
+        "21:00:04.000 ==== DcsQvCull test suite 2026-10-07 21:00 ====", "21:00:05.000 stats: OFF timer=cache refresh/s=1000"));
+    File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(1));
+    var status = EngineOptimizations.Read(options, dcsLog, dcsRunning: true);
+    Require(status is { State: "loaded", TimerCacheAvailable: true, TimerCacheActive: true, SceneHooked: true, SuiteRunning: true } && status.Warnings.Count == 1 && status.Warnings[0].Contains("partition boost")
+        && status.Summary.Contains(@"developer payload C:\dev\build\DcsQvCullPayload.dll") && status.Summary.Contains(@"developer settings C:\dev\DcsQvCull.dev.ini"));
+    File.AppendAllText(log, "\n21:07:00.000 suite: report written to report_20261007_210000.txt\n21:07:01.000 stats: OFF timer=real refresh/s=0");
+    Make("engine/sg/DCS/Scripts/DcsQvCull/report_20261007_210000.txt", "==== suite finished ====");
+    status = EngineOptimizations.Read(options, dcsLog, dcsRunning: true);
+    Require(status is { SuiteRunning: false, TimerCacheActive: false } && status.LastReport == Path.Combine(module, "report_20261007_210000.txt"));
+    // The suite needs a running DCS and the installed module; the flag is what the module watches for.
+    Throws<InvalidOperationException>(() => EngineOptimizations.StartSuite(options, dcsRunning: false));
+    EngineOptimizations.StartSuite(options, dcsRunning: true);
+    Require(File.Exists(Path.Combine(module, "run_suite.flag")));
+    Make("engine/sg/DCS/Scripts/DcsQvCull/bench_20261007_210000.csv", "block"); Make("engine/sg/DCS/Scripts/DcsQvCull/payload/active_1.dll", "copy");
+    Make("engine/sg/DCS/Scripts/DcsQvCull/payload/active_2.dll", "copy");
+
+    Require(store.RestoreOriginals().Complete);
+    Require(!Directory.Exists(module) && !File.Exists(Path.Combine(scripts, "Hooks", "DcsQvCull.lua")) && File.ReadAllText(otherHook) == "-- user's own hook");
+    Require(EngineOptimizations.Read(options, dcsLog, false) is { State: "not-installed" });
+});
+Test("Runtime files removed on restore are only declared logs, outputs and module copies inside the component's folder", () =>
+{
+    var owner = Path.GetFullPath(Path.Combine(root, "runtime-files/module"));
+    Require(RuntimeFiles.Allowed(Path.Combine(owner, "x.log"), owner) && RuntimeFiles.Allowed(Path.Combine(owner, "report_*.txt"), owner) && RuntimeFiles.Allowed(Path.Combine(owner, "payload", "active_*.dll"), owner));
+    Require(!RuntimeFiles.Allowed(Path.Combine(owner, "library.dll"), owner) && !RuntimeFiles.Allowed(Path.Combine(owner, "*.exe"), owner) && !RuntimeFiles.Allowed(Path.Combine(owner, "..", "other", "x.log"), owner)
+        && !RuntimeFiles.Allowed(Path.Combine(owner, "*", "x.log"), owner) && !RuntimeFiles.Allowed(Path.Combine(owner, "*.*"), owner) && !RuntimeFiles.Allowed(Path.Combine(owner, "a?.log"), owner) && !RuntimeFiles.Allowed(Path.Combine(owner, "report.txt"), owner));
+    Make("runtime-files/module/payload/active_1.dll", "a"); Make("runtime-files/module/payload/active_1.dllx", "keep"); Make("runtime-files/module/payload/other.dll", "keep");
+    Require(RuntimeFiles.Matching(Path.Combine(owner, "payload", "active_*.dll")).Select(Path.GetFileName).SequenceEqual(["active_1.dll"]));
+});
 string ReleaseFixture(string name, string version, string content)
 {
     var source = Path.Combine(root, "app-sources/" + name);

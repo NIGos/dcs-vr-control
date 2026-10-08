@@ -1,0 +1,52 @@
+/* Vtable slot indices of ID3D11DeviceContext1, taken from the SDK's C
+   interface definitions so they never have to be hard-coded. */
+#define CINTERFACE
+#define COBJMACROS
+#include <stddef.h>
+#include <d3d11_1.h>
+
+#define SLOT(name) (int)(offsetof(ID3D11DeviceContext1Vtbl, name) / sizeof(void*))
+
+int DcsQv_ContextSlot(const char* name) {
+  static const struct {
+    const char* n;
+    int s;
+  } table[] = {
+      {"VSSetConstantBuffers", SLOT(VSSetConstantBuffers)},
+      {"PSSetShaderResources", SLOT(PSSetShaderResources)},
+      {"PSSetShader", SLOT(PSSetShader)},
+      {"PSSetSamplers", SLOT(PSSetSamplers)},
+      {"VSSetShader", SLOT(VSSetShader)},
+      {"DrawIndexed", SLOT(DrawIndexed)},
+      {"Draw", SLOT(Draw)},
+      {"PSSetConstantBuffers", SLOT(PSSetConstantBuffers)},
+      {"IASetInputLayout", SLOT(IASetInputLayout)},
+      {"IASetVertexBuffers", SLOT(IASetVertexBuffers)},
+      {"IASetIndexBuffer", SLOT(IASetIndexBuffer)},
+      {"DrawIndexedInstanced", SLOT(DrawIndexedInstanced)},
+      {"DrawInstanced", SLOT(DrawInstanced)},
+      {"IASetPrimitiveTopology", SLOT(IASetPrimitiveTopology)},
+      {"VSSetShaderResources", SLOT(VSSetShaderResources)},
+      {"VSSetSamplers", SLOT(VSSetSamplers)},
+      {"OMSetRenderTargets", SLOT(OMSetRenderTargets)},
+      {"OMSetRenderTargetsAndUnorderedAccessViews", SLOT(OMSetRenderTargetsAndUnorderedAccessViews)},
+      {"OMSetBlendState", SLOT(OMSetBlendState)},
+      {"OMSetDepthStencilState", SLOT(OMSetDepthStencilState)},
+      {"RSSetState", SLOT(RSSetState)},
+      {"CSSetUnorderedAccessViews", SLOT(CSSetUnorderedAccessViews)},
+      {"ExecuteCommandList", SLOT(ExecuteCommandList)},
+      {"ClearState", SLOT(ClearState)},
+      {"VSSetConstantBuffers1", SLOT(VSSetConstantBuffers1)},
+      {"PSSetConstantBuffers1", SLOT(PSSetConstantBuffers1)},
+      {"SwapDeviceContextState", SLOT(SwapDeviceContextState)},
+      {"SOSetTargets", SLOT(SOSetTargets)},
+      {"FinishCommandList", SLOT(FinishCommandList)},
+  };
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+    const char* a = table[i].n;
+    const char* b = name;
+    while (*a && *a == *b) ++a, ++b;
+    if (*a == 0 && *b == 0) return table[i].s;
+  }
+  return -1;
+}

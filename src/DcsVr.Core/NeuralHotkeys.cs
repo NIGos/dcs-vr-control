@@ -22,6 +22,8 @@ public static class NeuralHotkeys
 {
     public const string Default = "Ctrl+Shift+F12";
     public const string DiagnosticDefault = "Alt+Shift+F12";
+    /// <summary>The DCS engine optimizations' in-flight switch: Alt+Shift+F11, free in DCS's default bindings.</summary>
+    public const string EngineDefault = "122:6";
     /// <summary>The fixed choices of earlier versions, checked free in DCS's default keyboard bindings and the user's own
     /// bindings on 2026-10-04. Profiles may still hold these labels.</summary>
     public static IReadOnlyDictionary<string, (int VirtualKey, int Modifiers)> All { get; } = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase)

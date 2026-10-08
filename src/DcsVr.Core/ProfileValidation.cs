@@ -106,6 +106,21 @@ public static class ProfileValidation
             if (profile.BoostDcsPriority == BoostPriority.High)
                 issues.Add(new("boost-high-priority", IssueSeverity.Warning, "High priority lets DCS take CPU time ahead of the VR compositor, headset services, audio and input handling. When DCS saturates the CPU this can cause stutter, tracking or input lag, or audio dropouts. Above normal is recommended; use High only if you have tested it."));
         }
+        if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
+            Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
+        if (profile.EngineOptimizations && profile.EngineDevMode)
+        {
+            void DevPath(string? path, string extension, string what)
+            {
+                if (string.IsNullOrWhiteSpace(path)) { Error("engine-dev", $"Developer mode needs the {what}."); return; }
+                if (!Path.IsPathFullyQualified(path.Trim()) || !path.Trim().EndsWith(extension, StringComparison.OrdinalIgnoreCase) || path.Any(char.IsControl) || path.Contains(';'))
+                    Error("engine-dev", $"The {what} must be a full path to a {extension} file.");
+                else if (!File.Exists(path.Trim()))
+                    issues.Add(new("engine-dev-missing", IssueSeverity.Warning, $"The {what} does not exist yet ({path.Trim()}); until it does, the module uses its installed copy."));
+            }
+            DevPath(profile.EngineDevPayloadPath, ".dll", "developer payload");
+            DevPath(profile.EngineDevIniPath, ".ini", "developer settings file");
+        }
         if (profile.LowerMonitor && (profile.FlightDisplayWidth is < 640 or > 15360 || profile.FlightDisplayHeight is < 480 or > 8640 || profile.FlightDisplayRefresh is < 24 or > 1000))
             Error("monitor-mode", "Select a monitor mode from the list for Lower the monitor while flying.");
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && (profile.FoveaWidth > .9 || profile.FoveaHeight > .9))
@@ -126,6 +141,16 @@ public static class ProfileValidation
         if (profile.NeuralRendering && profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrKey) && !nrKey.IsOff
             && NeuralHotkeys.Same(profile.NeuralToggleKey ?? NeuralHotkeys.Default, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
             Error("hotkey-conflict", "The DLSS 5 toggle and the diagnostic panel need different keys.");
+        Key(profile.EngineToggleKey, NeuralHotkeys.EngineDefault, profile.EngineOptimizations, "engine-hotkey", "engine optimizations switch");
+        // The module's own keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) stay reserved for it.
+        if (profile.EngineOptimizations && NeuralHotkeys.TryParse(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, out var engineKey) && !engineKey.IsOff)
+        {
+            if (engineKey.Modifiers == 3 && engineKey.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22)
+                Error("engine-hotkey", $"{NeuralHotkeys.Label(engineKey)} is used by the engine optimizations' test suite. Choose another key.");
+            if ((profile.NeuralRendering && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                || (profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault)))
+                Error("hotkey-conflict", "The engine optimizations switch needs a key of its own (the DLSS 5 toggle or the diagnostic panel uses it).");
+        }
         if (profile.NeuralRendering && string.IsNullOrWhiteSpace(profile.NeuralRuntimePath))
             Error("neural-runtime", "Select a compatible NVIDIA nvngx_dlssnr.dll for DLSS 5. The app keeps a verified copy, so it is asked for once.");
         if (inventory is not null)

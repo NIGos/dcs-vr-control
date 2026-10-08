@@ -348,6 +348,8 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         else
         {
             if (File.Exists(original.Path)) File.Delete(original.Path);
+            // Runtime files first, so the folder they leave empty goes too.
+            RemoveRuntimeLogs(original);
             RemoveEmptyCreatedFolder(original);
         }
         RemoveRuntimeLogs(original);
@@ -394,14 +396,14 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         var owner = System.IO.Path.GetDirectoryName(original.Path)!;
         foreach (var log in original.RuntimeLogs)
         {
-            // Only .log files inside the component's own folder tree; never anything that was not declared.
+            // Only declared runtime files inside the component's own folder tree; never anything that was not declared.
             var full = System.IO.Path.GetFullPath(log);
-            if (!full.EndsWith(".log", StringComparison.OrdinalIgnoreCase) || !full.StartsWith(owner + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!RuntimeFiles.Allowed(full, owner)) continue;
             // Best effort: a log held open by a viewer must never leave the restore half done.
             try
             {
                 PathPolicy.RejectReparsePoints(full, owner);
-                if (File.Exists(full)) File.Delete(full);
+                foreach (var file in RuntimeFiles.Matching(full)) File.Delete(file);
                 var folder = System.IO.Path.GetDirectoryName(full)!;
                 if (!folder.Equals(owner, StringComparison.OrdinalIgnoreCase) && System.IO.Directory.Exists(folder) && !System.IO.Directory.EnumerateFileSystemEntries(folder).Any()) System.IO.Directory.Delete(folder);
             }

@@ -54,6 +54,116 @@ public static class ConfigurationWriters
 
         """;
 
+    /// <summary>DcsQvCull.ini for the DCS engine optimizations. Every key the module reads is written: a missing key
+    /// falls back to the module's built-in default, and several of those turn on experiments that measured no gain or a
+    /// loss (peripheral exclusion, the D3D11 state meter, extra suite phases), which stay off here. The test suite
+    /// (run_suite.flag or Ctrl+Alt+F11) compares the two optimizations off and on.</summary>
+    public static string DcsQvCull(VrProfile p) => $"""
+        ; Written by DCS VR Control for the applied profile; edits here are replaced the next time it is applied.
+        ; DcsQvCull re-reads this file every second while DCS runs.
+
+        [General]
+        Diagnostics={(p.EngineDiagnosticHooks ? 1 : 0)}
+        Beeps={(p.EngineBeeps ? 1 : 0)}
+        LowPowerPacer=0
+        LowPowerPacerTimeoutUs=10
+
+        [Timing]
+        ShaderTimeCache={(p.EngineShaderTimeCache ? 1 : 0)}
+        TaskQueueClock={(p.EngineTaskQueueClock && p.EngineShaderTimeCache ? 1 : 0)}
+        CacheUs={Math.Clamp(p.EngineTimerRefreshUs, VrProfile.EngineTimerRefreshMin, VrProfile.EngineTimerRefreshMax)}
+
+        [Hotkeys]
+        ; Switches the optimizations above off and back on in flight ("virtual-key:modifiers", Ctrl 1, Alt 2, Shift 4; 0:0 off).
+        Toggle={NeuralHotkeys.Environment(p.EngineToggleKey, NeuralHotkeys.EngineDefault)}
+        ; The module's developer keys (peripheral exclusion, DebugHole, focus fraction) are off.
+        DeveloperKeys=0
+
+        [Scene]
+        PartitionBoost={(p.EnginePartitionBoost ? 1 : 0)}
+        CostWeights={(p.EngineCostWeights ? 1 : 0)}
+        CostWeightsSanity=0
+        CollectThreadsMax=0
+        FineTimerResolution=0
+
+        [Cull]
+        Enabled=0
+        DebugHole=0
+        FocusKeepFraction=-1
+        SafetyNdc=0.05
+        NativeKeepFraction=0.35
+        SaccadeDeg=1.0
+        SaccadeHoldFrames=6
+        FocusRatio=0.80
+        ApexTolerance=0.02
+
+        [D3D]
+        Meter=0
+        Filter=0
+
+        [Shadow]
+        TightCasters=0
+        DebugInvert=0
+
+        [Model]
+        AllocSlabs={(p.EngineModelAllocator ? 1 : 0)}
+        SlabBytes=4096
+        PlainTriangleCounter={(p.EnginePlainCounter ? 1 : 0)}
+        FrameHeapSlabs={(p.EngineFrameHeap ? 1 : 0)}
+
+        [Texture]
+        StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
+
+        [Effects]
+        SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}
+        SkipSameConstantUpload=0
+
+        [Log]
+        StatsIntervalSec=2
+        DumpViews=3
+
+        [Bench]
+        Blocks=24
+        BlockSec=5
+        SettleSec=1.0
+        AutoStartSec=0
+        ThreadsB=12
+
+        [Suite]
+        SelfTest=0
+        Profile=0
+        BenchCull=0
+        BenchTimer=1
+        BenchPartition=1
+        BenchIsolation=0
+        BenchThreads=0
+        BenchTimerRes=0
+        BenchFilter=0
+        BenchShadow=0
+        BenchAllocSlabs=0
+        BenchCostWeights=0
+        BenchCbUpload=0
+        BenchPacer=0
+        MotionSweep=0
+        BenchFrameHeap=0
+        MotionProfile=0
+        MotionTaxi=0
+        Terrain=0
+        BenchTexDedupe=0
+        BenchCbSkip=0
+        BenchTriPlain=0
+        BenchEngine=0
+        BenchMicro=0
+        Quick=0
+        MotionSeconds=60
+
+        [Dev]
+        ; Developer mode: a payload built elsewhere, hot-reloaded, and an ini that replaces this one. Empty: off.
+        PayloadPath={(p.EngineDevMode ? p.EngineDevPayloadPath?.Trim() : null)}
+        IniPath={(p.EngineDevMode ? p.EngineDevIniPath?.Trim() : null)}
+
+        """;
+
     /// <summary>OFXR's ini. <paramref name="cursorTemplates"/> is the folder holding DCS's Visualizer.dll (DCS.exe's own),
     /// where the smooth cursor finds the cursor images if the running game has not loaded them.</summary>
     public static string Ofxr(VrProfile p, string? cursorTemplates = null) => $"""

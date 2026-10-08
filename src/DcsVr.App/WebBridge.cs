@@ -256,6 +256,25 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     Invalidate(); var restored = await Task.Run(service.RestoreOriginals);
                     _status = restored.Complete ? "Original files restored. DCS runs without DCS VR Control's changes." : "Some original files could not be restored; they are still listed in Recovery.";
                     _report = restored.Complete ? "Every file DCS VR Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
+                case "engineStatus":
+                    // Read-only: the DCS engine optimizations' own log, the newest test report and DCS's log.
+                    var engineOptions = EngineOptionsPath();
+                    return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
+                case "engineSuite":
+                    EnsureInteractive();
+                    var suiteOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");
+                    return Reply(id, new { message = EngineOptimizations.StartSuite(suiteOptions, DcsRunning()) });
+                case "engineOpen":
+                    EnsureInteractive();
+                    var openOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");
+                    var engineStatus = EngineOptimizations.Read(openOptions, DcsLogPath(openOptions), DcsRunning());
+                    var engineTarget = data.GetProperty("target").GetString() switch
+                    {
+                        "report" => engineStatus.LastReport ?? throw new InvalidOperationException("No test report yet."),
+                        "log" => engineStatus.LogPath ?? throw new InvalidOperationException("No log yet: DCS writes it when it loads the module."),
+                        _ => throw new InvalidDataException("Unknown file.")
+                    };
+                    using (var process = Process.Start(new ProcessStartInfo(engineTarget) { UseShellExecute = true })) { } break;
                 case "openBackups":
                     EnsureInteractive(); Directory.CreateDirectory(service.Originals.Directory);
                     using (var process = Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { service.Originals.Directory }, UseShellExecute = false })) { } break;
@@ -284,7 +303,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         var folder = new OpenFolderDialog { Title = "Select provider folder" };
                         return Reply(id, new { path = folder.ShowDialog(owner) == true ? folder.FolderName : null });
                     }
-                    var file = new OpenFileDialog { Title = "Select component", Filter = target switch { "dcs" => "DCS executable|DCS.exe", "options" => "DCS settings|options.lua", "neuralRuntimePath" => "NVIDIA neural runtime|nvngx_dlssnr.dll", _ => "OpenXR manifest|*.json" } };
+                    var file = new OpenFileDialog { Title = "Select component", Filter = target switch { "dcs" => "DCS executable|DCS.exe", "options" => "DCS settings|options.lua", "neuralRuntimePath" => "NVIDIA neural runtime|nvngx_dlssnr.dll", "engineDevPayloadPath" => "DcsQvCull payload|*.dll", "engineDevIniPath" => "DcsQvCull settings|*.ini", _ => "OpenXR manifest|*.json" } };
                     return Reply(id, new { path = file.ShowDialog(owner) == true ? file.FileName : null });
                 case "rememberRuntime":
                     // The file picked with Browse (DLSS 5 page or guided setup): verified exactly like deployment and kept
@@ -447,6 +466,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             return new("pimax-fovea", native.Mismatch is null ? IssueSeverity.Info : IssueSeverity.Warning, "Pimax native Quad Views applies Pimax Play's settings itself. " + PimaxFovea.Summary(native) + (native.Mismatch is { } m2 ? " " + m2 : ""));
         return null;
     }
+    /// <summary>The options.lua the engine optimizations belong to: the applied profile's when one is applied (its files
+    /// are what DCS runs with), otherwise the selected or detected one.</summary>
+    private string? EngineOptionsPath() => service.ReadAppliedProfile()?.OptionsPath ?? _options ?? _inventory.OptionsPath;
     /// <summary>Saved Games\DCS\Logs\dcs.log next to the selected options.lua (Saved Games\DCS\Config\options.lua).</summary>
     private static string DcsLogPath(string? options) =>
         options is not null && Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(options))) is { } profileRoot

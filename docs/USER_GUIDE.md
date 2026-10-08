@@ -168,6 +168,28 @@ Three more options on the CPU Boost page, all off by default and usable without 
 - **Small DCS window in VR** — sets the DCS desktop window to 1280×720 windowed (restored with the originals). The headset image is unchanged; the smaller desktop buffers save some VRAM and GPU time.
 - **Lower the monitor while flying** — switches your main monitor to a smaller mode (1920×1080 at 60 Hz suggested) for the flight only; the previous mode comes back when DCS exits, even after a crash (at the next start). Windows never saves the flight mode. HDR is left alone.
 
+### DCS Engine (CPU optimizations)
+
+**DCS Engine** is its own page, off by default. When on, Launch DCS installs a small module (DcsQvCull) that DCS loads itself through a Lua hook in `Saved Games\DCS\Scripts\Hooks`; nothing in the DCS install folder changes. It removes CPU work from DCS's render thread without changing what is drawn:
+
+- **Streaming timer cache** (on) — DCS reads a high-resolution clock on every texture bind, tens of thousands of times a frame, only to timestamp texture-streaming use. The module serves it from a value refreshed every millisecond, far finer than streaming needs; nothing you see changes. Measured: **+5 to +6 % FPS**.
+- **Culling partition boost** (on) — DCS splits the search for visible objects into 12 uneven tasks and waits for the slowest. The module splits the same work into 16; the same objects are found. Measured: **+2 % FPS**, p95 frame time −3 %.
+- **Culling partition by real cost** (on) — the visible-object search is split into tasks by what each object actually costs to check, measured as DCS runs, so the tasks end together. Measured: **+2.75 % FPS**, p95 −4 %.
+- **Frame memory per thread** (on) — short-lived per-frame memory comes from one shared heap the model threads queue for; each thread gets its own blocks. Measured: **+1.5 % FPS**, culling 9 % faster.
+- **Task queue clock cache (camera motion)** (on, needs the streaming timer cache) — the frame-start drain of DCS's task queue reads the cached clock. It helps while the camera moves fast (render-thread drain 2.9 → 1.6 ms per frame in a fast flight) and changes nothing when static.
+- **Model data allocator (parallel)** (on) — the threads that prepare aircraft and object models share one allocator and wait for each other; the module gives each thread its own blocks. Measured: **+6 % FPS**, p95 −9 %.
+- **Texture streaming dedupe** (on) — repeated streaming requests for the same texture and size within a millisecond are skipped. Measured: **+2 % FPS**.
+- **Effect constant-buffer skip** and **Statistics counter without lock** (on) — a constant buffer set again although it is already set is skipped, and a statistics-only triangle counter no longer makes the model threads wait on each other. Measured together: **+3.6 % FPS**.
+- All together about **+24 % FPS**, p95 −20 %, 19 % less CPU and half the culling time (static camera), measured with the module's automatic A/B test (the in-flight switch off and on) on a CPU-bound VR airfield (Ryzen 7 9800X3D, RTX 5090, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first and stays off, with a warning on the page, if it does not recognise it.
+- **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps** turns the sounds off). Applying a profile starts with them on again.
+- **Advanced:** how often the cached time is refreshed (1000 µs; keep it), measurement hooks always on (troubleshooting only), and **Developer mode** for working on the module: DCS hot-reloads a payload DLL built elsewhere and takes every engine setting from a separate settings file (a `run_suite.flag` next to it starts the test suite). Logs and reports still go to `Saved Games\DCS\Scripts\DcsQvCull`.
+
+**Status in DCS** reads the module's own log: whether DCS loaded it and whether each optimization found what it needs in this DCS version. After a DCS update the module checks itself; a part that does not recognise the new build turns itself off and the page shows a warning.
+
+**Test suite:** in flight, in VR, with the headset on and awake, press **Run test suite** (or Ctrl+Alt+F11 in DCS). It measures each optimization off and on in alternating 5-second blocks for about 7 minutes and writes a report (**Open last report**). Keep your head still in a busy scene; blocks while the headset sleeps are thrown away. The module's developer keys are off; Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down stay reserved for it.
+
+Tested on DCS 2.9.30 in single player. Restore originals (or turning the option off and launching) removes the hook, the module and everything it wrote.
+
 ## Launch DCS
 
 Press **Launch DCS** (right panel, Overview or the last step of Guided setup). With DCS closed, it:
@@ -197,8 +219,10 @@ Good to know:
 | --- | --- | --- |
 | **Ctrl+Shift+F12** | DLSS 5 on/off for this session (compare with and without) | DLSS 5 → In-flight toggle key |
 | **Alt+Shift+F12** | Show/hide the in-headset diagnostic panel | Framegen → In-headset diagnostics → Diagnostic panel key |
+| **Alt+Shift+F11** | DCS engine optimizations off/on (one beep off, two on) | DCS Engine → In-flight switch |
+| **Ctrl+Alt+F11** | Start or stop the DCS engine optimizations' test suite | Fixed |
 
-To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key and the other hotkey's combination are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
+To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
 The **diagnostic panel** (frame-generation profiles) is drawn in the headset and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. Options under **In-headset diagnostics** (Framegen page):
 
@@ -277,7 +301,7 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 
 ### Multiplayer and Integrity Check
 
-**Not tested yet.** The prefetch fix has only been tested in single-player, and the app adds files to DCS's `bin` folder (`dxgi.dll`, `dxgi2.dll`, Cheeky's files). Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Restore originals** before joining it, and please [report](#reporting-a-problem) what happened.
+**Not tested yet.** The prefetch fix and the DCS engine optimizations have only been tested in single-player, and the app adds files to DCS's `bin` folder (`dxgi.dll`, `dxgi2.dll`, Cheeky's files) and, with DCS Engine on, a hook in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Restore originals** before joining it, and please [report](#reporting-a-problem) what happened.
 
 ### How do I uninstall?
 

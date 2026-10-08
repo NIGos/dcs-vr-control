@@ -20,6 +20,7 @@ Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame
 - **DLSS 5 (DLSS-NR neural rendering)** on the focus area only, optionally just its central part to save GPU time, with an in-flight on/off key to compare.
 - **Frame generation (OFXR):** Auto picks 2× when DCS can hold 45 FPS and 3× when it can't.
 - **CPU Boost (optional):** gives DCS priority and its fastest cores, and includes a fix for a DCS terrain loop that wastes CPU time.
+- **DCS Engine (optional):** a module DCS loads from Saved Games that removes CPU work from its render and model threads without changing the image (about 24 % more FPS when CPU-bound, measured).
 - **VRAM helpers (optional):** close memory-hungry apps before the flight, use a small DCS window on the monitor, lower the monitor's mode while you fly.
 - **In-headset panel:** FPS, frame-generation mode, DLSS state and, if you want, VRAM use.
 - **Last flight summary** on the Overview after each session.
@@ -65,7 +66,7 @@ Feedback and bug reports go in [Issues](https://github.com/NIGos/dcs-vr-control/
 
 DCS (DX11) → Cheeky (DLSS 5 on the Quad Views focus views, D3D11↔D3D12 transport) → bundled Quad-Views-Foveated → OFXR frame generation → Pimax OpenXR runtime (or SteamVR with Sboys). The app gives the DCS process a private OpenXR runtime and layer environment, so nothing is registered globally. The design and the alternatives that were tried are in [docs/APPROACHES.md](docs/APPROACHES.md); performance measurements are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md) and frame pacing in [docs/FRAME_PACING.md](docs/FRAME_PACING.md).
 
-Third-party changes are kept as reproducible patches: `scripts/patch-cheeky.py` with `patches/cheeky`, `patches/ofxr-djules75/*.patch` applied by `scripts/build-ofxr-djules75.ps1`, and the Quad Views edits in `scripts/build-quadviews.ps1`. The prefetch fix is in `native/prefetch_fix`.
+Third-party changes are kept as reproducible patches: `scripts/patch-cheeky.py` with `patches/cheeky`, `patches/ofxr-djules75/*.patch` applied by `scripts/build-ofxr-djules75.ps1`, and the Quad Views edits in `scripts/build-quadviews.ps1`. The prefetch fix is in `native/prefetch_fix`, the DCS engine optimizations (DcsQvCull) in `native/dcsqvcull`.
 
 ### Original files and recovery
 
@@ -80,6 +81,7 @@ The first time the app writes a path it backs up the original (or notes that the
 ./scripts/build-ofxr-djules75.ps1
 ./scripts/build-quadviews.ps1
 ./scripts/build-prefetch-fix.ps1
+./scripts/build-dcsqvcull.ps1
 ./.tools/dotnet/dotnet.exe run --project tests/DcsVr.Tests -c Release
 ./scripts/build-release.ps1
 ./scripts/test-release.ps1

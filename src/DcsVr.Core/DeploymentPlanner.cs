@@ -10,7 +10,8 @@ namespace DcsVr.Core;
 /// 2026-10-03). The fork also creates private swapchains only for submitted swapchains, which replaces our earlier
 /// defer-until-submitted patch for Quad Views.</param>
 /// <param name="PrefetchFixDll">CPU Boost prefetch fix (native/prefetch_fix), loaded by DCS as bin\dxgi2.dll through Cheeky's dxgi.dll loader.</param>
-public sealed record ComponentLocations(string? OfxrDirectory, string? CheekyDirectory, string? CheekyLayerDll, string? QuadViewsDirectory = null, string? QuadFocusDirectory = null, string? OfxrLayerDll = null, string? PrefetchFixDll = null);
+/// <param name="EngineDirectory">DCS engine optimizations (native/dcsqvcull): DcsQvCull.dll, DcsQvCullPayload.dll and DcsQvCull.lua.</param>
+public sealed record ComponentLocations(string? OfxrDirectory, string? CheekyDirectory, string? CheekyLayerDll, string? QuadViewsDirectory = null, string? QuadFocusDirectory = null, string? OfxrLayerDll = null, string? PrefetchFixDll = null, string? EngineDirectory = null);
 
 public sealed class DeploymentPlanner(ComponentLocations components)
 {
@@ -74,6 +75,8 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         if (exe.Contains(@"\steamapps\", StringComparison.OrdinalIgnoreCase)) { environment["SteamAppId"] = DcsSteamAppId; environment["SteamGameId"] = DcsSteamAppId; }
 
         var optionsPath = Path.GetFullPath(inventory.OptionsPath!);
+        // Saved Games\DCS*\Scripts, next to Config: where the DCS engine optimizations' Lua hook and module go.
+        var scripts = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(optionsPath)!)!, "Scripts");
         var optionsBytes = File.ReadAllBytes(optionsPath);
         var utf8 = new UTF8Encoding(false, true);
         var text = utf8.GetString(optionsBytes);
@@ -163,6 +166,21 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 NativeBinary.VerifyNeuralRuntime(neuralBytes);
                 Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/nvngx_dlssnr.dll"), neuralBytes, "User-supplied DLSS 5 runtime");
             }
+        }
+
+        // DCS engine optimizations: a Lua hook in Saved Games loads the module; nothing in the DCS install changes. The
+        // loader and the hook are locked while DCS runs, like every file Apply writes (it refuses while DCS is open).
+        if (profile.EngineOptimizations)
+        {
+            var engine = RequireDirectory(components.EngineDirectory, "The DCS engine optimizations are unavailable.");
+            var module = Path.Combine(scripts, "DcsQvCull");
+            Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
+                // What the module writes while DCS runs; all of it goes with the module on restore.
+                runtimeLogs: [.. new[] { "DcsQvCull.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", Path.Combine("payload", "active_*.dll") }.Select(name => Path.Combine(module, name))]);
+            Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
+            AddText(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
+            // Written last, removed first on restore: the hook never points at a module that is gone.
+            Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
         }
 
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated)
@@ -266,7 +284,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             // Every destination lives below a folder the user selected or the app owns; links below it are refused
             // now and again at apply/restore time, links above it (moved installs) are accepted.
             var managed = Path.GetFullPath(managedRoot);
-            var root = new[] { bin, Path.GetDirectoryName(optionsPath)!, managed }
+            var root = new[] { bin, Path.GetDirectoryName(optionsPath)!, scripts, managed }
                 .FirstOrDefault(r => Path.GetFullPath(path).StartsWith(r.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
             PathPolicy.RejectReparsePoints(path, root);
             // An existing file is never a conflict: Apply backs up its original the first time and overwrites it.

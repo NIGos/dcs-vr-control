@@ -173,6 +173,8 @@ public sealed class TransactionStore(string stateDirectory)
             else
             {
                 File.Delete(entry.Path);
+                // Runtime files first, so the folder they leave empty goes too.
+                RemoveRuntimeLogs(entry);
                 RemoveEmptyCreatedFolder(entry);
             }
             RemoveRuntimeLogs(entry);
@@ -202,14 +204,14 @@ public sealed class TransactionStore(string stateDirectory)
         var owner = Path.GetDirectoryName(entry.Path)!;
         foreach (var log in entry.RuntimeLogs)
         {
-            // Only .log files inside the component's own folder tree; never anything the journal did not declare.
+            // Only declared runtime files inside the component's own folder tree; never anything the journal did not declare.
             var full = Path.GetFullPath(log);
-            if (!full.EndsWith(".log", StringComparison.OrdinalIgnoreCase) || !full.StartsWith(owner + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!RuntimeFiles.Allowed(full, owner)) continue;
             // Best effort: a log held open by a viewer must never leave the restore half done.
             try
             {
                 PathPolicy.RejectReparsePoints(full, owner);
-                if (File.Exists(full)) File.Delete(full);
+                foreach (var file in RuntimeFiles.Matching(full)) File.Delete(file);
                 var folder = Path.GetDirectoryName(full)!;
                 if (!folder.Equals(owner, StringComparison.OrdinalIgnoreCase) && Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
             }
@@ -266,4 +268,36 @@ public sealed class TransactionStore(string stateDirectory)
         if (id.Length != 32 || id.Any(c => !char.IsAsciiHexDigit(c))) throw new InvalidDataException("Invalid restore ID.");
     }
     private static void Save(string root, TransactionJournal journal) => AtomicFile.WriteText(PathPolicy.UnderRoot(root, "journal.json"), JsonData.Serialize(journal));
+}
+
+/// <summary>Files a component writes while DCS runs (logs, reports, its own working copies), removed with the file that
+/// declared them. A declared name may hold a * in its file name; it then stands for the matching files of that folder.</summary>
+internal static class RuntimeFiles
+{
+    private static readonly string[] Named = [".log", ".flag"], Patterns = [".log", ".txt", ".csv", ".dll"];
+
+    /// <summary>Declared inside the owner's folder tree. A single named file only as a log or a trigger flag; reports
+    /// and the component's copies of its own module (e.g. payloadctive_*.dll) only as a pattern, so a named library
+    /// or document is never deleted.</summary>
+    public static bool Allowed(string full, string owner)
+    {
+        full = Path.GetFullPath(full);
+        if (!full.StartsWith(owner.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+        var name = Path.GetFileName(full);
+        if (name.Length == 0 || name.Contains('?') || Path.GetDirectoryName(full)!.Contains('*')) return false;
+        var extension = Path.GetExtension(name);
+        if (extension.Contains('*')) return false;
+        return (name.Contains('*') ? Patterns : Named).Contains(extension, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The existing files <paramref name="full"/> names (several for a pattern).</summary>
+    public static IEnumerable<string> Matching(string full)
+    {
+        var folder = Path.GetDirectoryName(full)!; var name = Path.GetFileName(full);
+        if (!name.Contains('*')) return File.Exists(full) ? [full] : [];
+        if (!Directory.Exists(folder)) return [];
+        // EnumerateFiles also matches 8.3 names and longer extensions ("*.dll" matches "x.dllx"): keep exact matches only.
+        var regex = new System.Text.RegularExpressions.Regex("^" + System.Text.RegularExpressions.Regex.Escape(name).Replace(@"\*", ".*") + "$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return Directory.EnumerateFiles(folder, name).Where(f => regex.IsMatch(Path.GetFileName(f))).ToArray();
+    }
 }

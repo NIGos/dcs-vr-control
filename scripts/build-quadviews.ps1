@@ -441,6 +441,36 @@ if (-not $layerText.Contains('DcsvrSkip')) {
     }
     [IO.File]::WriteAllText($layerSource, $layerText)
 }
+# A gaze sample that is not finite (seen once on a Pimax Crystal Super as DCS's session became ready, the eye tracker
+# still starting) gave the focus view a NaN projection; DecomposeProjectionMatrix then threw "Invalid projection
+# matrix" and xrLocateViews failed, which DCS treats as fatal (black window). Such a frame now uses the fixed focus
+# area, exactly as when the gaze is reported invalid.
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('DCSVR invalid gaze')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @((('                                        if (!isGazeValid ||',
+            '                                            !ProjectPoint(viewForGazeProjection, gazeUnitVector, projectedGaze)) {') -join $nl),
+          (('                                        // DCSVR invalid gaze: a gaze that is not finite counts as no gaze.',
+            '                                        if (!isGazeValid ||',
+            '                                            !ProjectPoint(viewForGazeProjection, gazeUnitVector, projectedGaze) ||',
+            '                                            !std::isfinite(projectedGaze.x) || !std::isfinite(projectedGaze.y)) {') -join $nl)),
+        @((('                                            views[i].fov =',
+            '                                                xr::math::ComputeBoundingFov(m_cachedEyeFov[stereoViewIndex], min, max);') -join $nl),
+          (('                                            try {',
+            '                                                views[i].fov =',
+            '                                                    xr::math::ComputeBoundingFov(m_cachedEyeFov[stereoViewIndex], min, max);',
+            '                                            } catch (const std::exception&) {',
+            '                                                // DCSVR invalid gaze: a degenerate focus area falls back to the fixed one.',
+            '                                                views[i].fov = m_cachedEyeFov[i];',
+            '                                            }') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }
 # The composition with our performance edits against the same shaders without them, on this machine's GPU (WARP

@@ -183,7 +183,19 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                     if (!File.Exists(path) || Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim())
                         throw new InvalidDataException("The CPU Boost prefetch fix is modified or incomplete.");
             }
-            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, prefetchFix)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha);
+            string? engine = null;
+            if (profile.EngineOptimizations)
+            {
+                // DCS engine optimizations (native/dcsqvcull), copied to Saved Games\DCS\Scripts.
+                engine = Path.Combine(DistributionRoot, "components/dcsqvcull");
+                foreach (var filename in EngineFiles)
+                {
+                    var path = Path.Combine(engine, filename);
+                    if (!File.Exists(path) || !File.Exists(path + ".sha256") || Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim())
+                        throw new InvalidDataException("The DCS engine optimizations are modified or incomplete.");
+                }
+            }
+            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, prefetchFix, engine)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha);
         }
         string Import(string id)
         {
@@ -192,6 +204,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             staged.Add(directory); return directory;
         }
     }
+
+    internal static readonly string[] EngineFiles = ["DcsQvCull.dll", "DcsQvCullPayload.dll", "DcsQvCull.lua"];
 
     /// <summary>Writes the plan over whatever is installed (see <see cref="OriginalsStore.Apply"/>). Refused only while a
     /// running DCS could use the files.</summary>

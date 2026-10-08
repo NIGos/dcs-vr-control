@@ -298,6 +298,10 @@ dialog::backdrop{background:#000000b0}
 .pimax-details .fine{margin-top:6px}
 .pimax-note{margin:6px 0 0;padding:6px 8px;border-left:3px solid var(--cyan);background:#22313a;font-size:11.5px;color:var(--soft)}
 .pimax-note.warn{border-left-color:var(--accent);background:#2e2616}
+.engine-state{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border-left:3px solid var(--muted);background:#ffffff08;font-size:12.5px}
+.engine-state b{font-size:13px}
+.engine-state.loaded{border-left-color:var(--cyan)}
+.engine-state.failed{border-left-color:var(--accent)}
 .setting[hidden]{display:none}
 /* CPU Boost page. */
 .list-input{grid-column:2;grid-row:1 / span 2;min-height:96px;resize:vertical;background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);font:13px Consolas,"Cascadia Mono",monospace;padding:8px 10px}

@@ -58,11 +58,11 @@ assert result['manager']['passed'] == result['manager']['total'] and result['man
 fixture = Path(args.fixture)
 result['installer'] = json.loads((fixture/'result.json').read_text(encoding='utf-8-sig'))
 assert result['installer']['passed'] and result['installer']['previousReleaseUpgradeChecked']
-for name, prefix, count in [('packagedWebView',release/'docs/interface',249),('installedWebView',fixture/'gui',263)]:
+for name, prefix, count in [('packagedWebView',release/'docs/interface',256),('installedWebView',fixture/'gui',270)]:
     checks = json.loads(Path(str(prefix)+'-checks.json').read_text())
     assert checks['passed'] and checks['count'] == count
     renders = json.loads(Path(str(prefix)+'-renders.json').read_text())
-    assert len(renders) == 48 and all(not r['layout']['overflow'] and r['layout']['footerVisible'] and r['layout']['headerVisible'] for r in renders)
+    assert len(renders) == 52 and all(not r['layout']['overflow'] and r['layout']['footerVisible'] and r['layout']['headerVisible'] for r in renders)
     result[name] = {'checks':count,'renders':len(renders),'passed':True}
 
 old = root/'artifacts/release/DcsVrControl-0.2.3-preview-win-x64'
@@ -71,7 +71,7 @@ for f in json.loads((release/'release-manifest.json').read_text(encoding='utf-8-
     # Components added after 0.2.3 (the deferred OFXR layer) have no baseline to compare against.
     # Components rebuilt on purpose from patched sources (Cheeky OpenXR layer with the DCS quad layout export, the
     # focus adapter) must match their own published hash instead; every other component stays byte-identical.
-    rebuilt = p.removesuffix('.sha256') in ('components/CheekyOpenXRLayer.dll', 'components/quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll') or p.startswith('components/cheeky-focus/') or p.startswith('components/boost/')
+    rebuilt = p.removesuffix('.sha256') in ('components/CheekyOpenXRLayer.dll', 'components/quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll') or p.startswith('components/cheeky-focus/') or p.startswith('components/boost/') or p.startswith('components/dcsqvcull/')
     if rebuilt:
         sidecar = release/(p + '.sha256')
         if not p.endswith('.sha256') and sidecar.exists():
@@ -99,4 +99,4 @@ result['nativePacing'] = {'passed':True,'sourceTests':40,'bundledDllLimiterTest'
 assert all(any(c['id'] == 'external-limiters' and c['state'] == 'Manual' for c in json.loads((root/f'artifacts/live-readiness-{version.split("-")[0]}'/f'{id}-report.json').read_text(encoding='utf-8-sig'))['checks']) for id in result['liveReadiness'])
 output = root/f'artifacts/release-verification-{version.split("-")[0]}.json'
 output.write_text(json.dumps(result,indent=2),encoding='utf-8')
-print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':249,'installedWebViewChecks':263,'rendersPerRun':48,'binaryBytes':result['binary']['bytes']}))
+print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':256,'installedWebViewChecks':270,'rendersPerRun':52,'binaryBytes':result['binary']['bytes']}))

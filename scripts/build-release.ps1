@@ -62,6 +62,15 @@ New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'components/boost') -
 $prefetchFix = Join-Path $releaseRoot 'components/boost/prefetch_fix.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/prefetch-fix/prefetch_fix.dll') -Destination $prefetchFix -Force
 (Get-FileHash -LiteralPath $prefetchFix -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($prefetchFix + '.sha256') -Encoding ascii
+# DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
+# them. Rebuilt and tested on every release like the prefetch fix.
+& (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1')
+New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'components/dcsqvcull') -Force | Out-Null
+foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/native/dcsqvcull/DcsQvCullPayload.dll','native/dcsqvcull/lua/DcsQvCull.lua')) {
+    $target = Join-Path $releaseRoot ('components/dcsqvcull/' + (Split-Path -Leaf $source))
+    Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
+    (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
+}
 $cheekyDll = Join-Path $releaseRoot 'components/CheekyOpenXRLayer.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll') -Destination $cheekyDll -Force
 (Get-FileHash -LiteralPath $cheekyDll -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($cheekyDll + '.sha256') -Encoding ascii

@@ -169,6 +169,53 @@ public sealed record VrProfile
     public int FlightDisplayHeight { get; init; } = 1080;
     public int FlightDisplayRefresh { get; init; } = 60;
 
+    /// <summary>DCS engine optimizations (DcsQvCull): a native module loaded by Saved Games\DCS\Scripts\Hooks\DcsQvCull.lua
+    /// that removes CPU work from DCS's render thread without changing the image. Nothing in the DCS install is changed.</summary>
+    public bool EngineOptimizations { get; init; }
+    /// <summary>[Timing] ShaderTimeCache (the module's name; it is the streaming timer cache): the clock read DCS's DX11
+    /// backend makes on every texture bind to timestamp texture-streaming use, answered from a value refreshed every
+    /// <see cref="EngineTimerRefreshUs"/>. Measured +5 to +6 % FPS.</summary>
+    public bool EngineShaderTimeCache { get; init; } = true;
+    /// <summary>[Scene] PartitionBoost: culling's per-model work cut into 16 chunks instead of 12. Measured +2 % FPS.</summary>
+    public bool EnginePartitionBoost { get; init; } = true;
+    /// <summary>[Scene] CostWeights: culling's work split by each object's measured culling cost instead of a fixed
+    /// estimate, so the tasks finish together. Measured +2.75 % FPS, p95 −4 %.</summary>
+    public bool EngineCostWeights { get; init; } = true;
+    /// <summary>[General] Beeps: the module's sound feedback (in-flight switch, test suite start and end).</summary>
+    public bool EngineBeeps { get; init; } = true;
+    /// <summary>[Model] AllocSlabs: per-thread slabs for the model data allocator (NGModel StructBufferManager), so
+    /// culling threads stop contending for it. Measured +6 % FPS, p95 −9 %.</summary>
+    public bool EngineModelAllocator { get; init; } = true;
+    /// <summary>[Model] FrameHeapSlabs: per-thread blocks for DCS's per-frame memory heap (edCore TFrameMemoryHeap),
+    /// falling back to the original near the end of the heap. Measured +1.5 % FPS, culling −9 %.</summary>
+    public bool EngineFrameHeap { get; init; } = true;
+    /// <summary>[Timing] TaskQueueClock: the frame-start drain of DCS's task queue (unlimited budget only) reads the
+    /// cached clock; needs <see cref="EngineShaderTimeCache"/>. Helps while the camera moves (render-thread drain
+    /// 2.9 → 1.6 ms per frame in a fast synthetic flight).</summary>
+    public bool EngineTaskQueueClock { get; init; } = true;
+    /// <summary>[Texture] StreamDedupe: a texture-streaming request repeated for the same texture and size within the
+    /// same 1 ms tick is skipped. Measured +2 % FPS.</summary>
+    public bool EngineTextureDedupe { get; init; } = true;
+    /// <summary>[Effects] SkipSameConstantBuffer: the effect system's SetConstantBuffer is skipped when that buffer is
+    /// already set. With <see cref="EnginePlainCounter"/>: measured +3.6 % FPS.</summary>
+    public bool EngineEffectBufferSkip { get; init; } = true;
+    /// <summary>[Model] PlainTriangleCounter: a statistics-only triangle counter updated without a locked instruction.</summary>
+    public bool EnginePlainCounter { get; init; } = true;
+    /// <summary>[Timing] CacheUs: how often the cached time is refreshed, in microseconds.</summary>
+    public int EngineTimerRefreshUs { get; init; } = 1000;
+    public const int EngineTimerRefreshMin = 250, EngineTimerRefreshMax = 2000;
+    /// <summary>[Hotkeys] Toggle: switches the enabled engine optimizations off and back on in flight, to compare
+    /// (one beep off, two beeps on). "virtual-key:modifiers" like the other in-flight keys; "Off" disables it.</summary>
+    public string EngineToggleKey { get; init; } = NeuralHotkeys.EngineDefault;
+    /// <summary>Developer mode ([Dev] in DcsQvCull.ini): the installed loader hot-reloads the payload from
+    /// <see cref="EngineDevPayloadPath"/> and the module takes its settings from <see cref="EngineDevIniPath"/>, which
+    /// replaces this profile's engine settings entirely. For working on the module; off by default.</summary>
+    public bool EngineDevMode { get; init; }
+    public string? EngineDevPayloadPath { get; init; }
+    public string? EngineDevIniPath { get; init; }
+    /// <summary>[General] Diagnostics: measurement hooks always installed instead of only while the test suite runs.</summary>
+    public bool EngineDiagnosticHooks { get; init; }
+
     /// <summary>The prefetch fix is deployed (bin\dxgi2.dll) and enabled through the launch environment.</summary>
     public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>

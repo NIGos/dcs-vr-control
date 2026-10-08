@@ -200,7 +200,7 @@ internal static class WebVerification
                 if (await core.ExecuteScriptAsync("window.renderRefreshPending") == "true") throw new IOException("Screenshot draft refresh timed out.");
                 controller.Bounds = new System.Drawing.Rectangle(0,0,width,height);
                 var controller3 = controller as CoreWebView2Controller; controller3.RasterizationScale = scale; controller3.ShouldDetectMonitorScaleChanges = false;
-                foreach (var page in new[] { "overview","foveation","dlss","framegen","boost","setup","diagnostics","recovery" })
+                foreach (var page in new[] { "overview","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery" })
                 {
                     if (page == "diagnostics")
                     {
