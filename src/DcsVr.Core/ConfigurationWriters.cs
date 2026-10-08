@@ -110,6 +110,13 @@ public static class ConfigurationWriters
         SlabBytes=4096
         PlainTriangleCounter={(p.EnginePlainCounter ? 1 : 0)}
         FrameHeapSlabs={(p.EngineFrameHeap ? 1 : 0)}
+        BigModelPages={(p.EngineShadowInstancing ? 1 : 0)}
+        BigPageBytes=4194304
+        ShadowInstancing={(p.EngineShadowInstancing ? 1 : 0)}
+        ShadowBatching={(p.EngineShadowInstancing ? 1 : 0)}
+        ShadowTextureSkip={(p.EngineShadowInstancing ? 1 : 0)}
+        GBufferBatching=0
+        ParallelUpload=0
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
@@ -148,6 +155,19 @@ public static class ConfigurationWriters
         BenchFrameHeap=0
         MotionProfile=0
         MotionTaxi=0
+        MotionCounters=1
+        ShadowInstCompile=0
+        ShadowInstVerify=0
+        BenchShadowInst=0
+        BenchBigPages=0
+        BenchShadowTex=0
+        BenchTexTable=0
+        YawScan=0
+        HoldYawDeg=-1
+        GBufferInstCompile=0
+        GBufferInstVerify=0
+        BenchGBufferInst=0
+        BenchParallelUpload=0
         Terrain=0
         BenchTexDedupe=0
         BenchCbSkip=0

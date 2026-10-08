@@ -88,22 +88,64 @@ uint64_t HookMeasured(void* tex, uint64_t packedSize) {
 // Hot path: one table probe. Only the render thread binds textures; a
 // concurrent caller could at worst skip or repeat one streaming request
 // within the same millisecond, which is harmless.
+// 16-byte entries (64 KB table instead of 96 KB): the size is stored as two
+// 16-bit halves when both dimensions fit (sizes that do not fit are never
+// cached, so never skipped), and the tick is the timer cache's refresh count,
+// which changes exactly when the cached streaming time can change. Without the
+// timer cache the tick is the TSC in milliseconds.
 struct FastEntry {
+  void* tex;
+  uint32_t size;
+  uint32_t tick;
+};
+static_assert(sizeof(FastEntry) == 16, "FastEntry layout");
+FastEntry g_fast[4096];
+
+inline uint32_t FastTick() {
+  if (timercache::g_on.load(std::memory_order_relaxed))
+    return static_cast<uint32_t>(timercache::g_refreshes.load(std::memory_order_relaxed));
+  return g_tscPerMs > 0 ? static_cast<uint32_t>(__rdtsc() / g_tscPerMs) : 0;
+}
+
+uint64_t __fastcall Hook(void* tex, uint64_t packedSize) {
+  if (g_measure.load(std::memory_order_relaxed)) return HookMeasured(tex, packedSize);
+  const int32_t w = static_cast<int32_t>(packedSize);
+  const int32_t h = static_cast<int32_t>(packedSize >> 32);
+  if (static_cast<int16_t>(w) != w || static_cast<int16_t>(h) != h) return g_orig(tex, packedSize);
+  const uint32_t size = static_cast<uint16_t>(w) | static_cast<uint32_t>(static_cast<uint16_t>(h)) << 16;
+  const uint32_t tick = FastTick();
+  FastEntry& e = g_fast[((reinterpret_cast<uint64_t>(tex) >> 4) ^ (size * 0x9E3779B1u)) & 4095];
+  if (e.tex == tex && e.size == size && e.tick == tick && g_dedupe.load(std::memory_order_relaxed)) return 0;
+  e.tex = tex;
+  e.size = size;
+  e.tick = tick;
+  return g_orig(tex, packedSize);
+}
+
+// Previous fast path (24-byte entries keyed by the cached time's bits), kept
+// for the A/B against the 16-byte table (bench mode 20).
+struct FastEntryV1 {
   void* tex;
   uint64_t size;
   uint64_t ms;
 };
-FastEntry g_fast[4096];
+FastEntryV1 g_fastV1[4096];
 
-uint64_t __fastcall Hook(void* tex, uint64_t packedSize) {
+uint64_t __fastcall HookV1(void* tex, uint64_t packedSize) {
   if (g_measure.load(std::memory_order_relaxed)) return HookMeasured(tex, packedSize);
   const uint64_t ms = timercache::g_orig ? Tick(0) : Tick(__rdtsc());
-  FastEntry& e = g_fast[((reinterpret_cast<uint64_t>(tex) >> 4) ^ (packedSize * 0x9E3779B1u)) & 4095];
+  FastEntryV1& e = g_fastV1[((reinterpret_cast<uint64_t>(tex) >> 4) ^ (packedSize * 0x9E3779B1u)) & 4095];
   if (e.tex == tex && e.size == packedSize && e.ms == ms && g_dedupe.load(std::memory_order_relaxed)) return 0;
   e.tex = tex;
   e.size = packedSize;
   e.ms = ms;
   return g_orig(tex, packedSize);
+}
+
+// Bench mode 20: true = 16-byte table (shipped), false = previous table.
+void UseCompactTable(bool on) {
+  if (!g_orig || !g_attached.load()) return;
+  HookSlot(g_slot, reinterpret_cast<void*>(on ? &Hook : &HookV1), nullptr);
 }
 
 bool Install(double tscHz) {

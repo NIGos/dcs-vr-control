@@ -165,7 +165,49 @@ uint8_t* __fastcall HookAlloc(void* mgr, uint32_t size, uint32_t count, uint32_t
   return data + used;
 }
 
+// Per element-size class: peak bytes used in one frame and page count, read
+// at the per-frame reset (before it clears `used`). For sizing bigger pages.
+struct ClassStat {
+  uint32_t elemSize = 0;
+  uint32_t peakBytes = 0, peakPages = 0, lastBytes = 0, pages = 0;
+};
+ClassStat g_classes[8];
+void NoteClasses(void* mgr) {
+  auto* b = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mgr) + 8);
+  auto* e = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mgr) + 0x10);
+  uint32_t bytes[8] = {}, pages[8] = {}, total[8] = {};
+  for (uint8_t* p = b; p && p < e; p += kPageStride) {
+    const auto* pg = reinterpret_cast<const Page*>(p);
+    int c = 0;
+    while (c < 8 && g_classes[c].elemSize && g_classes[c].elemSize != pg->elemSize) ++c;
+    if (c == 8) continue;
+    g_classes[c].elemSize = pg->elemSize;
+    ++total[c];
+    if (pg->used) {
+      bytes[c] += pg->used;
+      ++pages[c];
+    }
+  }
+  for (int c = 0; c < 8 && g_classes[c].elemSize; ++c) {
+    g_classes[c].lastBytes = bytes[c];
+    g_classes[c].pages = total[c];
+    if (bytes[c] > g_classes[c].peakBytes) g_classes[c].peakBytes = bytes[c];
+    if (pages[c] > g_classes[c].peakPages) g_classes[c].peakPages = pages[c];
+  }
+}
+
+void LogClasses() {
+  for (int c = 0; c < 8 && g_classes[c].elemSize; ++c)
+    Log("  model data pages, element size %u: last frame %u bytes, peak %u bytes in %u pages (%u pages exist)",
+        g_classes[c].elemSize, g_classes[c].lastBytes, g_classes[c].peakBytes, g_classes[c].peakPages,
+        g_classes[c].pages);
+}
+
+void (*g_onReset)(void* mgr) = nullptr;  // set by big_pages.h
+
 void __fastcall HookReset(void* mgr) {
+  NoteClasses(mgr);
+  if (g_onReset) g_onReset(mgr);
   Invalidate();
   g_resets.fetch_add(1, std::memory_order_relaxed);
   g_origReset(mgr);

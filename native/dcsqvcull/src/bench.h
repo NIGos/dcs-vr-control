@@ -213,7 +213,11 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 15 ? "bench: mode cost weights, OFF = DCS weights, ON = measured per-object cost"
         : mode == 16 ? "bench: mode constant-buffer upload, OFF = every upload, ON = identical uploads skipped"
         : mode == 17 ? "bench: mode pacer, OFF = PAUSE spin, ON = MWAITX wait"
-                    : "bench: mode frame heap, OFF = shared cursor, ON = per-thread slabs");
+        : mode == 18 ? "bench: mode frame heap, OFF = shared cursor, ON = per-thread slabs"
+        : mode == 19 ? "bench: mode shadow texture skip, OFF = every texture set, ON = sets no shadow pass reads skipped"
+        : mode == 20 ? "bench: mode texture dedupe table, OFF = previous 24-byte entries, ON = 16-byte entries"
+        : mode == 21 ? "bench: mode big model pages, OFF = stock 63.5 KB pages, ON = big pages"
+                    : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
     g_enabled = restoreOn;  // exclusion stays as it was; the variant is the thread count
@@ -291,6 +295,15 @@ bool RunBenchmark(int mode, bool beeps) {
   }
   if (mode == 11) BenchSetEngineOff(false);
   if (mode == 18) g_frameHeapOn = g_cfg.frameHeapSlabs && !g_engineOff.load();
+  if (mode == 20) BenchUseCompactTexTable(true);
+  if (mode == 21) ApplyBigPages(g_cfg.bigPages && !g_engineOff.load());
+  if (mode == 22) ApplyShadowBatch();
+  if (mode == 24) ApplyParUpload(g_cfg.parUpload && !g_engineOff.load());
+  if (mode == 23) ApplyGBufferBatch();
+  if (mode == 19) {
+    g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
+    ApplyShadowTexSkip();
+  }
   if (mode == 17) {
     g_pacerLowPowerOn = g_cfg.pacerLowPower && !g_engineOff.load();
     ApplyPacer();
@@ -338,6 +351,12 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 16 ? "skip identical constant-buffer uploads"
             : mode == 17 ? "Main-thread pacer wait with MWAITX"
             : mode == 18 ? "per-thread slabs for the edCore frame heap"
+            : mode == 19 ? "skip shadow-caster texture sets no shadow pass reads"
+            : mode == 20 ? "texture dedupe: 16-byte table vs previous 24-byte table"
+            : mode == 21 ? "big model data pages"
+            : mode == 22 ? "shadow caster instancing"
+            : mode == 24 ? "parallel copy for large structured-buffer uploads"
+            : mode == 23 ? "g-buffer instancing"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

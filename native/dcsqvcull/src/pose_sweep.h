@@ -31,7 +31,12 @@ std::atomic<double> g_yawDeg{0};
 // Phases (seconds): still, slow, medium, fast, still. Yaw = A*sin(2*pi*t/T).
 std::atomic<bool> g_taxi{false};  // [Suite] MotionTaxi: slow straight taxi instead of the yaw sweep
 
+// Held yaw ([Suite] HoldYawDeg / YawScan): a constant view rotation, no
+// translation; < -1000 = not holding. Used to aim an unattended benchmark view.
+std::atomic<double> g_hold{-2000.0};
+bool Holding() { return g_hold.load(std::memory_order_relaxed) > -1000.0; }
 double YawAt(double t) {
+  if (Holding()) return g_hold.load(std::memory_order_relaxed);
   if (g_taxi.load()) return 0;
   const double A = 60.0;
   auto sweep = [&](double tt, double period) { return A * std::sin(2.0 * 3.14159265358979 * tt / period); };
@@ -46,6 +51,7 @@ double YawAt(double t) {
 // view's local space) at 100 m/s for 15 s, like a low pass, so DCS streams
 // new terrain if it follows the head position that far.
 double ForwardAt(double t) {
+  if (Holding()) return 0;
   if (g_taxi.load()) {
     // Taxi: 15 m/s forward from t = 5 s, through whatever is ahead.
     return t < 5 ? 0 : (t - 5) * 15.0;
@@ -196,6 +202,20 @@ void Start() {
   g_on = true;
 }
 
-void Stop() { g_on = false; }
+void Stop() {
+  if (!Holding()) g_on = false;
+}
+
+// Holds a constant yaw (degrees), or releases it (hold = false).
+void Hold(bool hold, double deg) {
+  if (!hold) {
+    g_hold = -2000.0;
+    g_on = false;
+    return;
+  }
+  if (!Install()) return;
+  g_hold = deg;
+  g_on = true;
+}
 
 }  // namespace posesweep

@@ -6,7 +6,7 @@ const pages = [
   ['dlss','DLSS 5','DLSS 5 neural rendering and Foveated DLSS.','Neural rendering','M10 3c.6 3.8 2.2 5.4 6 6-3.8.6-5.4 2.2-6 6-.6-3.8-2.2-5.4-6-6 3.8-.6 5.4-2.2 6-6Z M18 14c.3 1.8 1.1 2.6 3 3-1.9.4-2.7 1.2-3 3-.3-1.8-1.1-2.6-3-3 1.9-.4 2.7-1.2 3-3Z'],
   ['framegen','Framegen','OFXR frame generation, the DCS frame limit and in-headset diagnostics.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
   ['boost','CPU Boost','Process priority, CPU cores and the DCS prefetch fix while DCS runs.','Processor scheduling','M6 6h12v12H6Z M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3 M12.8 8.5 10.2 12.3h3.6l-2.6 3.7'],
-  ['engine','DCS Engine','CPU optimizations inside DCS: less work on its render thread, the same image.','Engine optimizations','M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z M12 3v2.6 M12 18.4V21 M3 12h2.6 M18.4 12H21 M5.6 5.6l1.9 1.9 M16.5 16.5l1.9 1.9 M5.6 18.4l1.9-1.9 M16.5 7.5l1.9-1.9'],
+  ['engine','Engine Optimizations','CPU optimizations inside DCS: less work on its render and model threads, the same image.','CPU work inside DCS','M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z M12 3v2.6 M12 18.4V21 M3 12h2.6 M18.4 12H21 M5.6 5.6l1.9 1.9 M16.5 16.5l1.9 1.9 M5.6 18.4l1.9-1.9 M16.5 7.5l1.9-1.9','Optimizations'],
   ['setup','Game & headset','DCS files, the headset runtime and, on the Sboys route, its driver.','Paths & drivers','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
   ['recovery','Recovery','Put back the original files DCS VR Control changed, in one step.','Original files','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
@@ -228,6 +228,7 @@ function change() {
   if (state) { state.readiness = null; renderDiagnostics(); }
   $('status').textContent = 'Profile edited. Launch DCS applies it; Review files lists what it writes.';
   request('changed').catch(showError); updateControls(); saveDraftSoon();
+  if (page === 'engine') renderEngine();
 }
 /** "What Boost will do" depends only on the Boost settings and the route: refreshed for those edits, not every edit. */
 function boostChanged() { if (page === 'boost') refreshBoostPlan(); }
@@ -483,13 +484,14 @@ function buildFields() {
   field(c,'lowerMonitor','Lower the monitor while flying','Switches the main monitor to the mode below when DCS starts and back when DCS exits. Never saved as a Windows setting: a restart also brings your mode back. HDR is left as it is.','toggle');
   field(c,'flightDisplayMode','Monitor mode in flight','Modes your main monitor reports. 1920×1080 at 60 Hz suits most setups.','select',[[displayModeKey(profileDefaults),displayModeLabel(profileDefaults)]],p => p.lowerMonitor,'',null,
     {prop:'flightDisplayMode',get:p => displayModeKey(p),set:(p,v) => { const [w,h,hz] = v.split(/[x@]/).map(Number); p.flightDisplayWidth = w; p.flightDisplayHeight = h; p.flightDisplayRefresh = hz; }});
-  // DCS Engine page: the DcsQvCull module, installed in Saved Games with the profile.
+  // Engine Optimizations page: the DcsQvCull module, installed in Saved Games with the profile.
   const engine = p => p.engineOptimizations;
-  c = card('engineControls','DCS engine optimizations (CPU)','Measured together on a CPU-bound VR airfield: about 24% more FPS, p95 frame time 20% lower, 19% less CPU. No visual change.');
+  c = card('engineControls','Engine optimizations (CPU)','Measured together on a CPU-bound VR airfield: about 23% more FPS, p95 frame time 18% lower, 17% less CPU. No visual change.');
   field(c,'engineOptimizations','Engine optimizations','Launch DCS installs a small module that DCS loads from Saved Games\\DCS\\Scripts; nothing in the DCS install changes. Off removes it. Tested on DCS 2.9.30 in single player.','toggle');
   field(c,'engineShaderTimeCache','Streaming timer cache','DCS reads a high-resolution clock on every texture bind, only to timestamp texture-streaming use. The module serves it from a value refreshed every millisecond; streaming decisions are unchanged. Measured: 5 to 6% more FPS.','toggle',null,engine);
   field(c,'enginePartitionBoost','Culling partition boost','DCS splits the search for visible objects into 12 uneven tasks and waits for the slowest. The module splits the same work into 16; the same objects are found. Measured: 2% more FPS, p95 frame time 3% lower.','toggle',null,engine);
   field(c,'engineCostWeights','Culling partition by real cost','The split of the visible-object search into tasks follows what each object actually costs to check, measured as DCS runs, instead of a fixed estimate, so the tasks end together. Measured: 2.75% more FPS, p95 frame time 4% lower.','toggle',null,engine);
+  field(c,'engineShadowInstancing','Shadow caster instancing (exact)','Identical objects casting shadows are drawn with one instanced draw per shadow cascade instead of one draw each. The module compiles instanced versions of the shadow shader DCS ships in the background (about 2.5 minutes after DCS starts); nothing in the DCS install is written. Shadow draws also skip the textures those shaders never read. Verified texel-identical; it turns itself off on any fault. Measured: 2.8% more FPS.','toggle',null,engine);
   field(c,'engineModelAllocator','Model data allocator (parallel)','The threads that prepare aircraft and object models take memory from one shared allocator and wait for each other. The module gives each thread its own blocks. Measured: 6% more FPS, p95 frame time 9% lower.','toggle',null,engine);
   field(c,'engineFrameHeap','Frame memory per thread','Short-lived per-frame memory comes from one shared heap the model threads queue for. Each thread gets its own blocks; near the end of the heap the original is used. Measured: 1.5% more FPS, culling 9% faster.','toggle',null,engine);
   field(c,'engineTaskQueueClock','Task queue clock cache (camera motion)','At the start of each frame DCS drains its task queue and reads the clock for every task. Only that unlimited drain uses the cached clock. Helps while the camera moves fast: render-thread drain 2.9 to 1.6 ms per frame in a fast flight; nothing changes when static. Needs the streaming timer cache.','toggle',null,p => engine(p) && p.engineShaderTimeCache);
@@ -498,11 +500,11 @@ function buildFields() {
   field(c,'enginePlainCounter','Statistics counter without lock','A triangle counter used only for statistics is updated without a locked instruction, which made all model threads wait on one cache line.','toggle',null,engine);
   field(c,'engineToggleKey','In-flight switch','Turns all the optimizations above off and back on in flight, to compare: one beep off, two beeps on. Click, then press the keys. Default Alt+Shift+F11.','hotkey',null,engine);
   field(c,'engineBeeps','Beeps','Sound feedback for the in-flight switch and the test suite.','toggle',null,engine);
+  field(c,'engineDevMode','Developer mode','Off for normal flying and for testing a release. On: for working on the module, DCS hot-reloads the payload below whenever it changes and takes every engine setting from the settings file below instead of this page.','toggle',null,engine);
+  field(c,'engineDevPayloadPath','Developer payload','A DcsQvCullPayload.dll built elsewhere. While it is missing, the installed copy runs.','path',null,p => engine(p) && p.engineDevMode);
+  field(c,'engineDevIniPath','Developer settings file','A DcsQvCull.ini that replaces the one this profile installs. A run_suite.flag next to it starts the test suite too.','path',null,p => engine(p) && p.engineDevMode);
   more = disclosure(c,'Advanced','Keep the defaults unless you are troubleshooting.');
   field(more,'engineTimerRefreshUs','Streaming timer refresh','How often the cached time is refreshed. 1000 µs (1 ms) is far below one frame.','number',[250,2000,50],p => engine(p) && p.engineShaderTimeCache,'µs');
-  field(more,'engineDevMode','Developer mode','For working on the module: DCS hot-reloads the payload below whenever it changes and takes every engine setting from the settings file below instead of this page.','toggle',null,engine);
-  field(more,'engineDevPayloadPath','Developer payload','A DcsQvCullPayload.dll built elsewhere. While it is missing, the installed copy runs.','path',null,p => engine(p) && p.engineDevMode);
-  field(more,'engineDevIniPath','Developer settings file','A DcsQvCull.ini that replaces the one this profile installs. A run_suite.flag next to it starts the test suite too.','path',null,p => engine(p) && p.engineDevMode);
   field(more,'engineDiagnosticHooks','Measurement hooks always on','Normally installed only while the test suite runs. For troubleshooting; costs some CPU.','toggle',null,engine);
   // Game & headset page.
   c = card('gameControls','DCS','Detected automatically; change only if DCS is somewhere else.');
@@ -605,7 +607,8 @@ function renderEngine() {
   if (!s) { box.innerHTML = '<p class="fine">Select the DCS settings file (options.lua) on the Game &amp; headset page first.</p>'; return; }
   const report = s.lastReport ? `<dt>Last test report</dt><dd>${escape(new Date(s.lastReportAt).toLocaleString('en-GB'))}</dd>` : '';
   const pending = profile?.engineOptimizations !== (s.state !== 'not-installed') ? `<p class="fine">${profile.engineOptimizations ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
-  box.innerHTML = `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}`
+  const devNote = profile?.engineOptimizations && profile.engineDevMode ? '<p class="pimax-note warn">Developer mode is on in this profile: DCS loads the payload and settings from the developer paths, not the ones this release installs. Turn it off on the left for normal flying.</p>' : '';
+  box.innerHTML = devNote + `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}`
     + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
     + (s.suiteRunning ? '<p class="pimax-note">Test suite running in DCS. Keep the headset on and still; it takes about 7 minutes.</p>' : '')
     + `<dl class="pimax-values">${report}</dl>`;
@@ -931,7 +934,7 @@ function revealSetting(f) {
   if (!f.element.hidden && !f.input.disabled) { if (!['INPUT','BUTTON','SELECT','TEXTAREA'].includes(f.input.tagName)) f.input.tabIndex = -1; f.input.focus({preventScroll:true}); }
 }
 async function initialize() {
-  pages.forEach((p,index) => { const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = p[1]+' (Ctrl '+(index+1)+')'; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
+  pages.forEach((p,index) => { const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = p[1]+' (Ctrl '+(index+1)+')'; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
   buildFields(); buildFeatureList(); navigate('overview');
   [['launch','launch'],['apply','apply'],['refresh','refresh'],['importProfile','import'],['saveProfile','save'],['resetNeural','resetNeural'],['export','export'],['prepareSboys','prepareSboys'],['importSboys','importSboys'],['openSboys','openSboys'],['checkReadiness','checkReadiness']].forEach(([id,action]) => $(id).addEventListener('click',() => run(action).catch(()=>{})));
   $('refreshBoostPlan').addEventListener('click',() => refreshBoostPlan(0));

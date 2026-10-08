@@ -80,13 +80,23 @@ void Analyse(void** vec, Stat& s) {
   s.distinct += static_cast<uint64_t>(std::unique(keys.begin(), keys.end()) - keys.begin());
 }
 
+// Optional wrapper around the cascade execute (shadow_batch.h): it calls
+// `orig` itself (possibly twice in its verification mode); nullptr when unused.
+using WrapFn = void (*)(void* pass, void* ctx, ExecFn orig);
+std::atomic<WrapFn> g_wrap{nullptr};
+
+void CallOrig(void* pass, void* ctx) {
+  if (WrapFn w = g_wrap.load(std::memory_order_relaxed)) return w(pass, ctx, g_orig);
+  g_orig(pass, ctx);
+}
+
 void __fastcall Hook(void* pass, void* ctx) {
-  if (!g_recording.load(std::memory_order_relaxed)) return g_orig(pass, ctx);
+  if (!g_recording.load(std::memory_order_relaxed)) return CallOrig(pass, ctx);
   Stat local;
   if (void** vec = CasterVector(pass, ctx)) Analyse(vec, local);
   LARGE_INTEGER a, b;
   QueryPerformanceCounter(&a);
-  g_orig(pass, ctx);
+  CallOrig(pass, ctx);
   QueryPerformanceCounter(&b);
   local.calls = 1;
   local.us = (b.QuadPart - a.QuadPart) * g_qpcToUs;
@@ -99,6 +109,7 @@ void __fastcall Hook(void* pass, void* ctx) {
 }
 
 void Install() {
+  if (g_orig) return;
   HMODULE gc = GetModuleHandleW(L"GraphicsCore.dll");
   if (!gc) return;
   auto base = reinterpret_cast<uint8_t*>(gc);

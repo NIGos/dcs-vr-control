@@ -27,6 +27,7 @@
 #include <tuple>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "loader_api.h"
@@ -178,6 +179,26 @@ struct Config {
   bool motionTaxi = false;        // [Suite] MotionTaxi
   bool taskClock = false;         // [Timing] TaskQueueClock
   bool frameHeapSlabs = false;    // [Model] FrameHeapSlabs
+  bool shadowTexSkip = true;      // [Model] ShadowTextureSkip (shadow_tex.h; masks from shadow_inst compiles)
+  bool suiteBenchShadowTex = false;  // [Suite] BenchShadowTex
+  bool suiteBenchTexTable = false;   // [Suite] BenchTexTable (texture dedupe table layout)
+  bool suiteBenchBigPages = false;   // [Suite] BenchBigPages
+  bool bigPages = true;              // [Model] BigModelPages (big_pages.h)
+  bool parUpload = false;            // [Model] ParallelUpload (par_upload.h)
+  bool suiteBenchParUpload = false;  // [Suite] BenchParallelUpload
+  bool motionCounters = true;        // [Suite] MotionCounters
+  bool shadowInst = true;            // [Model] ShadowInstancing (shadow_inst.h: compiles the instanced shadow VS variants)
+  bool suiteShadowInstCompile = false;  // [Suite] ShadowInstCompile
+  bool suiteGBufferInstCompile = false;  // [Suite] GBufferInstCompile (R13 stage 1: main-pass model_vs variants)
+  bool shadowBatch = true;           // [Model] ShadowBatching (shadow_batch.h; needs ShadowInstancing)
+  bool suiteShadowInstVerify = false;   // [Suite] ShadowInstVerify
+  bool suiteBenchShadowInst = false;    // [Suite] BenchShadowInst
+  bool gbufferBatch = false;            // [Model] GBufferBatching (gb_batch.h; needs ShadowInstancing)
+  bool suiteGBufferInstVerify = false;  // [Suite] GBufferInstVerify
+  bool suiteBenchGBufferInst = false;   // [Suite] BenchGBufferInst
+  int holdYawDeg = -1;               // [Suite] HoldYawDeg: constant view yaw for unattended runs (-1 = off)
+  bool suiteYawScan = false;         // [Suite] YawScan: fps per held yaw, 0..345 in 15 deg steps
+  uint32_t bigPageBytes = 4u << 20;  // [Model] BigPageBytes
   bool suiteBenchFrameHeap = false;     // [Suite] MotionProfile: CPU profile of the sweep's translation phase        // [Suite] Quick: configuration check + A/B only
   int suiteBenchFilter = 1;  // 1 = end-to-end A/B, 2 = also filter vs hooks
   bool d3dFilter = false;        // skip redundant D3D11 state calls
@@ -201,6 +222,9 @@ void Chime(DWORD freq, DWORD ms) {
 }
 double g_tscHz = 0;
 void ApplyTimerConfig();
+void BenchUseCompactTexTable(bool on);
+void ApplyBigPages(bool on);
+void ApplyParUpload(bool on);
 void ApplyTextureHook();
 void ApplyTriCounter();
 void ApplyCbSkip();
@@ -208,6 +232,11 @@ void ApplyCbUpload();
 void ApplyPacer();
 void ApplyTaskClock();
 void ApplyFrameHeap();
+void ApplyShadowTexSkip();
+void ApplyShadowInst();
+void ApplyShadowBatch();
+void ApplyGBufferBatch();
+void ApplyHoldYaw(int deg);
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
 std::atomic<bool> g_faulted{false};
@@ -253,7 +282,8 @@ std::atomic<bool> g_costWeightsSanity{false};
 std::atomic<bool> g_cbUploadSkipOn{false};     // cbupload (tex_bind.h)
 std::atomic<bool> g_pacerLowPowerOn{false};    // pacer.h
 std::atomic<bool> g_taskClockOn{false};        // edtime.h
-std::atomic<bool> g_frameHeapOn{false};        // frame_heap.h        // time the allocator/texture hooks (suite counters only)
+std::atomic<bool> g_frameHeapOn{false};        // frame_heap.h
+std::atomic<bool> g_shadowTexSkipOn{false};    // shadow_tex.h        // time the allocator/texture hooks (suite counters only)
 
 // System timer resolution for the DCS process (NtSetTimerResolution, 100 ns
 // units). DCS reports 15.5 ms; Sleep(1) then lasts up to a full tick.
@@ -380,6 +410,29 @@ void LoadConfig(bool initial) {
   c.taskClock = GetPrivateProfileIntW(L"Timing", L"TaskQueueClock", 0, ini.c_str()) != 0;
   c.frameHeapSlabs = GetPrivateProfileIntW(L"Model", L"FrameHeapSlabs", 0, ini.c_str()) != 0;
   c.suiteBenchFrameHeap = GetPrivateProfileIntW(L"Suite", L"BenchFrameHeap", 0, ini.c_str()) != 0;
+  c.shadowTexSkip = GetPrivateProfileIntW(L"Model", L"ShadowTextureSkip", 1, ini.c_str()) != 0;
+  c.suiteBenchShadowTex = GetPrivateProfileIntW(L"Suite", L"BenchShadowTex", 0, ini.c_str()) != 0;
+  c.suiteBenchTexTable = GetPrivateProfileIntW(L"Suite", L"BenchTexTable", 0, ini.c_str()) != 0;
+  c.suiteBenchBigPages = GetPrivateProfileIntW(L"Suite", L"BenchBigPages", 0, ini.c_str()) != 0;
+  c.bigPages = GetPrivateProfileIntW(L"Model", L"BigModelPages", 1, ini.c_str()) != 0;
+  c.parUpload = GetPrivateProfileIntW(L"Model", L"ParallelUpload", 0, ini.c_str()) != 0;
+  c.suiteBenchParUpload = GetPrivateProfileIntW(L"Suite", L"BenchParallelUpload", 0, ini.c_str()) != 0;
+  c.motionCounters = GetPrivateProfileIntW(L"Suite", L"MotionCounters", 1, ini.c_str()) != 0;
+  c.shadowInst = GetPrivateProfileIntW(L"Model", L"ShadowInstancing", 1, ini.c_str()) != 0;
+  c.suiteShadowInstCompile = GetPrivateProfileIntW(L"Suite", L"ShadowInstCompile", 0, ini.c_str()) != 0;
+  c.suiteGBufferInstCompile = GetPrivateProfileIntW(L"Suite", L"GBufferInstCompile", 0, ini.c_str()) != 0;
+  c.shadowBatch = GetPrivateProfileIntW(L"Model", L"ShadowBatching", 1, ini.c_str()) != 0;
+  c.suiteShadowInstVerify = GetPrivateProfileIntW(L"Suite", L"ShadowInstVerify", 0, ini.c_str()) != 0;
+  c.suiteBenchShadowInst = GetPrivateProfileIntW(L"Suite", L"BenchShadowInst", 0, ini.c_str()) != 0;
+  c.gbufferBatch = GetPrivateProfileIntW(L"Model", L"GBufferBatching", 0, ini.c_str()) != 0;
+  c.suiteGBufferInstVerify = GetPrivateProfileIntW(L"Suite", L"GBufferInstVerify", 0, ini.c_str()) != 0;
+  c.suiteBenchGBufferInst = GetPrivateProfileIntW(L"Suite", L"BenchGBufferInst", 0, ini.c_str()) != 0;
+  c.holdYawDeg = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"HoldYawDeg", -1, ini.c_str()));
+  c.suiteYawScan = GetPrivateProfileIntW(L"Suite", L"YawScan", 0, ini.c_str()) != 0;
+  {
+    const uint32_t v = GetPrivateProfileIntW(L"Model", L"BigPageBytes", 4 << 20, ini.c_str());
+    c.bigPageBytes = v < (1u << 20) ? (1u << 20) : v > (64u << 20) ? (64u << 20) : v;
+  }
   c.suiteBenchTimerRes = GetPrivateProfileIntW(L"Suite", L"BenchTimerRes", 0, ini.c_str()) != 0;
   c.suiteBenchFilter = GetPrivateProfileIntW(L"Suite", L"BenchFilter", 0, ini.c_str());
   c.d3dFilter = GetPrivateProfileIntW(L"D3D", L"Filter", 0, ini.c_str()) != 0;
@@ -418,6 +471,14 @@ void LoadConfig(bool initial) {
   ApplyTaskClock();
   g_frameHeapOn = c.frameHeapSlabs && !g_engineOff.load();
   if (g_frameHeapOn.load()) ApplyFrameHeap();
+  g_shadowTexSkipOn = c.shadowTexSkip && !g_engineOff.load();
+  ApplyShadowTexSkip();
+  ApplyBigPages(c.bigPages && !g_engineOff.load());
+  ApplyParUpload(c.parUpload && !g_engineOff.load());
+  ApplyShadowInst();
+  ApplyShadowBatch();
+  ApplyGBufferBatch();
+  ApplyHoldYaw(c.holdYawDeg);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
   g_shadowTight = c.shadowTight;
@@ -709,6 +770,9 @@ void RestoreD3dHooks();
 #include "shadow_pass.h"
 #include "pass_timing.h"
 #include "thread_tuning.h"
+#include <condition_variable>
+#include <d3dcompiler.h>
+#include <d3d11shader.h>
 namespace {
 
 void ApplyTimerConfig() {
@@ -969,10 +1033,18 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "part_weights.h"
 #include "terrain_count.h"
 #include "binder_count.h"
+#include "inst_count.h"
+#include "gb_count.h"
+#include "shadow_tex.h"
+#include "shadow_inst.h"
+#include "shadow_batch.h"
+#include "gb_batch.h"
 #include "pacer.h"
 #include "pose_sweep.h"
 #include "edtime.h"
 #include "frame_heap.h"
+#include "big_pages.h"
+#include "par_upload.h"
 #include "motion_probes.h"
 #include "motion.h"
 
@@ -1282,6 +1354,73 @@ void ApplyTriCounter() {
 }
 
 void ApplyTextureHook() { texbind::SetAttached(g_texDedupeOn.load() || g_hookMeasure.load()); }
+void BenchUseCompactTexTable(bool on) { texbind::UseCompactTable(on); }
+void ApplyParUpload(bool on) {
+  if (on && !parupload::Install()) {
+    parupload::g_on = false;
+    return;
+  }
+  parupload::g_on = on;
+}
+
+void ApplyBigPages(bool on) {
+  if (bigpages::g_state.load() == 0) bigpages::g_bigBytes = g_cfg.bigPageBytes;
+  if (on && !bigpages::Install()) return;
+  bigpages::SetOn(on);
+}
+
+// Stage 1 (compile + log only); installed on first use, retried every second.
+void ApplyShadowInst() {
+  const bool on = g_cfg.shadowInst && !g_engineOff.load();
+  if (on != shadowinst::g_on.load() || (on && shadowinst::g_state.load() == 0)) shadowinst::SetOn(on);
+}
+
+// [Suite] HoldYawDeg: constant view yaw for unattended benchmark views.
+void ApplyHoldYaw(int deg) {
+  if (deg >= 0)
+    posesweep::Hold(true, deg);
+  else if (posesweep::Holding())
+    posesweep::Hold(false, 0);
+}
+
+// Stage 2: batching on top of the compiled variants; retried every second
+// until the compile pipeline and hooks are ready.
+void ApplyShadowBatch() {
+  const bool on = g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load();
+  if (on && !shadowbatch::Install()) {
+    shadowbatch::g_on = false;
+    return;
+  }
+  shadowbatch::g_on = on;
+}
+
+// G-buffer stage 2: the G-buffer keys are collected and compiled while on;
+// batching starts once the hooks are ready (retried every second).
+void ApplyGBufferBatch() {
+  const bool on = g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load();
+  if (on != shadowinst::g_onGb.load() || (on && !shadowinst::g_gbInstalled.load())) shadowinst::SetOnGb(on);
+  if (on && !(gbbatch::Install() && gbverify::Install())) {
+    gbbatch::g_on = false;
+    return;
+  }
+  gbbatch::g_on = on;
+}
+
+// Installed on first use; detached (DCS's own slot 5) while off. Its masks
+// come from shadow_inst's compiles of the casters' keys, so shadow_inst
+// collects them while the skip is on (until a key is compiled, its shaders
+// keep every texture set).
+void ApplyShadowTexSkip() {
+  const bool on = g_shadowTexSkipOn.load();
+  // Shadow verification compares a stock run (texture skip detached) with the
+  // batched run (texture skip attached when configured on).
+  shadowbatch::g_verifyStock = [](bool stock) {
+    if (g_shadowTexSkipOn.load() && shadowtex::g_state.load() > 0) shadowtex::SetAttached(!stock);
+  };
+  if (on != shadowinst::g_onTex.load() || (on && shadowinst::g_state.load() == 0)) shadowinst::SetOnTex(on);
+  if (on && !shadowtex::Install()) return;
+  shadowtex::SetAttached(on);
+}
 
 // Applies the kill switch state to every measured optimization.
 void SetEngineOff(bool off) {
@@ -1301,6 +1440,13 @@ void SetEngineOff(bool off) {
   g_taskClockOn = g_cfg.taskClock && !off;
   ApplyTaskClock();
   g_frameHeapOn = g_cfg.frameHeapSlabs && !off;
+  g_shadowTexSkipOn = g_cfg.shadowTexSkip && !off;
+  ApplyShadowTexSkip();
+  ApplyBigPages(g_cfg.bigPages && !off);
+  ApplyParUpload(g_cfg.parUpload && !off);
+  ApplyShadowInst();
+  ApplyShadowBatch();
+  ApplyGBufferBatch();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
@@ -1705,6 +1851,14 @@ DWORD WINAPI SuiteThread(void*) {
     Log("-- metashader binder repeats (5 s) --");
     bindcount::Measure(5000, g_quadFrame);
     imcount::Measure(5000, g_quadFrame, g_tscHz, bindcount::g_thread);  // g_thread = render thread seen by bindcount
+    Log("-- model data pages --");
+    allocslab::LogClasses();
+    Log("-- g-buffer batching potential (5 s) --");
+    gbcount::Measure(5000, g_quadFrame);
+    Log("-- shadow caster batching potential (5 s) --");
+    instcount::Measure(5000, g_quadFrame);
+    Log("-- shadow casters through material slot 5 (5 s) --");
+    shadowcount::Measure(5000, g_quadFrame, g_tscHz);
     if (cbupload::Install()) {
       Log("-- per-view context buffer uploads (5 s) --");
       memset(cbupload::g_view, 0, sizeof(cbupload::g_view));
@@ -1723,6 +1877,159 @@ DWORD WINAPI SuiteThread(void*) {
             cbupload::g_viewCalls / f,
             cbupload::g_viewCalls ? 100.0 * cbupload::g_viewSame / cbupload::g_viewCalls : 0.0);
     }
+  }
+  if (ok && g_cfg.suiteShadowInstCompile && !g_benchAbort) {
+    Log("-- shadow instancing stage 1: compile shadow-caster VS variants (collect 3 s, then wait) --");
+    shadowinst::SuitePhase(3000, g_benchAbort);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGBufferInstCompile && !g_benchAbort) {
+    Log("-- g-buffer instancing stage 1: compile main-pass model_vs variants, reflection gate (collect 3 s, then "
+        "wait) --");
+    shadowinst::SuitePhaseGb(3000, g_benchAbort, &g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteYawScan && !g_benchAbort) {
+    Log("-- yaw scan: fps per held view yaw (2 s settle + 2 s each) --");
+    int best = 0;
+    double bestFps = 1e9;
+    for (int deg = 0; deg < 360 && !g_benchAbort; deg += 15) {
+      posesweep::Hold(true, deg);
+      Sleep(2000);
+      const uint64_t f0 = g_quadFrame.load();
+      LARGE_INTEGER a, b;
+      QueryPerformanceCounter(&a);
+      Sleep(2000);
+      QueryPerformanceCounter(&b);
+      const double fps = (g_quadFrame.load() - f0) / ((b.QuadPart - a.QuadPart) * g_qpcToUs / 1e6);
+      Log("  yaw %3d deg: %.1f fps", deg, fps);
+      if (fps < bestFps) {
+        bestFps = fps;
+        best = deg;
+      }
+    }
+    Log("  heaviest view: yaw %d deg (%.1f fps); set [Suite] HoldYawDeg=%d to keep it", best, bestFps, best);
+    if (g_cfg.holdYawDeg >= 0)
+      posesweep::Hold(true, g_cfg.holdYawDeg);
+    else
+      posesweep::Hold(false, 0);
+  }
+  if (ok && g_cfg.suiteShadowInstVerify && !g_benchAbort) {
+    Log("-- shadow instancing stage 2: same-frame depth compare, stock vs batched (3 s) --");
+    if (!shadowbatch::Install()) {
+      Log("  shadow batching not ready (needs [Model] ShadowInstancing=1 and the compiled variants)");
+    } else {
+      const bool was = shadowbatch::g_on.load();
+      shadowbatch::ResetCounters();
+      shadowbatch::g_verify = true;
+      shadowbatch::g_on = true;
+      Sleep(3000);
+      shadowbatch::g_verify = false;
+      shadowbatch::g_on = was;
+      Sleep(100);
+      shadowbatch::LogCounters("verify");
+      shadowbatch::ResetCounters();
+      shadowbatch::g_on = true;
+      Sleep(2000);
+      shadowbatch::g_on = was;
+      Sleep(100);
+      shadowbatch::LogCounters("2 s batched");
+    }
+  }
+  if (ok && g_cfg.suiteBenchParUpload && parupload::Install() && !g_benchAbort) {
+    Log("-- A/B: parallel copy for large dynamic structured-buffer uploads --");
+    parupload::g_calls = parupload::g_bytes = parupload::g_cycles = 0;
+    const uint64_t f0 = g_quadFrame.load();
+    ok = RunBenchmark(24, false);
+    const double f = static_cast<double>(g_quadFrame.load() - f0);
+    if (f > 0)
+      Log("  parallel uploads during the ON blocks: %.1f/frame, %.2f MB/frame, %.3f ms/frame (whole run frames)",
+          parupload::g_calls / f, parupload::g_bytes / f / 1048576.0, parupload::g_cycles / g_tscHz * 1000.0 / f);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchShadowInst && shadowbatch::Install() && !g_benchAbort) {
+    Log("-- A/B: shadow caster instancing --");
+    ok = RunBenchmark(22, false);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGBufferInstVerify && !g_benchAbort) {
+    Log("-- g-buffer instancing stage 2: same-frame compare of all G-buffer targets, stock vs stock then stock vs "
+        "batched --");
+    // The G-buffer keys must be compiled first (collect 3 s, then wait).
+    const bool wasCollecting = shadowinst::g_onGb.load();
+    shadowinst::SetOnGb(true);
+    Sleep(3000);
+    const double waitS = shadowinst::WaitCompiles(g_benchAbort);
+    const shadowinst::Totals t = shadowinst::Snap(shadowinst::kKindGb);
+    Log("  g-buffer keys: %u OK of %u (waited %.1f s)", t.ok, t.keys, waitS);
+    if (!gbbatch::Install() || !gbverify::Install()) {
+      Log("  g-buffer batching not ready (needs [Model] ShadowInstancing=1, the compiled variants and the analysed "
+          "build)");
+    } else if (gbbatch::g_disabled.load()) {
+      Log("  g-buffer batching is latched off for this session; not verified");
+    } else {
+      const bool was = gbbatch::g_on.load();
+      gbbatch::ResetCounters();
+      gbverify::ResetCounters();
+      gbbatch::g_verify = true;
+      gbbatch::g_on = true;
+      Sleep(6000);
+      gbbatch::g_verify = false;
+      gbbatch::g_on = was;
+      Sleep(200);
+      gbbatch::LogCounters("verify");
+      gbverify::LogCounters();
+      if (!gbbatch::g_disabled.load()) {
+        gbbatch::ResetCounters();
+        gbbatch::g_on = true;
+        Sleep(2000);
+        gbbatch::g_on = was;
+        Sleep(100);
+        gbbatch::LogCounters("2 s batched");
+      }
+    }
+    if (!wasCollecting) ApplyGBufferBatch();
+    if (!wasCollecting && !shadowinst::g_onGb.load()) shadowinst::SetOnGb(false);
+  }
+  if (ok && g_cfg.suiteBenchGBufferInst && gbbatch::Install() && !g_benchAbort) {
+    Log("-- A/B: g-buffer instancing --");
+    ok = RunBenchmark(23, false);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchBigPages && allocslab::g_state.load() >= 1 && bigpages::Install() && !g_benchAbort) {
+    Log("-- A/B: big model data pages vs stock 63.5 KB pages --");
+    ok = RunBenchmark(21, false);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchTexTable && texbind::g_attached.load() && g_texDedupeOn.load() && !g_benchAbort) {
+    Log("-- A/B: texture dedupe table, 16-byte entries vs previous 24-byte entries --");
+    ok = RunBenchmark(20, false);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchShadowTex && shadowtex::Install() && !g_benchAbort) {
+    Log("-- shadow-caster texture sets with the skip on (5 s) --");
+    {
+      g_shadowTexSkipOn = true;
+      ApplyShadowTexSkip();
+      // The masks need the casters' keys compiled: collect 3 s, wait for the
+      // compile workers, then let first sight build each shader's mask.
+      Sleep(3000);
+      const double waitS = shadowinst::WaitCompiles(g_benchAbort);
+      const shadowinst::Totals keys = shadowinst::Snap();
+      Log("  shadow keys for the masks: %u keys, %u compiled (%u with both variants OK), %u not finished; "
+          "waited %.1f s",
+          keys.keys, keys.done, keys.ok, keys.keys - keys.done, waitS);
+      Sleep(500);
+      shadowtex::Totals a = shadowtex::Snapshot();
+      const uint64_t f0 = g_quadFrame.load();
+      Sleep(5000);
+      shadowtex::Report(a, shadowtex::Snapshot(), g_quadFrame.load() - f0);
+      g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
+      ApplyShadowTexSkip();
+    }
+    Log("-- A/B: skip shadow-caster texture sets the shadow passes do not read --");
+    ok = RunBenchmark(19, false);
+    Chime(1000, 60);
   }
   if (ok && g_cfg.suiteBenchFrameHeap && frameheap::Install() && !g_benchAbort) {
     Log("-- A/B: per-thread slabs for the edCore frame heap --");
@@ -1867,6 +2174,7 @@ DWORD WINAPI WorkerThread(void*) {
   if (g_cfg.allocSlabs) allocslab::Prepare();
   if (g_cfg.costWeights) partw::Install();
   if (g_cfg.texDedupe) texbind::Install(g_tscHz);
+  ApplyShadowTexSkip();
   if (timercache::Install(g_cfg.shaderTimeCacheUs)) ApplyTimerConfig();
   ApplyTaskClock();
   if (g_cfg.d3dMeter && !d3ds::Install()) Log("d3d meter: not installed");
@@ -1958,6 +2266,20 @@ DWORD WINAPI WorkerThread(void*) {
     if (now - lastCfg >= 1000) {
       lastCfg = now;
       LoadConfig(false);
+      // NGModel.dll may load after the payload: retry until the hook installs.
+      if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
+          !g_benchRunningFlag.load())
+        ApplyShadowTexSkip();
+      if (g_cfg.bigPages && !g_engineOff.load() && bigpages::g_state.load() == 0 && allocslab::g_state.load() >= 1 &&
+          !g_benchRunningFlag.load())
+        ApplyBigPages(true);
+      if (g_cfg.shadowInst && !g_engineOff.load() && shadowinst::g_state.load() == 0) ApplyShadowInst();
+      if (g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load() && shadowbatch::g_state.load() == 0 &&
+          !g_benchRunningFlag.load())
+        ApplyShadowBatch();
+      if (g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load() && gbbatch::g_state.load() == 0 &&
+          !g_benchRunningFlag.load())
+        ApplyGBufferBatch();
     }
     // Re-read the Quad-Views-Foveated edge smoothing every 10 s once quad views run.
     static ULONGLONG lastQv = 0;
@@ -1992,6 +2314,7 @@ DWORD WINAPI WorkerThread(void*) {
       if (!motionEnd && !g_benchRunningFlag.load() && GetFileAttributesW(mflag.c_str()) != INVALID_FILE_ATTRIBUTES) {
         DeleteFileW(mflag.c_str());
         InstallDiagnostics();
+        motion::g_counters = g_cfg.motionCounters;
         motion::Start(g_tscHz);
         posesweep::g_taxi = g_cfg.motionTaxi;
         if (g_cfg.motionSweep) posesweep::Start();
@@ -2027,6 +2350,15 @@ DWORD WINAPI WorkerThread(void*) {
     static ULONGLONG lastFlag = 0;
     if (now - lastFlag >= 1000) {
       lastFlag = now;
+      // Remote kill switch: toggle_engine.flag (next to the DLL or the dev ini)
+      // toggles every measured optimization, like the [Hotkeys] Toggle key.
+      for (const std::wstring& tf : {g_dir + L"toggle_engine.flag",
+                                     g_devDir.empty() ? std::wstring() : g_devDir + L"toggle_engine.flag"}) {
+        if (!tf.empty() && GetFileAttributesW(tf.c_str()) != INVALID_FILE_ATTRIBUTES) {
+          DeleteFileW(tf.c_str());
+          ToggleEngine();
+        }
+      }
       std::wstring flag = g_dir + L"run_suite.flag";
       std::wstring devFlag = g_devDir.empty() ? std::wstring() : g_devDir + L"run_suite.flag";
       if (!devFlag.empty() && GetFileAttributesW(devFlag.c_str()) != INVALID_FILE_ATTRIBUTES) flag = devFlag;
@@ -2112,6 +2444,31 @@ void SetBenchVariant(bool on) {
   }
   if (g_benchActiveMode.load() == 6) {
     g_d3dMode = on ? 1 : 0;
+    return;
+  }
+  if (g_benchActiveMode.load() == 24) {
+    ApplyParUpload(on);
+    return;
+  }
+  if (g_benchActiveMode.load() == 22) {
+    shadowbatch::g_on = on;
+    return;
+  }
+  if (g_benchActiveMode.load() == 23) {
+    gbbatch::g_on = on;
+    return;
+  }
+  if (g_benchActiveMode.load() == 21) {
+    ApplyBigPages(on);
+    return;
+  }
+  if (g_benchActiveMode.load() == 20) {
+    BenchUseCompactTexTable(on);
+    return;
+  }
+  if (g_benchActiveMode.load() == 19) {
+    g_shadowTexSkipOn = on;
+    ApplyShadowTexSkip();
     return;
   }
   if (g_benchActiveMode.load() == 18) {
@@ -2212,5 +2569,10 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   d3ds::Uninstall();
   timercache::g_on = false;  // until the new payload re-patches, pass through
   timercache::g_stopUpdater = true;
+  gbbatch::Shutdown();      // G-buffer batching callbacks first
+  gbverify::Shutdown();
+  parupload::Shutdown();
+  shadowbatch::Shutdown();  // unhooks the batching callbacks before the VS objects go
+  shadowinst::Shutdown();  // joins the compile workers, then releases our VS objects
 }
 #endif

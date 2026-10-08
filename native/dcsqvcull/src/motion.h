@@ -38,15 +38,21 @@ allocslab::Totals g_prevAlloc;
 mprobe::Snap g_prevProbe{};
 double g_tscHz = 1;
 
+// [Suite] MotionCounters: 0 = record frame times only, without the texture,
+// allocator, pass-timing and probe counters (for clean CPU profiles in motion).
+bool g_counters = true;
+
 void Start(double tscHz) {
   std::lock_guard<std::mutex> lock(g_mutex);
   for (auto& b : g_b) b = Bucket{};
   g_havePrev = false;
   g_tscHz = tscHz;
-  mprobe::Install();
-  g_hookMeasure = true;  // texture/allocator counters on (same overhead in every bucket)
-  texbind::SetAttached(true);
-  ptiming::g_recording = true;
+  if (g_counters) {
+    mprobe::Install();
+    g_hookMeasure = true;  // texture/allocator counters on (same overhead in every bucket)
+    texbind::SetAttached(true);
+    ptiming::g_recording = true;
+  }
   SYSTEMTIME st;
   GetLocalTime(&st);
   wchar_t name[64];

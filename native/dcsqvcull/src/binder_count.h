@@ -158,3 +158,124 @@ void Measure(int ms, std::atomic<uint64_t>& frames, double tscHz, DWORD renderTh
 }
 
 }  // namespace imcount
+
+// Shadow casters through NGModel material slot 5 (R10 C1): GlassMaterialMT
+// (vtable 0x590d8) and ModelMaterialMT (vtable 0x592f0). Slot 5 is reached by
+// a tail jump from ShadowMapRenderable vt[1](renderable, ctx), so only the
+// four register arguments exist. Glass casters whose properties byte +0x33 is
+// set use lockon_shadows_transparent, whose glass pixel shader always
+// discards: those draws write nothing.
+namespace shadowcount {
+
+using Fn = uint64_t(__fastcall*)(void*, void*, void*, void*);
+Fn g_origGlass = nullptr, g_origModel = nullptr;
+std::atomic<bool> g_on{false};
+std::atomic<uint64_t> g_glass{0}, g_glassTransparent{0}, g_model{0}, g_glassCycles{0};
+std::atomic<uint64_t> g_modelCycles{0}, g_texCalls{0}, g_texCycles{0}, g_texCallsAll{0}, g_texCyclesAll{0};
+std::atomic<uint64_t> g_texNullAll{0};
+thread_local bool t_inShadow = false;
+// The shadow texture skip (shadow_tex.h) also owns model slot 5. Once this
+// counter has patched the slot, it forwards to that hook instead of the
+// original, so both can be active.
+std::atomic<Fn> g_modelNext{nullptr};
+inline Fn ModelTarget() {
+  Fn n = g_modelNext.load(std::memory_order_relaxed);
+  return n ? n : g_origModel;
+}
+
+// DX11Shader slot 26 (dx11backend vtable 0xb43b8, 0x1fd70) = set a material
+// texture: (shader, handle, texture, aux, Vec2i) [V R10]. Timed inside model
+// slot 5 (shadow casters) and overall, to bound R10 C2.
+using TexFn = uint64_t(__fastcall*)(void*, void*, void*, void*, uint64_t, uint64_t);
+TexFn g_origTex = nullptr;
+uint64_t __fastcall HookTex(void* a, void* b, void* c, void* d, uint64_t e, uint64_t f) {
+  if (!g_on.load(std::memory_order_relaxed)) return g_origTex(a, b, c, d, e, f);
+  uint64_t t0 = __rdtsc();
+  uint64_t r = g_origTex(a, b, c, d, e, f);
+  uint64_t dt = __rdtsc() - t0;
+  g_texCallsAll++;
+  g_texCyclesAll += dt;
+  if (!c) g_texNullAll++;  // slot 26 does nothing for a NULL texture
+  if (t_inShadow) {
+    g_texCalls++;
+    g_texCycles += dt;
+  }
+  return r;
+}
+
+bool Transparent(void* mat) {
+  auto* props = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mat) + 0x28);
+  return props && props[0x33] != 0;
+}
+
+uint64_t __fastcall HookGlass(void* a, void* b, void* c, void* d) {
+  if (!g_on.load(std::memory_order_relaxed)) return g_origGlass(a, b, c, d);
+  g_glass++;
+  if (!Transparent(a)) return g_origGlass(a, b, c, d);
+  g_glassTransparent++;
+  uint64_t t0 = __rdtsc();
+  uint64_t r = g_origGlass(a, b, c, d);
+  g_glassCycles += __rdtsc() - t0;
+  return r;
+}
+
+uint64_t __fastcall HookModel(void* a, void* b, void* c, void* d) {
+  if (!g_on.load(std::memory_order_relaxed)) return ModelTarget()(a, b, c, d);
+  g_model++;
+  uint64_t t0 = __rdtsc();
+  t_inShadow = true;
+  uint64_t r = ModelTarget()(a, b, c, d);
+  t_inShadow = false;
+  g_modelCycles += __rdtsc() - t0;
+  return r;
+}
+
+bool Install() {
+  if (g_origGlass) return true;
+  auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
+  if (!base) return false;
+  auto** glass = reinterpret_cast<void**>(base + 0x590d8);
+  auto** model = reinterpret_cast<void**>(base + 0x592f0);
+  if (!allocslab::RttiIs(base, glass, ".?AVGlassMaterialMT@model@@") ||
+      !allocslab::RttiIs(base, model, ".?AVModelMaterialMT@model@@") ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&glass[5])) != base + 0x14980 ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&model[5])) != base + 0x17750) {
+    Log("shadow caster counter: NGModel vtables do not match this build; skipped");
+    return false;
+  }
+  auto* dx = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
+  auto** shader = dx ? reinterpret_cast<void**>(dx + 0xb43b8) : nullptr;
+  if (!shader || !allocslab::RttiIs(dx, shader, ".?AVDX11Shader@RenderAPI@@") ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&shader[26])) != dx + 0x1fd70) {
+    Log("shadow caster counter: DX11Shader vtable does not match this build; skipped");
+    return false;
+  }
+  g_origTex = reinterpret_cast<TexFn>(SlotOriginal(&shader[26]));
+  if (!HookSlot(&shader[26], reinterpret_cast<void*>(&HookTex), nullptr)) return false;
+  g_origGlass = reinterpret_cast<Fn>(SlotOriginal(&glass[5]));
+  g_origModel = reinterpret_cast<Fn>(SlotOriginal(&model[5]));
+  return HookSlot(&glass[5], reinterpret_cast<void*>(&HookGlass), nullptr) &&
+         HookSlot(&model[5], reinterpret_cast<void*>(&HookModel), nullptr);
+}
+
+void Measure(int ms, std::atomic<uint64_t>& frames, double tscHz) {
+  if (!Install()) return;
+  g_glass = g_glassTransparent = g_model = g_glassCycles = 0;
+  g_modelCycles = g_texCalls = g_texCycles = g_texCallsAll = g_texCyclesAll = g_texNullAll = 0;
+  uint64_t f0 = frames.load();
+  g_on = true;
+  Sleep(ms);
+  g_on = false;
+  Sleep(50);
+  double f = static_cast<double>(frames.load() - f0);
+  if (f <= 0) return;
+  Log("  shadow casters per frame: model %.0f, glass %.0f, glass with the transparent flag %.0f (%.3f ms/frame in them)",
+      g_model / f, g_glass / f, g_glassTransparent / f, g_glassCycles / tscHz * 1000.0 / f);
+  const double k = 1000.0 / tscHz / f;
+  Log("  model shadow casters (slot 5): %.3f ms/frame; texture sets inside them %.0f/frame, %.3f ms/frame "
+      "(all texture sets: %.0f/frame, %.3f ms/frame)",
+      g_modelCycles * k, g_texCalls / f, g_texCycles * k, g_texCallsAll / f, g_texCyclesAll * k);
+  Log("  texture sets with a NULL texture (slot 26 does nothing): %.1f/frame of all sets", g_texNullAll / f);
+}
+
+}  // namespace shadowcount

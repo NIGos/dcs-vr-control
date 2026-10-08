@@ -2,6 +2,8 @@
 #include "../src/main.cpp"
 
 #include <cassert>
+#include <d3dcompiler.h>
+#include <d3d11shader.h>
 #include <thread>
 
 namespace {
@@ -57,7 +59,142 @@ bool InsideBlock(const uint8_t* block, Vec3 p, double radius) {
   return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// Shadow texture skip (shadow_tex.h): fakes for the slot-5 differential test
+// ---------------------------------------------------------------------------
+namespace stx {
+using namespace shadowtex;
+
+struct Call {
+  int kind;  // 1 sb, 2 set texture, 3 submit, 4 vt23, 5 vt18, 6 getDesc, 7 compat, 8 getSRV, 9 getTexture, 10 valid
+  uint64_t a, b, c, d;
+  bool operator==(const Call& o) const { return kind == o.kind && a == o.a && b == o.b && c == o.c && d == o.d; }
+};
+std::vector<Call> g_trace;
+alignas(16) uint8_t g_texProps[0x20][16];
+bool g_validFlag[0x20];
+bool g_compatResult = true;
+alignas(16) uint8_t g_desc[0x40];
+
+uint64_t U(const void* p) { return reinterpret_cast<uint64_t>(p); }
+
+const void* __fastcall FakeGetTexture(const void* props, uint32_t idx) {
+  g_trace.push_back({9, U(props), idx, 0, 0});
+  return g_texProps[idx & 0x1f];
+}
+bool __fastcall FakeValid(const void* t) {
+  const size_t idx = (static_cast<const uint8_t*>(t) - &g_texProps[0][0]) / 16;
+  g_trace.push_back({10, idx, 0, 0, 0});
+  return g_validFlag[idx];
+}
+uint64_t __fastcall FakeSetSb(void* sh, void* h, void* v) {
+  g_trace.push_back({1, U(sh), U(h), U(v), 0});
+  return 0;
+}
+uint64_t __fastcall FakeSetTex(void* sh, int64_t h, void* tex, void* aux, const uint64_t* size) {
+  g_trace.push_back({2, U(sh) ^ static_cast<uint64_t>(h), U(tex), U(aux), *size});
+  return 0;
+}
+uint64_t __fastcall FakeSubmit(void* mat, uint64_t tech, uint64_t pass, void* a4) {
+  g_trace.push_back({3, U(mat), tech, pass & 0xffffffffull, U(a4)});
+  return 0x1234 + tech;
+}
+uint64_t __fastcall FakeTex23(void* tex, uint64_t size) {
+  g_trace.push_back({4, U(tex), size, 0, 0});
+  return 0;
+}
+uint64_t __fastcall FakeTex18(void* tex) {
+  g_trace.push_back({5, U(tex), 0, 0, 0});
+  return 0;
+}
+const uint8_t* __fastcall FakeGetDesc(void* tex) {
+  g_trace.push_back({6, U(tex), 0, 0, 0});
+  return g_desc;
+}
+bool __fastcall FakeCompat(int32_t type, int32_t fmt) {
+  g_trace.push_back({7, static_cast<uint32_t>(type), static_cast<uint32_t>(fmt), 0, 0});
+  return g_compatResult;
+}
+void* __fastcall FakeGetSrv(void* tex, void* aux, const uint64_t* size) {
+  g_trace.push_back({8, U(tex), U(aux), *size, 0});
+  return nullptr;
+}
+
+bool WriteCode(void* where, const void* bytes, size_t n) {
+  DWORD old;
+  if (!VirtualProtect(where, n, PAGE_EXECUTE_READWRITE, &old)) return false;
+  memcpy(where, bytes, n);
+  VirtualProtect(where, n, old, &old);
+  FlushInstructionCache(GetCurrentProcess(), where, n);
+  return true;
+}
+
+// One caster: material, properties, render item, texture entries, textures.
+struct Scene {
+  uint8_t mat[0x300];
+  uint8_t props[0x300];
+  uint8_t item[0x100];
+  uint8_t entries[24 * 16];
+  uint8_t* entryBase;
+  uint8_t tex[8][0x700];
+  uint8_t inner[8][0x20];
+  uint8_t back[8][0x50];
+};
+
+void* g_shaderVtbl[40];
+void* g_texVtbl[30];
+void* g_innerVtbl[12];
+void* g_otherInnerVtbl[12];
+alignas(16) uint8_t g_shader[0x100];
+alignas(16) uint8_t g_records[0x50 * 16];
+alignas(16) uint8_t g_globals[0x100];
+alignas(16) uint8_t g_sbArray[0x20 + 0x30 * 8];
+
+// Texture t of the scene: 4 has a mip set ready to swap, 6 an unknown inner
+// class and a non-zero +0x678. Entry 5 has no texture; entries 0, 3, 6, ...
+// have aux -1.
+void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, int baseIdx) {
+  memset(&s, 0, sizeof(s));
+  *reinterpret_cast<void**>(s.mat + 0x28) = s.props;
+  *reinterpret_cast<void**>(s.mat + 0x30) = g_shader;
+  *reinterpret_cast<uint64_t*>(s.mat + 0x68) = 0x6868;
+  *reinterpret_cast<uint64_t*>(s.mat + 0x210) = 7;
+  *reinterpret_cast<uint64_t*>(s.mat + 0x218) = 8;
+  *reinterpret_cast<uint32_t*>(s.mat + 0x2d8) = static_cast<uint32_t>(count);
+  for (int i = 0; i < count; ++i) *reinterpret_cast<int64_t*>(s.mat + 0x240 + i * 8) = handles[i];
+  *reinterpret_cast<int32_t*>(s.props + 8) = props8;
+  s.props[0x33] = static_cast<uint8_t>(transp);
+  *reinterpret_cast<uint32_t*>(s.props + 0x26c) = static_cast<uint32_t>(baseIdx);
+  *reinterpret_cast<uint32_t*>(s.item + 0xd0) = 3;
+  *reinterpret_cast<uint32_t*>(s.item + 0xd4) = 0xabcd;
+  s.entryBase = s.entries;
+  *reinterpret_cast<void**>(s.item + 0x18) = &s.entryBase;
+  for (int i = 0; i < 16; ++i) {
+    uint8_t* e = s.entries + i * 24;
+    const int t = i & 7;
+    *reinterpret_cast<int64_t*>(e) = (i % 3 == 0) ? -1 : i;  // aux
+    *reinterpret_cast<void**>(e + 8) = (i == 5) ? nullptr : s.tex[t];
+    *reinterpret_cast<void**>(s.tex[t]) = g_texVtbl;
+    *reinterpret_cast<void**>(s.tex[t] + 0x10) = s.inner[t];
+    *reinterpret_cast<void**>(s.inner[t]) = (t == 6) ? g_otherInnerVtbl : g_innerVtbl;
+    *reinterpret_cast<void**>(s.tex[t] + 0x1a0) = s.back[t];
+    *reinterpret_cast<int32_t*>(s.back[t] + 0x40) = (t == 4) ? 5 : 3;
+    *reinterpret_cast<void**>(s.back[t] + 0x20) = (t == 4) ? s.back[t] : nullptr;
+    if (t == 6) *reinterpret_cast<uint64_t*>(s.tex[t] + 0x678) = 1;
+  }
+}
+
+}  // namespace stx
+
 }  // namespace
+
+#include "shadow_inst_test.h"
+#include "shadow_tex_test.h"
+#include "gb_inst_test.h"
+#include "shadow_batch_test.h"
+#include "par_upload_test.h"
+#include "gb_batch_test.h"
 
 int main() {
   g_log = stdout;
@@ -773,6 +910,283 @@ int main() {
     ctx->Release();
     dev->Release();
   }
+
+  // Shadow texture skip: pure helpers.
+  {
+    using namespace shadowtex;
+    Check(NameRefers("Diffuse", "Diffuse") && NameRefers("Arr", "Arr[1]") && NameRefers("s", "s.tex") &&
+              !NameRefers("Diffuse", "DiffuseMap") && !NameRefers("Diffuse", "diffuse") &&
+              !NameRefers("NormalMap", "Diffuse") && NameRefers(nullptr, "x"),
+          "shadow tex: binding names match variables by base name");
+    // DXBC parser against the D3D compiler's own reflection.
+    HMODULE dc = LoadLibraryW(L"d3dcompiler_47.dll");
+    auto compile = dc ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(dc, "D3DCompile")) : nullptr;
+    auto reflect = dc ? reinterpret_cast<decltype(&D3DReflect)>(GetProcAddress(dc, "D3DReflect")) : nullptr;
+    if (!compile || !reflect) {
+      printf("SKIP shadow tex: d3dcompiler_47.dll not available\n");
+    } else {
+      const char* src =
+          "Texture2D Diffuse; Texture2D NormalMap; Texture2D Unused; Texture2D Arr[3]; Texture2D DamageMask;\n"
+          "SamplerState S; StructuredBuffer<float4> sbPositions; cbuffer C { float4 k; };\n"
+          "float4 ps(float4 p : SV_Position, float2 uv : TEXCOORD0) : SV_Target {\n"
+          "  clip(Diffuse.Sample(S, uv).a - 0.5); return Arr[1].Sample(S, uv) * k + DamageMask.Sample(S, uv); }\n"
+          "float4 ps_none(float4 p : SV_Position) : SV_Target { return 1; }\n"
+          "float4 vs(float4 pos : POSITION) : SV_Position {\n"
+          "  return sbPositions[(uint)pos.w] + NormalMap.SampleLevel(S, pos.xy, 0); }\n"
+          "struct G { float4 p : SV_Position; };\n"
+          "[maxvertexcount(3)] void gs(triangle G i[3], inout TriangleStream<G> o) {\n"
+          "  for (int j = 0; j < 3; ++j) o.Append(i[j]); }\n";
+      struct Case {
+        const char* entry;
+        const char* target;
+      } cases[] = {{"ps", "ps_5_0"}, {"ps", "ps_5_1"}, {"ps_none", "ps_5_0"}, {"vs", "vs_5_0"},
+                   {"vs", "vs_5_1"}, {"gs", "gs_4_0"}};
+      bool allMatch = true, truncOk = true, sawUnused = false, sawDiffuse = false;
+      for (const Case& c : cases) {
+        ID3DBlob* code = nullptr;
+        ID3DBlob* err = nullptr;
+        if (FAILED(compile(src, strlen(src), "t.hlsl", nullptr, nullptr, c.entry, c.target, 0, 0, &code, &err))) {
+          printf("     compile %s %s failed: %s\n", c.entry, c.target,
+                 err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+          allMatch = false;
+          if (err) err->Release();
+          continue;
+        }
+        const char* names[kMaxBindings];
+        const auto* bytes = static_cast<const uint8_t*>(code->GetBufferPointer());
+        const size_t size = code->GetBufferSize();
+        const int n = ParseDxbcBindings(bytes, size, names, kMaxBindings);
+        ID3D11ShaderReflection* r = nullptr;
+        bool match = n >= 0 && SUCCEEDED(reflect(bytes, size, __uuidof(ID3D11ShaderReflection),
+                                                 reinterpret_cast<void**>(&r)));
+        if (match) {
+          D3D11_SHADER_DESC sd = {};
+          r->GetDesc(&sd);
+          match = static_cast<UINT>(n) == sd.BoundResources;
+          for (UINT i = 0; match && i < sd.BoundResources; ++i) {
+            D3D11_SHADER_INPUT_BIND_DESC bd = {};
+            r->GetResourceBindingDesc(i, &bd);
+            match = strcmp(bd.Name, names[i]) == 0;
+          }
+          r->Release();
+        }
+        std::string list;
+        for (int i = 0; i < n; ++i) {
+          sawUnused |= strcmp(names[i], "Unused") == 0;
+          sawDiffuse |= strcmp(names[i], "Diffuse") == 0;
+          list += i ? " " : "";
+          list += names[i];
+        }
+        printf("     %s %s: %d bindings [%s]%s\n", c.entry, c.target, n, list.c_str(),
+               match ? "" : "  <-- differs from D3DReflect");
+        allMatch &= match;
+        // A truncated blob is rejected, never read out of bounds.
+        std::vector<uint8_t> copy(bytes, bytes + size);
+        for (size_t cut = 0; cut < size; cut += 7) {
+          std::vector<uint8_t> t(copy.begin(), copy.begin() + cut);
+          if (ParseDxbcBindings(t.data(), t.size(), names, kMaxBindings) >= 0) truncOk = false;
+        }
+        code->Release();
+      }
+      Check(allMatch, "shadow tex: RDEF parser lists exactly D3DReflect's bound resources (SM4.0/5.0/5.1)");
+      Check(truncOk, "shadow tex: truncated DXBC rejected");
+      Check(sawDiffuse && !sawUnused, "shadow tex: unused textures are not listed, used ones are");
+      uint8_t junk[64] = {'D', 'X', 'B', 'C'};
+      const char* names[4];
+      Check(ParseDxbcBindings(junk, sizeof(junk), names, 4) < 0 && ParseDxbcBindings(nullptr, 0, names, 4) < 0,
+            "shadow tex: malformed DXBC rejected");
+    }
+    // Records -> read mask.
+    MaskEntry e;
+    alignas(16) static uint8_t recs[0x50 * 5];
+    const char* recNames[5] = {"Diffuse", "NormalMap", "Arr", nullptr, "Specular"};
+    for (int i = 0; i < 5; ++i) *reinterpret_cast<const char**>(recs + i * 0x50 + 0x30) = recNames[i];
+    e.recBegin = recs;
+    e.recCount = 5;
+    e.state = 1;
+    const char* bound[] = {"S", "Diffuse", "Arr[1]", "sbPositions"};
+    MarkRead(e, bound, 4);
+    Check(!Skippable(e, 0) && Skippable(e, 1) && !Skippable(e, 2) && !Skippable(e, 3) && Skippable(e, 4) &&
+              !Skippable(e, 5) && !Skippable(e, -1) && !Skippable(e, 1ll << 40),
+          "shadow tex: mask keeps read, unnamed and out-of-range parameters");
+    e.state = -1;
+    Check(!Skippable(e, 1), "shadow tex: a 'keep' entry skips nothing");
+    // Cache.
+    auto* cache = new MaskCache;
+    MaskEntry m;
+    m.state = 1;
+    m.techA = 7;
+    m.techB = 8;
+    m.effect = &m;
+    uint8_t keys[3];
+    bool ok = cache->Insert(&keys[0], m) && cache->Insert(&keys[1], m);
+    ok = ok && cache->Find(&keys[0], 7, 8, &m, nullptr, nullptr, nullptr) &&
+         !cache->Find(&keys[0], 7, 9, &m, nullptr, nullptr, nullptr) &&     // other technique
+         !cache->Find(&keys[0], 7, 8, &keys, nullptr, nullptr, nullptr) &&  // other effect (fingerprint)
+         !cache->Find(&keys[2], 7, 8, &m, nullptr, nullptr, nullptr);
+    cache->Invalidate(&keys[0]);
+    ok = ok && !cache->Find(&keys[0], 7, 8, &m, nullptr, nullptr, nullptr) &&
+         cache->Find(&keys[1], 7, 8, &m, nullptr, nullptr, nullptr) && cache->Used() == 1;
+    ok = ok && cache->Insert(&keys[0], m) && cache->Find(&keys[0], 7, 8, &m, nullptr, nullptr, nullptr);
+    Check(ok, "shadow tex: cache finds by shader + fingerprint, destructor invalidation forgets");
+    std::vector<uint8_t> many(MaskCache::kSize + 1);
+    size_t stored = 0;
+    for (size_t i = 2; i < many.size(); ++i) stored += cache->Insert(&many[i], m) != nullptr;
+    Check(stored == MaskCache::kSize - 2 && !cache->Insert(&many[0], m), "shadow tex: full cache refuses inserts");
+    delete cache;
+  }
+
+  // G-buffer batching build checks, before the next block patches NGModel's image.
+  gbbtest::BuildChecks();
+
+  // Shadow texture skip: the C copy of ModelMaterialMT slot 5 against the real
+  // machine code of the analysed NGModel.dll (loaded without imports; its IAT
+  // entries, globals and the submit are redirected to fakes).
+  {
+    using namespace stx;
+    const std::wstring bin = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\";
+    HMODULE ngm = LoadLibraryExW((bin + L"NGModel.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    HMODULE dxm = LoadLibraryExW((bin + L"dx11backend.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    if (!ngm || !dxm) {
+      printf("SKIP shadow tex: DCS binaries not found\n");
+    } else {
+      auto* ng = reinterpret_cast<uint8_t*>(ngm);
+      auto* dx = reinterpret_cast<uint8_t*>(dxm);
+      const char* why = VerifyBuild(ng, dx);
+      Check(!why, "shadow tex: build checks pass on the analysed NGModel/dx11backend");
+      if (why) printf("     %s\n", why);
+      // Redirect what slot 5 reaches outside itself.
+      void* redirect = reinterpret_cast<void*>(&FakeGetTexture);
+      WriteCode(ng + kIatGetTexture, &redirect, 8);
+      redirect = reinterpret_cast<void*>(&FakeValid);
+      WriteCode(ng + kIatValid, &redirect, 8);
+      redirect = g_globals;
+      WriteCode(ng + kGlobals, &redirect, 8);
+      uint8_t jmp[12] = {0x48, 0xb8};
+      const uint64_t target = reinterpret_cast<uint64_t>(&FakeSubmit);
+      memcpy(jmp + 2, &target, 8);
+      jmp[10] = 0xff;
+      jmp[11] = 0xe0;  // mov rax, FakeSubmit; jmp rax
+      WriteCode(ng + kSubmit, jmp, sizeof(jmp));
+      *reinterpret_cast<uint8_t**>(g_globals + 0x80) = g_sbArray;
+      for (int i = 0; i < 8; ++i) *reinterpret_cast<uint64_t*>(g_sbArray + 0x20 + i * 0x30) = 0x5b00 + i;
+      g_shaderVtbl[26] = reinterpret_cast<void*>(&FakeSetTex);
+      g_shaderVtbl[27] = reinterpret_cast<void*>(&FakeSetSb);
+      *reinterpret_cast<void**>(g_shader) = g_shaderVtbl;
+      *reinterpret_cast<void**>(g_shader + 0xc8) = g_records;
+      for (int i = 0; i < 16; ++i) *reinterpret_cast<int32_t*>(g_records + i * 0x50 + 0xc) = (i == 9) ? 0x20 : 7;
+      g_texVtbl[23] = reinterpret_cast<void*>(&FakeTex23);
+      g_texVtbl[18] = reinterpret_cast<void*>(&FakeTex18);
+      *reinterpret_cast<int32_t*>(g_desc + 0x20) = 28;
+      // The hook's globals, pointing at the loaded image and the fakes.
+      shadowtex::g_ng = ng;
+      shadowtex::g_submit = reinterpret_cast<SubmitFn>(ng + kSubmit);
+      shadowtex::g_getDesc = &FakeGetDesc;
+      shadowtex::g_compat = &FakeCompat;
+      shadowtex::g_getSrv = &FakeGetSrv;
+      shadowtex::g_texVtblPtr = g_texVtbl;
+      shadowtex::g_innerFile = g_innerVtbl;
+      shadowtex::g_innerArray = g_innerVtbl;
+      shadowtex::g_innerDummy = g_innerVtbl;
+      auto original = reinterpret_cast<Slot5Fn>(ng + kSlot5);
+
+      const int64_t handles[12] = {0, 1, -1, 2, 3, 4, 5, 6, 7, -1, 9, 10};
+      struct Variant {
+        int count, props8, transp, base;
+        bool v15, v18;
+      } variants[] = {{12, 0, 0, 0, true, false}, {12, 0, 1, 2, false, true}, {12, 1, 0, 1, false, false},
+                      {12, 0, 0, 0, false, false}, {0, 1, 1, 0, true, true},  {7, 2, 1, 3, true, true},
+                      {12, 0, 1, 4, true, false}};
+      auto* sc = new Scene;
+      bool same = true, skipOk = true, noMaskOk = true;
+      int skippedTotal = 0, replayed = 0, nullTex = 0;
+      for (const Variant& v : variants) {
+        for (bool& f : g_validFlag) f = false;
+        g_validFlag[0xf] = v.v15;
+        g_validFlag[0x12] = v.v18;
+        Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+        g_trace.clear();
+        const uint64_t r1 = original(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), reinterpret_cast<void*>(0xa4));
+        const uint32_t cb1 = *reinterpret_cast<uint32_t*>(sc->mat + 0x18c);
+        const std::vector<Call> ref = g_trace;
+        // Every parameter read: identical calls, result and CB field.
+        MaskEntry all;
+        all.state = 1;
+        all.recCount = 16;
+        all.read[0] = ~0ull;
+        Counters cnt;
+        Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+        g_trace.clear();
+        const uint64_t r2 = Draw(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), g_shader, all, cnt);
+        same &= r1 == r2 && cb1 == *reinterpret_cast<uint32_t*>(sc->mat + 0x18c) && cb1 == 0xabcd && g_trace == ref;
+        // No mask (pending / keep): the copy with every set kept, counted as keptNoMask.
+        {
+          static const MaskEntry keepAll;
+          Counters cnt0;
+          Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+          g_trace.clear();
+          const uint64_t r0 = Draw(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), g_shader, keepAll, cnt0, true);
+          uint64_t sets = 0;
+          for (const Call& c : ref) sets += c.kind == 2;
+          noMaskOk &= r0 == r1 && g_trace == ref && cnt0.keptNoMask == sets && cnt0.kept == 0 && cnt0.skipped == 0;
+        }
+        // Parameters 1, 3, 4, 6, 9 not read: their sets become the streaming
+        // request, plus the slot-26 replay (without SetResource) where a
+        // mip-set swap is due (texture 4 with aux -1) or the inner class is
+        // unknown (texture 6).
+        MaskEntry part = all;
+        part.read[0] = ~((1ull << 1) | (1ull << 3) | (1ull << 4) | (1ull << 6) | (1ull << 9));
+        std::vector<Call> expect;
+        for (const Call& c : ref) {
+          const int64_t h = static_cast<int64_t>(c.a ^ U(g_shader));
+          if (c.kind != 2 || !Skippable(part, h)) {
+            expect.push_back(c);
+            continue;
+          }
+          if (!c.b) continue;  // NULL texture: slot 26 does nothing
+          expect.push_back({4, c.b, c.d, 0, 0});
+          const int t = static_cast<int>((reinterpret_cast<uint8_t*>(c.b) - &sc->tex[0][0]) / 0x700);
+          const bool replay = t == 6 || (t == 4 && c.c == ~0ull);
+          if (!replay) continue;
+          const uint32_t type = h == 9 ? 0x20 : 7;
+          expect.push_back({6, c.b, 0, 0, 0});
+          expect.push_back({7, type, 28, 0, 0});
+          expect.push_back({5, c.b, 0, 0, 0});
+          if (t != 6)
+            expect.push_back({8, c.b, c.c, c.d, 0});
+          else if (type == 0x20)
+            expect.push_back({8, c.b, c.c, 0, 0});
+        }
+        Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+        g_trace.clear();
+        Counters cnt2;
+        const uint64_t r3 = Draw(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), g_shader, part, cnt2);
+        skipOk &= r3 == r1 && g_trace == expect;
+        skippedTotal += static_cast<int>(cnt2.skipped + cnt2.skippedReplayed + cnt2.nullTex);
+        replayed += static_cast<int>(cnt2.skippedReplayed);
+        nullTex += static_cast<int>(cnt2.nullTex);
+      }
+      delete sc;
+      Check(same, "shadow tex: C copy of slot 5 makes exactly the original's calls (7 variants)");
+      Check(noMaskOk, "shadow tex: casters without a mask run the copy with every set kept and counted");
+      Check(skipOk && skippedTotal > 0 && replayed > 0,
+            "shadow tex: skipped sets keep the streaming request; swaps and unknown textures replay slot 26 "
+            "without SetResource");
+      printf("     %d texture sets skipped across the variants, %d replayed, %d without texture\n", skippedTotal,
+             replayed, nullTex);
+    }
+  }
+
+  // Shadow instancing stage 1 (shadow_inst.h): FX11 parser, compile pipeline,
+  // source edits, runtime path, install/unload.
+  sitest::Run();
+  // Shadow texture skip masks from shadow_inst's (a) compiles.
+  sttest::Run();
+  // G-buffer instancing stage 1 (R13): model_vs variants, checks 1-4, gate.
+  gbtest::Run();
+  sbtest::Run();
+  putest::Run();
+  gbbtest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

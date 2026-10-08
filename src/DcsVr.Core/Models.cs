@@ -183,6 +183,12 @@ public sealed record VrProfile
     public bool EngineCostWeights { get; init; } = true;
     /// <summary>[General] Beeps: the module's sound feedback (in-flight switch, test suite start and end).</summary>
     public bool EngineBeeps { get; init; } = true;
+    /// <summary>[Model] ShadowInstancing, ShadowBatching and BigModelPages together: identical shadow casters in a
+    /// cascade are drawn with one instanced draw, using instanced variants of DCS's own shadow vertex shader compiled in
+    /// the background after DCS starts (about 2.5 min, nothing written to the DCS install). Verified texel-identical;
+    /// turns itself off on any fault. Measured +2.8 % FPS. Also writes ShadowTextureSkip: shadow draws skip the texture sets
+    /// their compiled shaders never read (masks from the same compile; depth-identical).</summary>
+    public bool EngineShadowInstancing { get; init; } = true;
     /// <summary>[Model] AllocSlabs: per-thread slabs for the model data allocator (NGModel StructBufferManager), so
     /// culling threads stop contending for it. Measured +6 % FPS, p95 −9 %.</summary>
     public bool EngineModelAllocator { get; init; } = true;
