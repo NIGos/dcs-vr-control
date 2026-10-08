@@ -14,7 +14,13 @@ void LifecycleGb(const shadowinst::Compiler& cc, const std::wstring& shaders, ID
 namespace sitest {
 using namespace shadowinst;
 
-const wchar_t* kFxoDir = L"C:\\Users\\quali\\Saved Games\\DCS\\fxo\\";
+// DCS's effect cache in the current user's Saved Games (no user name in the source).
+const std::wstring kFxoDirPath = [] {
+  wchar_t profile[MAX_PATH] = {};
+  GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+  return std::wstring(profile) + L"\\Saved Games\\DCS\\fxo\\";
+}();
+const wchar_t* kFxoDir = kFxoDirPath.c_str();
 const wchar_t* kShaderDir = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\Bazar\\shaders\\";
 
 std::wstring TempRoot() {
