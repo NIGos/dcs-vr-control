@@ -193,12 +193,40 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "shadow_tex_test.h"
 #include "gb_inst_test.h"
 #include "shadow_batch_test.h"
+#include "shadow_plan_test.h"
 #include "par_upload_test.h"
+#include "direct_upload_test.h"
 #include "gb_batch_test.h"
+#include "split_filter_test.h"
+#include "deferred_rec_test.h"
+#include "shadow_rec_test.h"
 
 int main() {
   g_log = stdout;
   g_mute = true;
+  // QV_SF_STRESS=<n>: only the split-filter tests, n times (race hunting).
+  if (const char* n = getenv("QV_SF_STRESS")) {
+    for (int i = 0, k = atoi(n); i < k; ++i) sftest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_DEFREC_ONLY=1: only the deferred-recording tests (R15 A1 infrastructure).
+  // QV_DEFREC_BENCH=<rounds>: only its render-thread timing benchmark (3 runs).
+  if (const char* n = getenv("QV_DEFREC_BENCH")) {
+    drtest::Bench(atoi(n) > 2 ? atoi(n) : 15);
+    return 0;
+  }
+  if (getenv("QV_DEFREC_ONLY")) {
+    drtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_SHREC_ONLY=1: only the shadow recorder tests (R17 S1-S3).
+  if (getenv("QV_SHREC_ONLY")) {
+    srtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
   alignas(64) static uint8_t periph[0x700], focus[0x700];
   Vec3 eye{1000.0, 50.0, -2000.0}, fwd{0, 0, 1}, up{0, 1, 0};
   MakeFrustum(periph, eye, fwd, up, -1.2, 1.0, -1.1, 1.0, 0.05, 20000);  // ~50 deg half
@@ -1166,6 +1194,97 @@ int main() {
         replayed += static_cast<int>(cnt2.skippedReplayed);
         nullTex += static_cast<int>(cnt2.nullTex);
       }
+      // Shadow batching's leaders without the [item+0xd4] swap (shadow_batch.h
+      // g_psoDirect): DrawPso makes exactly the calls slot 5 makes with
+      // [item+0xd4] == the group base, for every routing of slot 5, and leaves
+      // [item+0xd4] alone.
+      {
+        void* fakeSlot = reinterpret_cast<void*>(original);
+        void** const slot0 = shadowtex::g_slot;
+        const Slot5Fn orig0 = shadowtex::g_orig;
+        const int state0 = shadowtex::g_state.load();
+        const bool on0 = shadowtex::g_on.load();
+        void* const shVt0 = shadowtex::g_shaderVtblPtr;
+        MaskCache* const cache0 = shadowtex::g_cache;
+        const shadowcount::Fn next0 = shadowcount::g_modelNext.load();
+        shadowtex::g_slot = &fakeSlot;
+        shadowtex::g_orig = original;
+        shadowtex::g_state = 1;
+        shadowtex::g_shaderVtblPtr = g_shaderVtbl;
+        shadowtex::g_cache = new MaskCache;
+        MaskEntry part;
+        part.state = 1;
+        part.recCount = 16;
+        part.read[0] = ~((1ull << 1) | (1ull << 3) | (1ull << 4) | (1ull << 6) | (1ull << 9));
+        part.effect = *reinterpret_cast<void**>(g_shader + 0x50);
+        part.recBegin = *reinterpret_cast<void**>(g_shader + 0xc8);
+        part.recEnd = *reinterpret_cast<void**>(g_shader + 0xd0);
+        part.techBegin = *reinterpret_cast<void**>(g_shader + 0xb0);
+        part.techA = 7;
+        part.techB = 8;
+        shadowtex::g_cache->Insert(g_shader, part);
+        bool modes = Slot5Mode() == kPsoCopy;
+        fakeSlot = reinterpret_cast<void*>(&Hook);
+        modes &= Slot5Mode() == kPsoHook;
+        fakeSlot = reinterpret_cast<void*>(&shadowcount::HookModel);
+        shadowcount::g_modelNext = nullptr;
+        modes &= Slot5Mode() == kPsoCopy;
+        shadowcount::g_modelNext = &Hook;
+        modes &= Slot5Mode() == kPsoHook;
+        fakeSlot = reinterpret_cast<void*>(&FakeSubmit);
+        modes &= Slot5Mode() == kPsoNone;
+        shadowtex::g_state = 0;
+        fakeSlot = reinterpret_cast<void*>(&Hook);
+        modes &= Slot5Mode() == kPsoNone;
+        shadowtex::g_state = 1;
+        Check(modes, "shadow tex: Slot5Mode follows what slot 5 holds (DCS's, the hook, the counter's chain, foreign)");
+        bool psoOk = true;
+        constexpr uint32_t kBase = 0x5150;
+        for (const Variant& v : variants) {
+          for (bool& fl : g_validFlag) fl = false;
+          g_validFlag[0xf] = v.v15;
+          g_validFlag[0x12] = v.v18;
+          // DCS's slot 5 with the base in [item+0xd4] (the old swap).
+          Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+          *reinterpret_cast<uint32_t*>(sc->item + 0xd4) = kBase;
+          g_trace.clear();
+          const uint64_t r1 = original(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), reinterpret_cast<void*>(0xa4));
+          const std::vector<Call> ref = g_trace;
+          auto same = [&](uint64_t r, const std::vector<Call>& want, uint64_t rw) {
+            return r == rw && g_trace == want && *reinterpret_cast<uint32_t*>(sc->mat + 0x18c) == kBase &&
+                   *reinterpret_cast<uint32_t*>(sc->item + 0xd4) == 0xabcd;
+          };
+          // Slot 5 is DCS's (copy mode), or the hook with the skip off.
+          shadowtex::g_on = false;
+          for (int mode : {kPsoCopy, kPsoHook}) {
+            Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+            g_trace.clear();
+            const uint64_t r = DrawPso(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), kBase, mode);
+            psoOk &= same(r, ref, r1);
+          }
+          // The hook with the skip on: what the hook makes with the base in [item+0xd4].
+          shadowtex::g_on = true;
+          Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+          *reinterpret_cast<uint32_t*>(sc->item + 0xd4) = kBase;
+          g_trace.clear();
+          const uint64_t r4 = Hook(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), nullptr);
+          const std::vector<Call> ref4 = g_trace;
+          Build(*sc, v.count, handles, v.props8, v.transp, v.base);
+          g_trace.clear();
+          const uint64_t r5 = DrawPso(sc->mat, sc->item, reinterpret_cast<void*>(0xa3), kBase, kPsoHook);
+          psoOk &= same(r5, ref4, r4);
+        }
+        delete shadowtex::g_cache;
+        shadowtex::g_cache = cache0;
+        shadowtex::g_slot = slot0;
+        shadowtex::g_orig = orig0;
+        shadowtex::g_state = state0;
+        shadowtex::g_on = on0;
+        shadowtex::g_shaderVtblPtr = shVt0;
+        shadowcount::g_modelNext = next0;
+        Check(psoOk, "shadow tex: DrawPso = slot 5 with [item+0xd4] == the group base, [item+0xd4] untouched (copy, "
+                     "hook with the skip off and on, 7 variants)");
+      }
       delete sc;
       Check(same, "shadow tex: C copy of slot 5 makes exactly the original's calls (7 variants)");
       Check(noMaskOk, "shadow tex: casters without a mask run the copy with every set kept and counted");
@@ -1185,8 +1304,16 @@ int main() {
   // G-buffer instancing stage 1 (R13): model_vs variants, checks 1-4, gate.
   gbtest::Run();
   sbtest::Run();
+  sptest::Run();
   putest::Run();
+  dutest::Run();
   gbbtest::Run();
+  // Split-path redundant-state filter (R15 F5) on a real device through fake dx11backend sites.
+  sftest::Run();
+  // Deferred-context recording infrastructure (R15 A1): bit-exact cascade, state restore, pool.
+  drtest::Run();
+  // Shadow recorder (R17 S1-S3): mesh fields, tables, reflection, probe checks, jobs, device record vs stock.
+  srtest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

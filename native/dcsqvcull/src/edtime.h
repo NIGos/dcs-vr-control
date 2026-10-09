@@ -31,19 +31,27 @@ bool Install() {
   g_state = -1;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"edCore.dll"));
   if (!base) return false;
-  uint8_t* getTime = base + kGetTimeRva;
+  // Recorded RVAs, or where reloc.h re-found them in another build (0: not found).
+  // In another build the prologue's rel32 bytes are not compared.
+  const uint32_t getTimeRva = reloc::Rva(hooksig::ED_ED_get_time, kGetTimeRva);
+  const uint32_t sites[4] = {reloc::Rva(hooksig::ED_SyncTaskQueue_proceed_getTimeCall0, kSites[0]),
+                             reloc::Rva(hooksig::ED_SyncTaskQueue_proceed_getTimeCall1, kSites[1]),
+                             reloc::Rva(hooksig::ED_SyncTaskQueue_proceed_getTimeCall2, kSites[2]),
+                             reloc::Rva(hooksig::ED_SyncTaskQueue_proceed_getTimeCall3, kSites[3])};
+  uint8_t* getTime = base + getTimeRva;
   uint8_t pro[8];
-  if (!allocslab::ReadBytes(getTime, pro, 8) || memcmp(pro, kGetTimePrologue, 8) != 0) {
+  if (!getTimeRva || !allocslab::ReadBytes(getTime, pro, 8) ||
+      !reloc::BytesAre(hooksig::ED_ED_get_time, pro, kGetTimePrologue, 8)) {
     Log("task-queue clock: edCore.dll does not match this build; skipped");
     return false;
   }
   // All four sites must call ED_get_time (fresh) or the same existing stub (reload).
   uint8_t* existing = nullptr;
   bool fresh = true;
-  for (uint32_t rva : kSites) {
+  for (uint32_t rva : sites) {
     uint8_t* site = base + rva;
     uint8_t b[5];
-    if (!allocslab::ReadBytes(site, b, 5) || b[0] != 0xE8) {
+    if (!rva || !allocslab::ReadBytes(site, b, 5) || b[0] != 0xE8) {
       Log("task-queue clock: unexpected bytes at edCore+0x%x; skipped", rva);
       return false;
     }
@@ -104,7 +112,7 @@ bool Install() {
   DWORD old;
   VirtualProtect(page, kPage, PAGE_EXECUTE_READ, &old);
   FlushInstructionCache(GetCurrentProcess(), page, kPage);
-  for (uint32_t rva : kSites) {
+  for (uint32_t rva : sites) {
     uint8_t* site = base + rva;
     uint8_t b[5] = {0xE8};
     int32_t rr = rel32(site + 5, page);

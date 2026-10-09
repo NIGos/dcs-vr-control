@@ -215,7 +215,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         EnsureDcsClosed(plan.Files.Select(f => f.Path).Append(plan.Executable).Concat(originals.Read().Files.Select(f => f.Path)));
         return originals.Apply(plan);
     }
-    /// <summary>Restore originals: every path DCS VR Control changed goes back to what was there before it first wrote
+    /// <summary>Back to stock DCS: every path DCS VR Control changed goes back to what was there before it first wrote
     /// it, whatever it holds now (owned options.lua settings only, other edits kept). Refused only while DCS runs.</summary>
     public RestoreResult RestoreOriginals()
     {
@@ -367,7 +367,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var replacedProfile = applied?.Journal.ProfileId ?? baseline.Current?.ProfileId;
         var message = reason is not null ? $"Applied {plan.Description} again ({reason})."
             : replacedProfile is not null ? $"Applied {plan.Description} over {replacedProfile}." : $"Applied {plan.Description}; the original files are backed up.";
-        var notes = result.ReplacedForeign.Select(path => $"Replaced another {Path.GetFileName(path)} ({path}); it is backed up and Restore originals brings it back.").ToArray();
+        var notes = result.ReplacedForeign.Select(path => $"Replaced another {Path.GetFileName(path)} ({path}); it is backed up and Back to stock DCS brings it back.").ToArray();
         if (notes.Length > 0) message += " " + string.Join(" ", notes);
         return new(LaunchSyncKind.Applied, message, result.Current, replacedProfile, notes);
     }
@@ -489,7 +489,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         // Elevation is requested only when the profile opts in, so services under other accounts can be moved. The
         // elevated helper is started hidden: closing a visible console would end it before it restores.
-        if (profile.CpuBoost && profile.BoostElevated) { start.UseShellExecute = true; start.Verb = "runas"; start.WindowStyle = ProcessWindowStyle.Hidden; }
+        if (profile.BoostHelperElevated) { start.UseShellExecute = true; start.Verb = "runas"; start.WindowStyle = ProcessWindowStyle.Hidden; }
         else { start.UseShellExecute = false; start.CreateNoWindow = true; }
         return start;
     }

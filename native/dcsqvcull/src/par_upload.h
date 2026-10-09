@@ -44,6 +44,10 @@ struct Job {
 };
 Job g_jobs[kHelpers];
 std::atomic<uint64_t> g_calls{0}, g_bytes{0}, g_cycles{0};
+// Direct upload (direct_upload.h) shares this slot (R16 risk R6): it is asked
+// first and returns true when it finished the update itself (a page it
+// mapped: Unmap only). Null unless direct upload is installed.
+std::atomic<UpdateFn> g_pre{nullptr};
 
 DWORD WINAPI Helper(void* arg) {
   const int i = static_cast<int>(reinterpret_cast<intptr_t>(arg));
@@ -59,6 +63,8 @@ DWORD WINAPI Helper(void* arg) {
 }
 
 bool __fastcall Hook(void* self, uint32_t offset, const void* data, int32_t size) {
+  if (UpdateFn pre = g_pre.load(std::memory_order_acquire))
+    if (pre(self, offset, data, size)) return true;
   auto* b = static_cast<uint8_t*>(self);
   if (!g_on.load(std::memory_order_relaxed) || size < static_cast<int32_t>(kMinBytes) ||
       *reinterpret_cast<int32_t*>(b + 0x44) != 3)

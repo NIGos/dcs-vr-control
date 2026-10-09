@@ -183,13 +183,17 @@ bool Install() {
   if (g_orig) return true;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!base) return false;
-  auto** vtbl = reinterpret_cast<void**>(base + kVtableRva);
-  if (!allocslab::RttiIs(base, vtbl, ".?AVShadowMapRenderable@model@@") ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&vtbl[1])) != base + 0x443e0) {
+  // Recorded RVAs, or where reloc.h re-found them in another build (0: not found).
+  const uint32_t vtRva = reloc::Rva(hooksig::NG_ShadowMapRenderable_vtbl, kVtableRva);
+  const uint32_t fnRva = reloc::Rva(hooksig::NG_ShadowMapRenderable_render, 0x443e0);
+  const uint32_t matRva = reloc::Rva(hooksig::NG_ModelMaterialMT_vtbl, 0x592f0);
+  auto** vtbl = reinterpret_cast<void**>(base + vtRva);
+  if (!vtRva || !fnRva || !matRva || !allocslab::RttiIs(base, vtbl, ".?AVShadowMapRenderable@model@@") ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&vtbl[1])) != base + fnRva) {
     Log("shadow batching counter: vtable does not match this build; skipped");
     return false;
   }
-  g_modelMatVtbl = base + 0x592f0;
+  g_modelMatVtbl = base + matRva;
   if (HMODULE md = GetModuleHandleW(L"ModelDesc.dll")) {
     g_getTex = reinterpret_cast<GetTexFn>(
         GetProcAddress(md, "?getTexture@PropertiesSet@model@@QEBAAEBUTexture2dProperties@2@I@Z"));

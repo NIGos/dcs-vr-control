@@ -26,10 +26,31 @@ double g_topLevelUs = 0;  // guarded by g_mutex
 thread_local int t_depth = 0;
 std::atomic<DWORD> g_topTid{0};  // thread running top-level passes (the render thread)
 thread_local double t_childUs[64];
+// Optional callback after each top-level pass, on the thread that ran it
+// (shadow_rec.h: its texture snapshot between render entry and the cascades);
+// nullptr when unused.
+using AfterTopFn = void (*)();
+std::atomic<AfterTopFn> g_afterTop{nullptr};
+// Optional callback before and after every pass, nested ones too (shadow_rec.h:
+// a texture snapshot as soon as a job's keys are final); nullptr when unused.
+using EachFn = void (*)();
+std::atomic<EachFn> g_eachPass{nullptr};
 
 void __fastcall Hook(void* pass, uint64_t frame) {
   if (t_depth == 0) g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
-  if (!g_recording.load(std::memory_order_relaxed)) return g_orig(pass, frame);
+  EachFn each = g_eachPass.load(std::memory_order_relaxed);
+  if (!g_recording.load(std::memory_order_relaxed)) {
+    AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
+    if (!after && !each) return g_orig(pass, frame);
+    if (each) each();
+    ++t_depth;
+    g_orig(pass, frame);
+    const bool top = --t_depth == 0;
+    if (each) each();
+    if (top && after) after();
+    return;
+  }
+  if (each) each();
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
   LARGE_INTEGER a, b;
@@ -40,12 +61,17 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   double us = (b.QuadPart - a.QuadPart) * g_qpcToUs;
   double excl = d < 64 ? us - t_childUs[d] : us;
   if (d > 0 && d - 1 < 64) t_childUs[d - 1] += us;
-  std::lock_guard<std::mutex> lock(g_mutex);
-  Stat& s = g_stats[pass];
-  s.calls++;
-  s.inclUs += us;
-  s.exclUs += excl;
-  if (d == 0) g_topLevelUs += us;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Stat& s = g_stats[pass];
+    s.calls++;
+    s.inclUs += us;
+    s.exclUs += excl;
+    if (d == 0) g_topLevelUs += us;
+  }
+  if (each) each();
+  if (d == 0)
+    if (AfterTopFn after = g_afterTop.load(std::memory_order_relaxed)) after();
 }
 
 void RttiRaw(void* obj, char* buf, size_t size) {
@@ -91,6 +117,7 @@ std::string RttiName(void* obj) {
 // Patches every pointer to execute inside GraphicsCore's read-only data (its
 // own pass vtables) and SceneRenderer's import of it.
 void Install() {
+  if (g_orig) return;  // once (diagnostics and the shadow recorder both ask)
   HMODULE gc = GetModuleHandleW(L"GraphicsCore.dll");
   if (!gc) return;
   void* exec = reinterpret_cast<void*>(GetProcAddress(gc, kExecuteExport));

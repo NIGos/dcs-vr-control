@@ -217,6 +217,10 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 19 ? "bench: mode shadow texture skip, OFF = every texture set, ON = sets no shadow pass reads skipped"
         : mode == 20 ? "bench: mode texture dedupe table, OFF = previous 24-byte entries, ON = 16-byte entries"
         : mode == 21 ? "bench: mode big model pages, OFF = stock 63.5 KB pages, ON = big pages"
+        : mode == 25 ? "bench: mode shadow batching plans, OFF = planned on the render thread, ON = planner threads"
+        : mode == 26 ? "bench: mode direct upload, OFF = stock memcpy upload, ON = model data written into mapped pages"
+        : mode == 27 ? "bench: mode split-path D3D11 state filter, OFF = stock (no patch or hook), ON = redundant state calls skipped at the dx11backend sites"
+        : mode == 28 ? "bench: mode shadow recorder, OFF = DCS draws every caster, ON = recorded casters from a worker's command list"
                     : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
@@ -297,8 +301,11 @@ bool RunBenchmark(int mode, bool beeps) {
   if (mode == 18) g_frameHeapOn = g_cfg.frameHeapSlabs && !g_engineOff.load();
   if (mode == 20) BenchUseCompactTexTable(true);
   if (mode == 21) ApplyBigPages(g_cfg.bigPages && !g_engineOff.load());
-  if (mode == 22) ApplyShadowBatch();
+  if (mode == 22 || mode == 25) ApplyShadowBatch();
   if (mode == 24) ApplyParUpload(g_cfg.parUpload && !g_engineOff.load());
+  if (mode == 26) ApplyDirectUpload(g_cfg.directUpload && !g_engineOff.load());
+  if (mode == 27) ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
+  if (mode == 28) ApplyShadowRecorder();
   if (mode == 23) ApplyGBufferBatch();
   if (mode == 19) {
     g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
@@ -357,6 +364,10 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 22 ? "shadow caster instancing"
             : mode == 24 ? "parallel copy for large structured-buffer uploads"
             : mode == 23 ? "g-buffer instancing"
+            : mode == 25 ? "shadow batching plans on planner threads"
+            : mode == 26 ? "direct upload into mapped GPU pages"
+            : mode == 27 ? "split-path D3D11 state filter"
+            : mode == 28 ? "shadow recorder (R17 S3)"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

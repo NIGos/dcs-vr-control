@@ -88,6 +88,7 @@ struct Case {
     float offset_x, offset_y;
     bool sharpen;
     bool unpremultiplied;
+    float taper = 0.f;  // dcsvr_sharpen_taper band (0: off)
 };
 
 }  // namespace
@@ -201,7 +202,7 @@ int main(int argc, char** argv) {
             check(device->CreateBuffer(&desc, nullptr, &created), "buffer");
             return created;
         };
-        const auto vs_constants = buffer(64), ps_constants = buffer(32), cs_constants = buffer(48);
+        const auto vs_constants = buffer(64), ps_constants = buffer(32), cs_constants = buffer(64);
 
         const auto run = [&](const Case& c, bool optimized) {
             // Sharpening (skipping tiles only in the optimized chain).
@@ -210,7 +211,7 @@ int main(int argc, char** argv) {
                 const float zero[4]{};
                 context->ClearUnorderedAccessViewFloat(sharpened_uav.Get(), zero);
                 // CAS sharpen-only setup at 0.7 (CasSetup's output, precomputed for 600x600 at sharpness 0.7).
-                struct { std::uint32_t c0[4]; std::uint32_t c1[4]; float skip[4]; } k{};
+                struct { std::uint32_t c0[4]; std::uint32_t c1[4]; float skip[4]; float taper[4]; } k{};
                 const float sharp = -1.0f / (8.0f + (5.0f - 8.0f) * 0.7f);
                 const float one = 1.0f;
                 std::memcpy(&k.c0[0], &one, 4); std::memcpy(&k.c0[1], &one, 4);
@@ -224,6 +225,8 @@ int main(int argc, char** argv) {
                 k.skip[0] = optimized ? c.shape : 0.f;
                 k.skip[1] = 2.f;
                 k.skip[2] = k.skip[3] = static_cast<float>(kFocus);
+                k.taper[0] = c.taper;
+                k.taper[1] = c.shape;
                 context->UpdateSubresource(cs_constants.Get(), 0, nullptr, &k, 0, 0);
                 context->CSSetConstantBuffers(0, 1, cs_constants.GetAddressOf());
                 context->CSSetShaderResources(0, 1, focus_srv.GetAddressOf());
@@ -332,7 +335,29 @@ int main(int argc, char** argv) {
             all_identical = all_identical && focus_pixels > before.size() / 20U;
         }
         std::printf(all_identical ? "Quad Views composition identical\n" : "Quad Views composition DIFFERS\n");
-        return all_identical ? 0 : 1;
+
+        // Sharpening taper (focus radius in the shape's own norm): the same composition in the inner half of the focus area, a softer one in its edge band.
+        bool taper_ok = true;
+        for (const float shape : {2.f, 8.f}) {
+            Case on{shape, 0.2f, 0.f, 0.f, true, false, 0.4f};
+            Case off = on;
+            off.taper = 0.f;
+            const auto plain = run(off, true), tapered = run(on, true);
+            const float mid = kOut * 0.5f, half = kOut * 0.5f * 0.34f;
+            std::size_t centre = 0, band = 0;
+            for (UINT y = 0; y < kOut; ++y)
+                for (UINT x = 0; x < kOut; ++x) {
+                    const std::size_t p = static_cast<std::size_t>(y) * kOut + x;
+                    if (plain[p] == tapered[p]) continue;
+                    const float ax = std::fabs(x + 0.5f - mid) / half, ay = std::fabs(y + 0.5f - mid) / half;
+                    const float d = std::pow(std::pow(ax, shape) + std::pow(ay, shape), 1.f / shape);
+                    if (d < 0.5f) ++centre; else ++band;
+                }
+            std::printf("taper shape=%.0f: %zu changed pixels in the inner half, %zu in the edge band%s", shape, centre, band, "\n");
+            taper_ok = taper_ok && centre == 0 && band > 1000U;
+        }
+        std::printf(taper_ok ? "Quad Views sharpening taper only softens the edge band%s" : "Quad Views sharpening taper FAILED%s", "\n");
+        return all_identical && taper_ok ? 0 : 1;
     } catch (const std::exception& error) {
         std::printf("error: %s\n", error.what());
         return 2;

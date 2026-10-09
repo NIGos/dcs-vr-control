@@ -192,7 +192,8 @@ if (-not $layerText.Contains('DCSVR direct source view')) {
 # periphery. focus_view_shape=2 makes the focus area the ellipse inscribed in the focus view (a circle for a square
 # focus view) and fades it out radially with smoothstep over the same width smoothen_focus_view_edges gives the
 # rectangle (2 x its value in normalized view coordinates), down to exactly 0 at the edge. Other values (or none)
-# keep upstream behaviour. Larger exponents round a square instead (4: a rounded square).
+# keep upstream behaviour. Larger exponents round a square instead (4: a rounded square; DCS VR Control writes 8 when
+# the round focus area is off: a rectangle with slightly rounded corners that fades out to 0 like the circle).
 $layerText = [IO.File]::ReadAllText($layerSource)
 if (-not $layerText.Contains('m_focusViewShape')) {
     $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
@@ -471,6 +472,279 @@ if (-not $layerText.Contains('DCSVR invalid gaze')) {
     }
     [IO.File]::WriteAllText($layerSource, $layerText)
 }
+# Eye-tracked focus with frame generation (native/quadviews/dcsvr_gaze.h, which explains it; tested by
+# tests/quadviews-gaze): during a saccade the focus area reaches ahead along the eye's motion, at fixation a deadzone
+# keeps it still. Both free on the GPU. A line every 30 s in the Quad Views log counts saccades, widened and held views.
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'native/quadviews/dcsvr_gaze.h') -Destination (Join-Path $quadRoot 'openxr-api-layer/dcsvr_gaze.h') -Force
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('DCSVR saccade')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $fix = { param($text) ($text -replace "`r`n", "`n").TrimEnd("`n") -replace "`n", $nl }
+    $options = @'
+                    } else if (name == "dcsvr_saccade_widening") {
+                        m_dcsvrGaze.widening = std::stoi(value);
+                        parsed = true;
+                    } else if (name == "dcsvr_saccade_speed") {
+                        m_dcsvrGaze.speed = std::clamp(std::stof(value), 30.f, 1000.f);
+                        parsed = true;
+                    } else if (name == "dcsvr_saccade_lead_ms") {
+                        m_dcsvrGaze.leadMs = std::clamp(std::stof(value), 0.f, 200.f);
+                        parsed = true;
+                    } else if (name == "dcsvr_saccade_max_extend") {
+                        m_dcsvrGaze.maxExtend = std::clamp(std::stof(value), 0.f, 1.f);
+                        parsed = true;
+                    } else if (name == "dcsvr_saccade_hold_ms") {
+                        m_dcsvrGaze.holdMs = std::clamp(std::stof(value), 0.f, 200.f);
+                        parsed = true;
+                    } else if (name == "dcsvr_gaze_deadzone") {
+                        m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);
+                        parsed = true;
+                    } else if (name == "focus_view_shape") {
+'@
+    $speed = @'
+                                        isGazeValid = getEyeGaze(
+                                            viewLocateInfo->displayTime, false /* getStateOnly */, gazeUnitVector);
+                                    }
+                                    // DCSVR saccade: gaze speed once per located frame, statistics every 30 s.
+                                    if (isGazeValid)
+                                        m_dcsvrFilter.UpdateSpeed(viewLocateInfo->displayTime, gazeUnitVector.x, gazeUnitVector.y, gazeUnitVector.z, m_dcsvrGaze);
+                                    if (m_dcsvrGaze.widening || m_dcsvrGaze.deadzoneDeg > 0.f) {
+                                        const auto statsNow = std::chrono::steady_clock::now();
+                                        if (m_dcsvrStatsAt.time_since_epoch().count() == 0) m_dcsvrStatsAt = statsNow;
+                                        const auto& stats = m_dcsvrFilter.Stats();
+                                        if (statsNow - m_dcsvrStatsAt >= std::chrono::seconds(30) && stats.eyeFrames > 0) {
+                                            Log(fmt::format("DCSVR gaze: {} eye-frames, {} saccades, widened {} ({:.1f}%%), held {} ({:.1f}%%), peak {:.0f} deg/s\n",
+                                                            stats.eyeFrames, stats.saccades, stats.widened, 100.0 * stats.widened / stats.eyeFrames,
+                                                            stats.held, 100.0 * stats.held / stats.eyeFrames, stats.peakSpeed));
+                                            m_dcsvrFilter.ResetStats();
+                                            m_dcsvrStatsAt = statsNow;
+                                        }
+                                    }
+'@
+    $gaze = @'
+                                            {
+                                                // DCSVR saccade: the eye's velocity in this view gives the lead; at
+                                                // fixation, movements inside the deadzone keep the focus where it is.
+                                                const XrFovf& eyeFov = m_cachedEyeFov[stereoViewIndex];
+                                                const dcsvr::GazeVec2 gazed = m_dcsvrFilter.Eye((int)stereoViewIndex, viewLocateInfo->displayTime,
+                                                    {projectedGaze.x, projectedGaze.y},
+                                                    dcsvr::GazeFilter::NdcPerDegree(std::tan(eyeFov.angleLeft), std::tan(eyeFov.angleRight)),
+                                                    dcsvr::GazeFilter::NdcPerDegree(std::tan(eyeFov.angleDown), std::tan(eyeFov.angleUp)), m_dcsvrGaze);
+                                                projectedGaze = {gazed.x, gazed.y};
+                                            }
+                                            m_eyeGaze[stereoViewIndex] = projectedGaze;
+'@
+    $oldMinmax = @'
+                                            const XrVector2f min{
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].x - horizontalFovSection, -1.f, 1.f),
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].y - verticalFovSection, -1.f, 1.f)};
+                                            const XrVector2f max{
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].x + horizontalFovSection, -1.f, 1.f),
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].y + verticalFovSection, -1.f, 1.f)};
+'@
+    $minmax = @'
+                                            XrVector2f min{
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].x - horizontalFovSection, -1.f, 1.f),
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].y - verticalFovSection, -1.f, 1.f)};
+                                            XrVector2f max{
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].x + horizontalFovSection, -1.f, 1.f),
+                                                std::clamp(
+                                                    m_eyeGaze[stereoViewIndex].y + verticalFovSection, -1.f, 1.f)};
+                                            {
+                                                // DCSVR saccade: reach ahead along the eye's motion (same focus pixels).
+                                                dcsvr::GazeVec2 lo{min.x, min.y}, hi{max.x, max.y};
+                                                if (m_dcsvrFilter.Extend((int)stereoViewIndex, viewLocateInfo->displayTime, lo, hi, m_dcsvrGaze)) {
+                                                    min = {lo.x, lo.y};
+                                                    max = {hi.x, hi.y};
+                                                }
+                                            }
+'@
+    $edits = @(
+        @((& $fix '#include "views.h"'), (& $fix "#include `"views.h`"`n#include `"dcsvr_gaze.h`"")),
+        @((& $fix '        XrVector2f m_eyeGaze[xr::StereoView::Count]{};'), (& $fix "        XrVector2f m_eyeGaze[xr::StereoView::Count]{};`n        // DCSVR saccade: settings and state (native/quadviews/dcsvr_gaze.h).`n        dcsvr::GazeSettings m_dcsvrGaze{};`n        dcsvr::GazeFilter m_dcsvrFilter;`n        std::chrono::steady_clock::time_point m_dcsvrStatsAt{};")),
+        @((& $fix '                    } else if (name == "focus_view_shape") {'), (& $fix $options)),
+        @((& $fix "                                        isGazeValid = getEyeGaze(`n                                            viewLocateInfo->displayTime, false /* getStateOnly */, gazeUnitVector);`n                                    }"), (& $fix $speed)),
+        @((& $fix '                                            m_eyeGaze[stereoViewIndex] = projectedGaze;'), (& $fix $gaze)),
+        @((& $fix $oldMinmax), (& $fix $minmax))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
+# Sharpening taper (dcsvr_sharpen_taper=1): CAS sharpens the whole focus view at the same strength up to its edge,
+# where the much softer periphery takes over, so the step in detail marks the focus edge. Inside the band where the
+# composition fades the focus view out (2 x smoothen_focus_view_edges of the focus radius, for the round and the
+# rounded-rectangle shape alike) the sharpened colour now fades back to the unsharpened one with the same smoothstep,
+# so detail steps down gradually. One extra texel load per sharpened texel inside the band; off: identical output.
+$sharpenText = [IO.File]::ReadAllText($sharpenSource)
+if (-not $sharpenText.Contains('dcsvrTaper')) {
+    $nl = if ($sharpenText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @('    float4 dcsvrSkip;',
+          (('    float4 dcsvrSkip;',
+            '    // DCSVR sharpen taper: x the edge band width in focus radii (0: off), y the shape exponent (0: rectangle).',
+            '    float4 dcsvrTaper;') -join $nl)),
+        @('[numthreads(WIDTH, HEIGHT, DEPTH)]',
+          (('// DCSVR sharpen taper: inside the edge band the sharpening fades out as the composition fades the focus view out.',
+            'float3 DcsvrTaper(float3 c, uint2 gxy) {',
+            '    if (dcsvrTaper.x <= 0) {',
+            '        return c;',
+            '    }',
+            '    float2 e = abs((float2(gxy) + 0.5) / dcsvrSkip.zw * 2.0 - 1.0);',
+            '    float r = dcsvrTaper.y >= 1 ? pow(pow(e.x, dcsvrTaper.y) + pow(e.y, dcsvrTaper.y), 1.0 / dcsvrTaper.y) : max(e.x, e.y);',
+            '    float w = 1 - smoothstep(1 - dcsvrTaper.x, 1, r);',
+            '    [branch] if (w >= 1) {',
+            '        return c;',
+            '    }',
+            '    return lerp(InputTexture.Load(int3(gxy, 0)).rgb, c, w);',
+            '}',
+            '',
+            '[numthreads(WIDTH, HEIGHT, DEPTH)]') -join $nl))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($sharpenText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views sharpening shader changed: $(($edit[0] -split "`n")[0])" }
+        $sharpenText = $sharpenText.Replace($edit[0], $edit[1])
+    }
+    $write = '    OutputTexture[ASU2(gxy)] = AF4(c, 1);'
+    if (([regex]::Matches($sharpenText, [regex]::Escape($write))).Count -ne 4) { throw 'Quad Views sharpening shader changed: FP32 writes' }
+    $sharpenText = $sharpenText.Replace($write, '    OutputTexture[ASU2(gxy)] = AF4(DcsvrTaper(c, gxy), 1);')
+    [IO.File]::WriteAllText($sharpenSource, $sharpenText)
+}
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('DcsvrTaper')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @('        alignas(4) float DcsvrSkip[4];',
+          "        alignas(4) float DcsvrSkip[4];$($nl)        alignas(4) float DcsvrTaper[4];"),
+        @('                sharpening.DcsvrSkip[3] = (float)focusView.subImage.imageRect.extent.height;',
+          (('                sharpening.DcsvrSkip[3] = (float)focusView.subImage.imageRect.extent.height;',
+            '                // DCSVR sharpen taper: the composition''s fade band (ProjectionPS: 2 x the edge smoothing).',
+            '                sharpening.DcsvrTaper[0] = m_dcsvrSharpenTaper && !m_debugFocusView && m_smoothenFocusViewEdges > 0.f',
+            '                                               ? std::clamp(2.f * m_smoothenFocusViewEdges, 0.01f, 0.95f) : 0.f;',
+            '                sharpening.DcsvrTaper[1] = m_focusViewShape;') -join $nl)),
+        @('                    } else if (name == "focus_view_shape") {',
+          (('                    } else if (name == "dcsvr_sharpen_taper") {',
+            '                        m_dcsvrSharpenTaper = std::stoi(value);',
+            '                        parsed = true;',
+            '                    } else if (name == "focus_view_shape") {') -join $nl)),
+        @('        float m_focusViewShape{0.f};',
+          "        float m_focusViewShape{0.f};$($nl)        bool m_dcsvrSharpenTaper{false};")
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
+# Periphery contrast (dcsvr_periphery_sharpen=S, 0: off): the periphery reaches the headset enlarged about five times
+# with a bilinear filter, which costs it local contrast, and that loss (more than the missing detail) is what makes
+# the periphery read as "blurred" next to the focus area (Patney et al. 2016, contrast-preserving foveation). The same
+# CAS pass the focus view uses now also runs on each eye's periphery at its own resolution, before the enlargement,
+# at strength S: about a quarter of the focus view's texels, no tile skip, no taper.
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('dcsvrPeripheryImage')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $edits = @(
+        @('            ComPtr<ID3D11ShaderResourceView> dcsvrSharpenedSrv[xr::StereoView::Count];',
+          (('            ComPtr<ID3D11ShaderResourceView> dcsvrSharpenedSrv[xr::StereoView::Count];',
+            '            // DCSVR periphery contrast: the sharpened periphery of each eye and its views.',
+            '            ComPtr<ID3D11Texture2D> dcsvrPeripheryImage[xr::StereoView::Count];',
+            '            ComPtr<ID3D11UnorderedAccessView> dcsvrPeripheryUav[xr::StereoView::Count];',
+            '            ComPtr<ID3D11ShaderResourceView> dcsvrPeripherySrv[xr::StereoView::Count];') -join $nl)),
+        @((('                TraceLoggingWriteStop(local, "xrEndFrame_Sharpen");', '            }') -join $nl),
+          (('                TraceLoggingWriteStop(local, "xrEndFrame_Sharpen");',
+            '            }',
+            '',
+            '            // DCSVR periphery contrast: CAS on the periphery at its own resolution, before the enlargement.',
+            '            ComPtr<ID3D11ShaderResourceView> dcsvrPeripherySource;',
+            '            // Only for an opaque layer: the pass writes alpha 1.',
+            '            if (m_dcsvrPeripherySharpen > 0.f && !m_debugFocusView && !(layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT)) {',
+            '                const UINT width = (UINT)stereoView.subImage.imageRect.extent.width;',
+            '                const UINT height = (UINT)stereoView.subImage.imageRect.extent.height;',
+            '                ComPtr<ID3D11Texture2D>& image = swapchainForStereoView.dcsvrPeripheryImage[viewIndex];',
+            '                D3D11_TEXTURE2D_DESC desc{};',
+            '                if (image) {',
+            '                    image->GetDesc(&desc);',
+            '                }',
+            '                if (!image || desc.Width != width || desc.Height != height) {',
+            '                    desc = {};',
+            '                    desc.ArraySize = 1;',
+            '                    desc.Width = width;',
+            '                    desc.Height = height;',
+            '                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                    desc.MipLevels = 1;',
+            '                    desc.SampleDesc.Count = 1;',
+            '                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateTexture2D(&desc, nullptr, image.ReleaseAndGetAddressOf()));',
+            '                    swapchainForStereoView.dcsvrPeripheryUav[viewIndex].Reset();',
+            '                    swapchainForStereoView.dcsvrPeripherySrv[viewIndex].Reset();',
+            '                }',
+            '                ComPtr<ID3D11UnorderedAccessView>& uav = swapchainForStereoView.dcsvrPeripheryUav[viewIndex];',
+            '                if (!uav) {',
+            '                    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};',
+            '                    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;',
+            '                    uavDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(image.Get(), &uavDesc, uav.ReleaseAndGetAddressOf()));',
+            '                }',
+            '                ComPtr<ID3D11ShaderResourceView>& srv = swapchainForStereoView.dcsvrPeripherySrv[viewIndex];',
+            '                if (!srv) {',
+            '                    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};',
+            '                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;',
+            '                    srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;',
+            '                    srvDesc.Texture2D.MipLevels = 1;',
+            '                    CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(image.Get(), &srvDesc, srv.ReleaseAndGetAddressOf()));',
+            '                }',
+            '                SharpeningCSConstants periphery{};',
+            '                CasSetup(periphery.Const0, periphery.Const1, std::clamp(m_dcsvrPeripherySharpen, 0.f, 1.f),',
+            '                         (AF1)width, (AF1)height, (AF1)width, (AF1)height);',
+            '                periphery.DcsvrSkip[2] = (float)width;',
+            '                periphery.DcsvrSkip[3] = (float)height;',
+            '                {',
+            '                    D3D11_MAPPED_SUBRESOURCE mappedResources;',
+            '                    CHECK_HRCMD(m_renderContext->Map(m_sharpeningCSConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));',
+            '                    memcpy(mappedResources.pData, &periphery, sizeof(periphery));',
+            '                    m_renderContext->Unmap(m_sharpeningCSConstants.Get(), 0);',
+            '                }',
+            '                ID3D11ShaderResourceView* nullSRV[] = {nullptr, nullptr};',
+            '                m_renderContext->PSSetShaderResources(0, 2, nullSRV);',
+            '                m_renderContext->CSSetConstantBuffers(0, 1, m_sharpeningCSConstants.GetAddressOf());',
+            '                m_renderContext->CSSetShaderResources(0, 1, stereoSourceSrv.GetAddressOf());',
+            '                m_renderContext->CSSetUnorderedAccessViews(0, 1, uav.GetAddressOf(), nullptr);',
+            '                m_renderContext->CSSetShader(m_sharpeningCS.Get(), nullptr, 0);',
+            '                m_renderContext->Dispatch((width + 15) / 16, (height + 15) / 16, 1);',
+            '                ID3D11UnorderedAccessView* nullUAV[] = {nullptr};',
+            '                m_renderContext->CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);',
+            '                m_renderContext->CSSetShaderResources(0, 1, nullSRV);',
+            '                dcsvrPeripherySource = srv;',
+            '            }') -join $nl)),
+        @('                ComPtr<ID3D11ShaderResourceView> srvForStereoView = stereoSourceSrv;',
+          '                ComPtr<ID3D11ShaderResourceView> srvForStereoView = dcsvrPeripherySource ? dcsvrPeripherySource : stereoSourceSrv;'),
+        @('                    } else if (name == "dcsvr_sharpen_taper") {',
+          (('                    } else if (name == "dcsvr_periphery_sharpen") {',
+            '                        m_dcsvrPeripherySharpen = std::clamp(std::stof(value), 0.f, 1.f);',
+            '                        parsed = true;',
+            '                    } else if (name == "dcsvr_sharpen_taper") {') -join $nl)),
+        @('        bool m_dcsvrSharpenTaper{false};',
+          "        bool m_dcsvrSharpenTaper{false};$($nl)        float m_dcsvrPeripherySharpen{0.f};")
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
+# Log(std::string) passes the text to vsnprintf as the format: a lone '%' there ends DCS without a trace.
+$unescapedPercent = [IO.File]::ReadAllLines($layerSource) | Where-Object { $_ -match 'Log\(fmt::format\(' -and ($_ -replace '%%', '') -match '%' }
+if ($unescapedPercent) { throw "Quad Views Log text with an unescaped '%' (write '%%'): $($unescapedPercent -join ' | ')" }
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }
 # The composition with our performance edits against the same shaders without them, on this machine's GPU (WARP
@@ -481,3 +755,9 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $compositionTest) -Force 
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views composition test build failed.' }
 & $compositionTest (Join-Path $quadRoot 'openxr-api-layer') (Join-Path $quadRoot 'external/FidelityFX-CAS/ffx-cas')
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views composition test failed.' }
+# The saccade lead and the fixation deadzone on simulated gaze (2X and 3X frame times, tracker noise, blinks).
+$gazeTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/qv_gaze_test.exe'
+& (Join-Path $PSScriptRoot 'msvc.cmd') cl /nologo /std:c++20 /EHsc /O2 /W4 "/Fe:$gazeTest" "/Fo:$(Split-Path -Parent $gazeTest)\" (Join-Path $workspaceRoot 'tests/quadviews-gaze/qv_gaze_test.cpp') "/I$(Join-Path $workspaceRoot 'native/quadviews')"
+if ($LASTEXITCODE -ne 0) { throw 'Quad Views gaze test build failed.' }
+& $gazeTest
+if ($LASTEXITCODE -ne 0) { throw 'Quad Views gaze test failed.' }

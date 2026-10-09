@@ -54,7 +54,12 @@ bool Install() {
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!base || allocslab::g_state.load() < 1) return false;  // not yet: retried later
   g_state = -1;
-  g_insn = base + kInsnRva;
+  const uint32_t rva = reloc::Rva(hooksig::NG_StructBufferManager_scan_pageBytesImm, kInsnRva);
+  if (!rva) {
+    Log("big model pages: NGModel.dll does not match this build; skipped");
+    return false;
+  }
+  g_insn = base + rva;
   uint8_t cur[5];
   if (!allocslab::ReadBytes(g_insn, cur, 5)) return false;
   uint32_t imm;

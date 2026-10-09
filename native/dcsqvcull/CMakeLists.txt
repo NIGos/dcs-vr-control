@@ -40,3 +40,10 @@ target_compile_options(DcsQvCullDetourTests PRIVATE /O2 /EHa)
 target_compile_definitions(DcsQvCullDetourTests PRIVATE NOMINMAX)
 add_test(NAME DcsQvCullDetourTests COMMAND DcsQvCullDetourTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
 set_tests_properties(DcsQvCullDetourTests PROPERTIES PASS_REGULAR_EXPRESSION "PASS new layout never faults" TIMEOUT 300)
+
+# Signature scanner and relocation of the hook sites after a DCS patch ([General] SigScan), checked offline.
+add_executable(DcsQvCullSigscanTests test/sigscan_test_main.cpp)
+target_compile_options(DcsQvCullSigscanTests PRIVATE /W4 /O2 /EHsc)
+target_compile_definitions(DcsQvCullSigscanTests PRIVATE UNICODE _UNICODE NOMINMAX)
+add_test(NAME DcsQvCullSigscanTests COMMAND DcsQvCullSigscanTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
+set_tests_properties(DcsQvCullSigscanTests PROPERTIES TIMEOUT 300)

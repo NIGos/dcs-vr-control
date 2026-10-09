@@ -14,7 +14,6 @@ void LifecycleGb(const shadowinst::Compiler& cc, const std::wstring& shaders, ID
 namespace sitest {
 using namespace shadowinst;
 
-// DCS's effect cache in the current user's Saved Games (no user name in the source).
 const std::wstring kFxoDirPath = [] {
   wchar_t profile[MAX_PATH] = {};
   GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
@@ -373,6 +372,291 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
   g_fakeVs = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// Disk cache: round trip, hits without D3DCompile, invalidation
+// ---------------------------------------------------------------------------
+
+void ClearDir(const std::wstring& dir) {
+  for (const std::wstring& n : ListFiles(dir, L"*")) DeleteFileW((dir + n).c_str());
+}
+
+// A snapshot of one key, as the observer would take it (no DCS objects).
+Snapshot* MakeSnapshot(const SourceKey& k, int kind) {
+  auto* s = new Snapshot;
+  memset(s, 0, sizeof(*s));
+  s->kind = kind;
+  strcpy_s(s->path, k.path.c_str());
+  strcpy_s(s->key, k.key.c_str());
+  s->defineCount = static_cast<uint32_t>(k.defines.size());
+  for (size_t i = 0; i < k.defines.size(); ++i) {
+    strcpy_s(s->defines[i].name, k.defines[i].name.c_str());
+    strcpy_s(s->defines[i].value, k.defines[i].value.c_str());
+    s->defines[i].keyValue = k.defines[i].keyValue;
+  }
+  const char* names[2][2] = {{"lockon_shadows", "lockon_shadows_transparent"}, {"normal_cf", "normal_cockpit_cf"}};
+  const uint32_t passes[2][2] = {{1, 1}, {5, 9}};
+  for (int t = 0; t < 2; ++t) {
+    strcpy_s(s->techName[t], names[kind][t]);
+    s->tech[t] = static_cast<uint64_t>(t + 1);
+    s->passes[t] = passes[kind][t];
+  }
+  return s;
+}
+
+std::string Serialized(const KeyResult& r) {
+  CacheWriter w;
+  WriteResult(w, r);
+  return w.b;
+}
+
+void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstring& root) {
+  const std::wstring savedRoot = g_root;
+  const bool savedStop = shadowinst::g_stop.load();
+  g_root = shaders;
+  g_compiler = cc;
+  shadowinst::g_stop = false;
+  const std::wstring dir = root + L"qvcache\\";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  ClearDir(dir);
+  Check(!CacheInit(dir, cc), "shadow inst cache: folder created, compiler hashed");
+
+  // 1. Round trip of compiled results (shadow and G-buffer kinds, plus a
+  //    synthetic one with every field set).
+  Snapshot* s = MakeSnapshot(ModelKeys()[1], kKindShadow);
+  Snapshot* g = MakeSnapshot(ModelKeys()[0], kKindGb);
+  KeyResult syn;
+  syn.key = "x.fx:A=1;";
+  syn.path = "x.fx";
+  syn.why = "why";
+  syn.kind = kKindGb;
+  syn.defines = 1;
+  {
+    PassVs p;
+    p.diff = {1, 2, 3, 4, 0xfc, 0x130, 7, "def_uniforms"};
+    p.disasm = {10, 12, 33, "iadd ld_structured_indexable"};
+    syn.vs.push_back(p);
+    TechVs t;
+    t.name = "normal_cf";
+    t.passVs = {0, 0};
+    PassGate gg;
+    gg.ok = gg.psoVsOnly = true;
+    gg.used[0] = 0x8000000000000001ull;
+    gg.used[1] = 2;
+    gg.stages = 3;
+    gg.psTargets = 6;
+    gg.names[0] = {"a"};
+    gg.names[1] = {"posStructOffset", "b"};
+    gg.why = "w";
+    gg.readsOk = true;
+    gg.reads = {"def_uniforms", "diffuseMap"};
+    gg.readsWhy = "rw";
+    t.gates = {gg, PassGate()};
+    syn.techs.push_back(t);
+    TechReads tr;
+    tr.name = "lockon_shadows";
+    tr.ok = true;
+    tr.passes = 1;
+    tr.shaders = 2;
+    tr.bound = {"t0", "t1"};
+    syn.reads.push_back(tr);
+    syn.fxVars = {"v1", "v2"};
+  }
+  KeyResult back;
+  {
+    const std::string b = Serialized(syn);
+    CacheReader rd(reinterpret_cast<const uint8_t*>(b.data()), b.size());
+    const char* why = ReadResult(rd, back);
+    // A synthetic VS blob is not DXBC: the static re-check rejects it.
+    Check(why && strstr(why, "not a VS"), "shadow inst cache: a stored VS that is not VS bytecode is rejected");
+  }
+  syn.vs.clear();
+  syn.techs[0].passVs.clear();
+  {
+    const std::string b = Serialized(syn);
+    CacheReader rd(reinterpret_cast<const uint8_t*>(b.data()), b.size());
+    back = KeyResult();
+    const char* why = ReadResult(rd, back);
+    Check(!why && Serialized(back) == b && back.techs[0].gates[0].used[0] == 0x8000000000000001ull &&
+              back.techs[0].gates[0].names[1][0] == "posStructOffset" && back.reads[0].bound.size() == 2 &&
+              back.fxVars[1] == "v2" && back.why == "why" && back.techs[0].gates[0].readsOk &&
+              back.techs[0].gates[0].reads[1] == "diffuseMap" && back.techs[0].gates[0].readsWhy == "rw" &&
+              !back.techs[0].gates[1].readsOk,
+          "shadow inst cache: KeyResult fields round-trip (gates, per-pass read sets, read sets, variables)");
+  }
+  KeyResult r1;
+  uint32_t c0 = g_d3dCompiles.load();
+  CompileKeyCached(*s, r1);
+  const uint32_t missCompiles = g_d3dCompiles.load() - c0;
+  {
+    const std::string b = Serialized(r1);
+    CacheReader rd(reinterpret_cast<const uint8_t*>(b.data()), b.size());
+    KeyResult rt;
+    Check(r1.ok && !r1.cached && missCompiles == 2 && !ReadResult(rd, rt) && Serialized(rt) == b &&
+              rt.vs[0].bytecode == r1.vs[0].bytecode && rt.reads.size() == r1.reads.size(),
+          "shadow inst cache: a compiled shadow KeyResult round-trips (VS bytecode, checks, read sets)");
+    if (!r1.ok) printf("     cache compile: %s\n", r1.why.c_str());
+  }
+  const std::vector<std::wstring> files = ListFiles(dir, L"s_*.qvc");
+  Check(files.size() == 1 && ListFiles(dir, L"*.tmp").empty(), "shadow inst cache: a miss writes one file, no temp left");
+
+  // 2. A hit runs no D3DCompile and gives the same result.
+  KeyResult r2;
+  c0 = g_d3dCompiles.load();
+  CompileKeyCached(*s, r2);
+  Check(r2.cached && r2.ok && g_d3dCompiles.load() == c0 && Serialized(r2) == Serialized(r1),
+        "shadow inst cache: a hit fills the KeyResult without D3DCompile, identical to the compile");
+  LogResult(r2, 1);
+  Check(r2.line.find("OK, cached;") != std::string::npos, "shadow inst cache: the per-key line of a hit says cached");
+  // G-buffer kind: miss, then a hit.
+  KeyResult g1, g2;
+  CompileKeyCached(*g, g1);
+  c0 = g_d3dCompiles.load();
+  CompileKeyCached(*g, g2);
+  Check(g1.ok && g2.cached && g_d3dCompiles.load() == c0 && Serialized(g2) == Serialized(g1) &&
+            ListFiles(dir, L"g_*.qvc").size() == 1 && !g2.fxVars.empty() && !g2.techs.empty() &&
+            !g2.techs[0].gates.empty() && g2.techs[0].gates[0].readsOk && !g2.techs[0].gates[0].reads.empty(),
+        "shadow inst cache: G-buffer keys (gates, per-pass read sets, variables, disassembly check) are cached too");
+  if (!g1.ok) printf("     cache gb compile: %s\n", g1.why.c_str());
+
+  // 3. A changed include rejects the entry and recompiles.
+  const std::wstring inc = shaders + L"model\\common\\uniforms.hlsl";
+  std::string orig;
+  ReadWholeFile(inc, orig);
+  auto writeFile = [](const std::wstring& p, const std::string& text) {
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD put = 0;
+    const bool ok = h != INVALID_HANDLE_VALUE && WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &put, nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    return ok;
+  };
+  writeFile(inc, orig + "\n// cache test\n");
+  KeyResult r3;
+  c0 = g_d3dCompiles.load();
+  CompileKeyCached(*s, r3);
+  const std::string sum3 = CacheSummary();
+  Check(!r3.cached && r3.ok && g_d3dCompiles.load() - c0 == 2 && sum3.find("source changed 1") != std::string::npos &&
+            sum3.find("model/common/uniforms.hlsl") != std::string::npos,
+        "shadow inst cache: a changed include content rejects the entry and recompiles");
+  printf("     %s\n", sum3.c_str());
+  writeFile(inc, orig);
+  KeyResult r3b;
+  CompileKeyCached(*s, r3b);  // back to the original: rejected again, rewritten
+  KeyResult r3c;
+  c0 = g_d3dCompiles.load();
+  CompileKeyCached(*s, r3c);
+  Check(!r3b.cached && r3c.cached && g_d3dCompiles.load() == c0, "shadow inst cache: the rewritten entry hits again");
+  // An include probe that found nothing must keep finding nothing: a file
+  // appearing in front of the fallback path changes the lookup.
+  {
+    // The first recorded missing probe of the stored file.
+    std::string bytes, probe;
+    ReadWholeFile(dir + files[0], bytes);
+    CacheWriter id;
+    WriteIdentity(id, *s);
+    {
+      std::lock_guard<std::mutex> lock(g_cacheMutex);
+      WriteEnvLocked(id);
+    }
+    if (bytes.size() > kCacheHeader + id.b.size()) {
+      CacheReader rd(reinterpret_cast<const uint8_t*>(bytes.data()) + kCacheHeader + id.b.size(),
+                     bytes.size() - kCacheHeader - id.b.size());
+      const uint32_t n = rd.Count(4096);
+      for (uint32_t i = 0; i < n; ++i) {
+        rd.Str();
+        rd.U64();
+        rd.U64();
+      }
+      const std::vector<std::string> missing = rd.Strs();
+      if (rd.ok && !missing.empty()) probe = missing[0];
+      printf("     cache entry: %u sources, %zu missing include probes recorded%s%s\n", n, missing.size(),
+             probe.empty() ? "" : ", first ", probe.c_str());
+    }
+    if (probe.empty()) {
+      printf("SKIP shadow inst cache: no known missing include probe recorded\n");
+    } else {
+      std::wstring p = SourcePath(probe);
+      const bool existed = GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
+      KeyResult r4;
+      if (!existed && writeFile(p, "// test\n")) {
+        CacheInit(dir, cc);
+        CompileKeyCached(*s, r4);
+        DeleteFileW(p.c_str());
+        Check(!r4.cached && CacheSummary().find("appeared") != std::string::npos,
+              "shadow inst cache: a file appearing at a probed include path rejects the entry");
+        KeyResult r4b;
+        CompileKeyCached(*s, r4b);  // restore the entry
+      } else {
+        printf("SKIP shadow inst cache: could not create the probe %s\n", probe.c_str());
+      }
+    }
+  }
+
+  // 4. A changed edit version rejects the entry and recompiles.
+  CacheInit(dir, cc, kCacheEditVersion + 1);
+  KeyResult r5;
+  c0 = g_d3dCompiles.load();
+  CompileKeyCached(*s, r5);
+  Check(!r5.cached && r5.ok && g_d3dCompiles.load() - c0 == 2 && CacheSummary().find("edit version 1") != std::string::npos,
+        "shadow inst cache: a changed edit version rejects the entry and recompiles");
+  CacheInit(dir, cc);
+  KeyResult r5b;
+  CompileKeyCached(*s, r5b);  // rewritten with the real version
+
+  // 5. A corrupted file (one payload byte flipped) and a truncated one.
+  {
+    std::string bytes;
+    ReadWholeFile(dir + files[0], bytes);
+    bytes[bytes.size() / 2] ^= 0x5a;
+    writeFile(dir + files[0], bytes);
+    KeyResult r6;
+    c0 = g_d3dCompiles.load();
+    CompileKeyCached(*s, r6);
+    const bool corrupt = !r6.cached && r6.ok && g_d3dCompiles.load() - c0 == 2;
+    ReadWholeFile(dir + files[0], bytes);
+    writeFile(dir + files[0], bytes.substr(0, bytes.size() - 7));
+    KeyResult r7;
+    CompileKeyCached(*s, r7);
+    const std::string sum = CacheSummary();
+    Check(corrupt && !r7.cached && sum.find("checksum 1") != std::string::npos &&
+              sum.find("truncated 1") != std::string::npos,
+          "shadow inst cache: a corrupted or truncated file rejects the entry and recompiles");
+    printf("     %s\n", sum.c_str());
+  }
+
+  // 6. No usable folder (a path below a file): works without the cache.
+  {
+    const std::wstring blocker = root + L"qvcache_blocker";
+    writeFile(blocker, "x");
+    const char* why = CacheInit(blocker + L"\\cache\\", cc);
+    KeyResult r8;
+    c0 = g_d3dCompiles.load();
+    CompileKeyCached(*s, r8);
+    Check(why && r8.ok && !r8.cached && g_d3dCompiles.load() - c0 == 2 && CacheSummary().empty(),
+          "shadow inst cache: without a usable folder keys compile as before");
+    DeleteFileW(blocker.c_str());
+  }
+  // Read-only file in place: the write fails, is logged once, compiles go on.
+  {
+    CacheInit(dir, cc);
+    ClearDir(dir);
+    const std::wstring p = dir + files[0];
+    writeFile(p, "junk");
+    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+    KeyResult r9;
+    CompileKeyCached(*s, r9);
+    const std::string sum = CacheSummary();
+    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+    Check(r9.ok && !r9.cached && sum.find("bad magic 1") != std::string::npos &&
+              sum.find("1 not written") != std::string::npos,
+          "shadow inst cache: an unwritable entry is reported and the key still compiles");
+  }
+  ClearDir(dir);
+  delete s;
+  delete g;
+  g_root = savedRoot;
+  shadowinst::g_stop = savedStop;
+}
+
 // Install (on the analysed binaries, loaded without imports), the observer
 // fed with fake casters, the compile workers, the suite summary, Shutdown.
 void Lifecycle(const Compiler& cc, const std::wstring& shaders, ID3D11Device* dev) {
@@ -384,6 +668,11 @@ void Lifecycle(const Compiler& cc, const std::wstring& shaders, ID3D11Device* de
     return;
   }
   g_deviceChecked = false;  // RuntimePath used the device check
+  // The workers use the disk cache; a fresh temp folder (Install keeps it).
+  const std::wstring cacheDir = TempRoot() + L"qvcache_life\\";
+  CreateDirectoryW(cacheDir.c_str(), nullptr);
+  ClearDir(cacheDir);
+  CacheInit(cacheDir, cc);
   const bool installed = shadowinst::Install();
   Check(installed && instcount::g_observer.load() == &Observer,
         "shadow inst: Install verifies the build, starts the workers and registers the caster observer");
@@ -416,6 +705,10 @@ void Lifecycle(const Compiler& cc, const std::wstring& shaders, ID3D11Device* de
         "shadow inst: observer queues each shader once, workers compile each key once, map has every "
         "(shader, technique, pass)");
   printf("     lifecycle: seen %u, keys %u, ok %u, map %u, VS created %u\n", t.seen, t.keys, t.ok, t.map, t.created - created0);
+  const std::string cacheSum = CacheSummary();
+  Check(ListFiles(cacheDir, L"s_*.qvc").size() == 2 && cacheSum.find("2 compiled") != std::string::npos,
+        "shadow inst cache: the compile workers store each key once");
+  printf("     lifecycle %s\n", cacheSum.c_str());
   ID3D11VertexShader* va = FindVs(a->sh, 1, 0);
   ID3D11VertexShader* vb = FindVs(b->sh, 2, 0);
   ID3D11VertexShader* vc = FindVs(c->sh, 1, 0);
@@ -679,6 +972,9 @@ void Run() {
         "@0xfc (static, alpha-test, skinned, damage volume/RGBA variants)");
   Check(dev && created == expected && created > 0, "shadow inst: instanced VS objects are created by a D3D11 device");
   Check(negOk, "shadow inst: the variant check rejects a non-instanced shader");
+
+  // ---- 3b. Disk cache ----
+  CacheTests(cc, shaders, root);
 
   // ---- 4. Key and map helpers ----
   {

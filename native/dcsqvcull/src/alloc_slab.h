@@ -79,6 +79,15 @@ DetourPage* g_page = nullptr;
 std::atomic<int> g_state{0};  // 0 = not installed, 1 = patch pending (next collect), 2 = active, -1 = failed
 std::atomic<void*> g_mgr{nullptr};
 std::atomic<uint64_t> g_resets{0};
+// Measurement observers (du_count.h), null outside its suite phase.
+std::atomic<void (*)(uint32_t bytes)> g_allocObs{nullptr};
+std::atomic<void (*)()> g_collectObs{nullptr};
+std::atomic<void (*)(void* mgr)> g_resetObs{nullptr};
+// Direct upload (direct_upload.h): every allocation's page and element index
+// (verify phase only, else null), and the per-frame reset (null until it is
+// installed).
+std::atomic<void (*)(uint32_t size, uint32_t count, uint32_t page, uint32_t index)> g_blockObs{nullptr};
+std::atomic<void (*)(void* mgr)> g_duReset{nullptr};
 
 struct Counters {
   uint64_t calls = 0, bytes = 0, slow = 0, cycles = 0;
@@ -111,11 +120,12 @@ ThreadState& Tls() {
 
 void Invalidate() { g_gen.fetch_add(1, std::memory_order_acq_rel); }
 
-uint8_t* __fastcall HookAlloc(void* mgr, uint32_t size, uint32_t count, uint32_t* page, uint32_t* index) {
+uint8_t* AllocImpl(void* mgr, uint32_t size, uint32_t count, uint32_t* page, uint32_t* index) {
   ThreadState& t = Tls();
   const uint32_t need = size * count;
   t.c->calls++;
   t.c->bytes += need;
+  if (auto* obs = g_allocObs.load(std::memory_order_relaxed)) obs(need);
   if (g_mgr.load(std::memory_order_relaxed) != mgr) g_mgr.store(mgr, std::memory_order_relaxed);
   const bool measure = texbind_measure().load(std::memory_order_relaxed);
   uint64_t c0 = measure ? __rdtsc() : 0;
@@ -165,6 +175,12 @@ uint8_t* __fastcall HookAlloc(void* mgr, uint32_t size, uint32_t count, uint32_t
   return data + used;
 }
 
+uint8_t* __fastcall HookAlloc(void* mgr, uint32_t size, uint32_t count, uint32_t* page, uint32_t* index) {
+  uint8_t* r = AllocImpl(mgr, size, count, page, index);
+  if (auto* obs = g_blockObs.load(std::memory_order_relaxed)) obs(size, count, *page, *index);
+  return r;
+}
+
 // Per element-size class: peak bytes used in one frame and page count, read
 // at the per-frame reset (before it clears `used`). For sizing bigger pages.
 struct ClassStat {
@@ -206,6 +222,8 @@ void LogClasses() {
 void (*g_onReset)(void* mgr) = nullptr;  // set by big_pages.h
 
 void __fastcall HookReset(void* mgr) {
+  if (auto* obs = g_resetObs.load(std::memory_order_relaxed)) obs(mgr);
+  if (auto* du = g_duReset.load(std::memory_order_acquire)) du(mgr);
   NoteClasses(mgr);
   if (g_onReset) g_onReset(mgr);
   Invalidate();
@@ -243,18 +261,27 @@ bool Prepare() {
     g_state = -1;
     return false;
   }
-  auto** vtbl = reinterpret_cast<void**>(base + kVtableRva);
+  // Recorded RVAs, or where reloc.h re-found them in another build (0: not found).
+  const uint32_t vtRva = reloc::Rva(hooksig::NG_StructBufferManager_vtbl, kVtableRva);
+  const uint32_t allocRva = reloc::Rva(hooksig::NG_StructBufferManager_allocate, kAllocRva);
+  const uint32_t scanRva = reloc::Rva(hooksig::NG_StructBufferManager_scan, kScanRva);
+  const uint32_t lockIat = reloc::Rva(hooksig::NG_iat_ed_mutex_lock, kLockIat);
+  const uint32_t unlockIat = reloc::Rva(hooksig::NG_iat_ed_mutex_unlock, kUnlockIat);
+  auto** vtbl = reinterpret_cast<void**>(base + vtRva);
   uint8_t scanBytes[8];
   uint8_t cur[14];
-  if (!RttiIs(base, vtbl, ".?AVStructBufferManager@model@@") || !ReadBytes(base + kScanRva, scanBytes, 8) ||
-      memcmp(scanBytes, kScanPrologue, 8) != 0 || !ReadBytes(base + kAllocRva, cur, 14)) {
+  if (!vtRva || !allocRva || !scanRva || !lockIat || !unlockIat ||
+      !RttiIs(base, vtbl, ".?AVStructBufferManager@model@@") ||
+      !reloc::SlotIs(hooksig::NG_StructBufferManager_reset, base, SlotOriginal(&vtbl[kResetSlot])) ||
+      !ReadBytes(base + scanRva, scanBytes, 8) || memcmp(scanBytes, kScanPrologue, 8) != 0 ||
+      !ReadBytes(base + allocRva, cur, 14)) {
     Log("model allocator: NGModel.dll does not match this build; not installed");
     g_state = -1;
     return false;
   }
-  g_scan = reinterpret_cast<ScanFn>(base + kScanRva);
-  g_lock = *reinterpret_cast<MutexFn*>(base + kLockIat);
-  g_unlock = *reinterpret_cast<MutexFn*>(base + kUnlockIat);
+  g_scan = reinterpret_cast<ScanFn>(base + scanRva);
+  g_lock = *reinterpret_cast<MutexFn*>(base + lockIat);
+  g_unlock = *reinterpret_cast<MutexFn*>(base + unlockIat);
 
   if (memcmp(cur, kPrologue, 14) == 0) {
     auto* pg = static_cast<DetourPage*>(VirtualAlloc(nullptr, 2 * kPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -269,13 +296,13 @@ bool Prepare() {
     pg->stub[1] = 0x25;
     memcpy(pg->stub + 2, &rel, 4);
     memcpy(pg->tramp, kPrologue, 14);
-    uint8_t* back = base + kAllocRva + 14;
+    uint8_t* back = base + allocRva + 14;
     const uint8_t jmpAbs[6] = {0xFF, 0x25, 0, 0, 0, 0};
     memcpy(pg->tramp + 14, jmpAbs, 6);
     memcpy(pg->tramp + 20, &back, 8);
     *SlotOf(pg) = pg->tramp;
     pg->magic = kMagic;
-    pg->target = base + kAllocRva;
+    pg->target = base + allocRva;
     DWORD oldProt;
     if (!VirtualProtect(pg, kPage, PAGE_EXECUTE_READ, &oldProt)) {
       g_state = -1;
@@ -289,15 +316,15 @@ bool Prepare() {
     DetourPage* pg = nullptr;
     memcpy(&pg, cur + 6, 8);
     uint32_t magic = 0;
-    if (!pg || !ReadBytes(&pg->magic, &magic, 4) || magic != kMagic || pg->target != base + kAllocRva) {
-      Log("model allocator: unknown patch at NGModel+0x%x; not installed", kAllocRva);
+    if (!pg || !ReadBytes(&pg->magic, &magic, 4) || magic != kMagic || pg->target != base + allocRva) {
+      Log("model allocator: unknown patch at NGModel+0x%x; not installed", allocRva);
       g_state = -1;
       return false;
     }
     g_page = pg;
     g_state = 2;
   } else {
-    Log("model allocator: NGModel+0x%x has unexpected bytes; not installed", kAllocRva);
+    Log("model allocator: NGModel+0x%x has unexpected bytes; not installed", allocRva);
     g_state = -1;
     return false;
   }
@@ -317,6 +344,7 @@ bool Prepare() {
 // Called by the collect hook before the original runs: writes the pending
 // detour, and starts a new slab generation for this culling call.
 void OnCollect() {
+  if (auto* obs = g_collectObs.load(std::memory_order_relaxed)) obs();
   Invalidate();
   int expect = 1;
   if (!g_state.compare_exchange_strong(expect, 3)) return;
@@ -408,13 +436,14 @@ bool Prepare() {
   if (g_site) return true;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!base) return false;
+  const uint32_t rva = reloc::Rva(hooksig::NG_SceneRenderable_render_triCounterAdd, kRva);
   uint8_t cur[8];
-  if (!allocslab::ReadBytes(base + kRva, cur, 8)) return false;
+  if (!rva || !allocslab::ReadBytes(base + rva, cur, 8)) return false;  // not found: reloc.h logged it
   if (memcmp(cur + 1, kLocked + 1, 7) != 0 || (cur[0] != 0xF0 && cur[0] != 0x3E)) {
-    Log("triangle counter: NGModel+0x%x does not match this build; skipped", kRva);
+    Log("triangle counter: NGModel+0x%x does not match this build; skipped", rva);
     return false;
   }
-  g_site = base + kRva;
+  g_site = base + rva;
   g_plain = cur[0] == 0x3E;
   return true;
 }

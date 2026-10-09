@@ -31,7 +31,8 @@ public sealed record BoostPlan(
     IReadOnlyList<FreeVramApp>? FreeVram = null,
     long? FreeVramBytes = null,
     MonitorPlan? Monitor = null,
-    string? SmallWindow = null);
+    string? SmallWindow = null,
+    IReadOnlyList<string>? TobiiServices = null);
 
 public static partial class BoostPlanner
 {

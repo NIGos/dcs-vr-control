@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "loader_api.h"
+#include "reloc.h"
 #include "scene_layout.h"
 
 using namespace layout;
@@ -186,13 +187,37 @@ struct Config {
   bool bigPages = true;              // [Model] BigModelPages (big_pages.h)
   bool parUpload = false;            // [Model] ParallelUpload (par_upload.h)
   bool suiteBenchParUpload = false;  // [Suite] BenchParallelUpload
+  bool directUpload = false;            // [Model] DirectUpload (direct_upload.h, R16)
+  bool suiteDirectUploadVerify = false;  // [Suite] DirectUploadVerify
+  bool suiteBenchDirectUpload = false;   // [Suite] BenchDirectUpload
   bool motionCounters = true;        // [Suite] MotionCounters
   bool shadowInst = true;            // [Model] ShadowInstancing (shadow_inst.h: compiles the instanced shadow VS variants)
   bool suiteShadowInstCompile = false;  // [Suite] ShadowInstCompile
   bool suiteGBufferInstCompile = false;  // [Suite] GBufferInstCompile (R13 stage 1: main-pass model_vs variants)
+  bool suiteGBufferTexCount = false;     // [Suite] GBufferTexCount (R14 lead 3: unread G-buffer texture sets)
+  bool suiteFxApplyCount = false;        // [Suite] FxApplyCount (R14 lead 4: same-pass FX Apply counter)
+  bool suiteDirectUploadCount = false;   // [Suite] DirectUploadCount (R16 gates G1-G3 for direct page upload)
+  bool suiteSrvSpanCount = false;        // [Suite] SrvSpanCount (R15 F2: setShaderResources identical-tail counter)
+  bool suiteJoinTailCount = false;       // [Suite] JoinTailCount (R15 F3: render-thread chunk tail at the culling join)
+  bool suiteShadowRecCount = false;      // [Suite] ShadowRecCount (R17 S0: shadow recorder counters)
+  bool splitFilter = false;              // [D3D] SplitFilter (split_filter.h, R15 F5)
+  uint32_t splitFilterOps = 0x4ff;       // [D3D] SplitFilterOps (sfilt::kDefaultOps: no blend, no depth)
+  bool suiteSplitFilterVerify = false;   // [Suite] SplitFilterVerify
+  bool suiteBenchSplitFilter = false;    // [Suite] BenchSplitFilter (bench mode 27)
   bool shadowBatch = true;           // [Model] ShadowBatching (shadow_batch.h; needs ShadowInstancing)
   bool suiteShadowInstVerify = false;   // [Suite] ShadowInstVerify
   bool suiteBenchShadowInst = false;    // [Suite] BenchShadowInst
+  bool shadowPlanAsync = true;          // [Model] ShadowPlanAsync (shadow batching plans on planner threads)
+  bool suiteBenchShadowPlanAsync = false;  // [Suite] BenchShadowPlanAsync
+  bool shadowRecorder = false;          // [Model] ShadowRecorder (shadow_rec.h, R17 S3)
+  uint32_t shadowRecorderScope = 0x101; // [Model] ShadowRecorderScope: bits 0-3 cascades, 8 untextured, 9 textured (0x30f: all)
+  int shadowRecorderWaitUs = 200;       // [Model] ShadowRecorderWaitUs: render-thread wait for a job at the pass
+  int shadowRecorderPriority = 0;       // [Model] ShadowRecorderPriority: worker THREAD_PRIORITY_* (-2..2)
+  uint32_t shadowRecorderSplit = 0x3;   // [Model] ShadowRecorderSplit: cascades with a helper worker (bits 0-3)
+  bool shadowRecorderInstancing = true;  // [Model] ShadowRecorderInstancing
+  bool suiteShadowRecVerify = false;    // [Suite] ShadowRecVerify
+  int suiteShadowRecVerifySec = 5;      // [Suite] ShadowRecVerifySec
+  bool suiteBenchShadowRecorder = false;  // [Suite] BenchShadowRecorder (bench mode 28)
   bool gbufferBatch = false;            // [Model] GBufferBatching (gb_batch.h; needs ShadowInstancing)
   bool suiteGBufferInstVerify = false;  // [Suite] GBufferInstVerify
   bool suiteBenchGBufferInst = false;   // [Suite] BenchGBufferInst
@@ -225,6 +250,8 @@ void ApplyTimerConfig();
 void BenchUseCompactTexTable(bool on);
 void ApplyBigPages(bool on);
 void ApplyParUpload(bool on);
+void ApplyDirectUpload(bool on);
+void ApplySplitFilter(bool on);
 void ApplyTextureHook();
 void ApplyTriCounter();
 void ApplyCbSkip();
@@ -236,6 +263,7 @@ void ApplyShadowTexSkip();
 void ApplyShadowInst();
 void ApplyShadowBatch();
 void ApplyGBufferBatch();
+void ApplyShadowRecorder();
 void ApplyHoldYaw(int deg);
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
@@ -368,6 +396,10 @@ void LoadConfig(bool initial) {
   c.suiteBenchIsolation = GetPrivateProfileIntW(L"Suite", L"BenchIsolation", 0, ini.c_str()) != 0;
   c.diagnostics = GetPrivateProfileIntW(L"General", L"Diagnostics", 0, ini.c_str()) != 0;
   g_beeps = GetPrivateProfileIntW(L"General", L"Beeps", 1, ini.c_str()) != 0;
+  // Re-locate moved DCS code by signature (reloc.h); 0 = recorded addresses only.
+  const bool sigScan = GetPrivateProfileIntW(L"General", L"SigScan", 1, ini.c_str()) != 0;
+  if (reloc::g_enabled.exchange(sigScan) != sigScan || (initial && !sigScan))
+    Log("config: signature scan %s", sigScan ? "on" : "off (recorded DCS addresses only)");
   {
     wchar_t hk[64];
     GetPrivateProfileStringW(L"Hotkeys", L"Toggle", L"122:6", hk, 64, ini.c_str());
@@ -417,13 +449,55 @@ void LoadConfig(bool initial) {
   c.bigPages = GetPrivateProfileIntW(L"Model", L"BigModelPages", 1, ini.c_str()) != 0;
   c.parUpload = GetPrivateProfileIntW(L"Model", L"ParallelUpload", 0, ini.c_str()) != 0;
   c.suiteBenchParUpload = GetPrivateProfileIntW(L"Suite", L"BenchParallelUpload", 0, ini.c_str()) != 0;
+  c.directUpload = GetPrivateProfileIntW(L"Model", L"DirectUpload", 0, ini.c_str()) != 0;
+  c.suiteDirectUploadVerify = GetPrivateProfileIntW(L"Suite", L"DirectUploadVerify", 0, ini.c_str()) != 0;
+  c.suiteBenchDirectUpload = GetPrivateProfileIntW(L"Suite", L"BenchDirectUpload", 0, ini.c_str()) != 0;
   c.motionCounters = GetPrivateProfileIntW(L"Suite", L"MotionCounters", 1, ini.c_str()) != 0;
   c.shadowInst = GetPrivateProfileIntW(L"Model", L"ShadowInstancing", 1, ini.c_str()) != 0;
   c.suiteShadowInstCompile = GetPrivateProfileIntW(L"Suite", L"ShadowInstCompile", 0, ini.c_str()) != 0;
   c.suiteGBufferInstCompile = GetPrivateProfileIntW(L"Suite", L"GBufferInstCompile", 0, ini.c_str()) != 0;
+  c.suiteGBufferTexCount = GetPrivateProfileIntW(L"Suite", L"GBufferTexCount", 0, ini.c_str()) != 0;
+  c.suiteFxApplyCount = GetPrivateProfileIntW(L"Suite", L"FxApplyCount", 0, ini.c_str()) != 0;
+  c.suiteDirectUploadCount = GetPrivateProfileIntW(L"Suite", L"DirectUploadCount", 0, ini.c_str()) != 0;
+  c.suiteSrvSpanCount = GetPrivateProfileIntW(L"Suite", L"SrvSpanCount", 0, ini.c_str()) != 0;
+  c.suiteJoinTailCount = GetPrivateProfileIntW(L"Suite", L"JoinTailCount", 0, ini.c_str()) != 0;
+  c.suiteShadowRecCount = GetPrivateProfileIntW(L"Suite", L"ShadowRecCount", 0, ini.c_str()) != 0;
+  c.splitFilter = GetPrivateProfileIntW(L"D3D", L"SplitFilter", 0, ini.c_str()) != 0;
+  {
+    wchar_t ops[32];
+    GetPrivateProfileStringW(L"D3D", L"SplitFilterOps", L"0x4ff", ops, 32, ini.c_str());
+    c.splitFilterOps = static_cast<uint32_t>(wcstoul(ops, nullptr, 0)) & 0x7ff;  // decimal or 0x hex
+  }
+  c.suiteSplitFilterVerify = GetPrivateProfileIntW(L"Suite", L"SplitFilterVerify", 0, ini.c_str()) != 0;
+  c.suiteBenchSplitFilter = GetPrivateProfileIntW(L"Suite", L"BenchSplitFilter", 0, ini.c_str()) != 0;
   c.shadowBatch = GetPrivateProfileIntW(L"Model", L"ShadowBatching", 1, ini.c_str()) != 0;
   c.suiteShadowInstVerify = GetPrivateProfileIntW(L"Suite", L"ShadowInstVerify", 0, ini.c_str()) != 0;
   c.suiteBenchShadowInst = GetPrivateProfileIntW(L"Suite", L"BenchShadowInst", 0, ini.c_str()) != 0;
+  c.shadowPlanAsync = GetPrivateProfileIntW(L"Model", L"ShadowPlanAsync", 1, ini.c_str()) != 0;
+  c.suiteBenchShadowPlanAsync = GetPrivateProfileIntW(L"Suite", L"BenchShadowPlanAsync", 0, ini.c_str()) != 0;
+  c.shadowRecorder = GetPrivateProfileIntW(L"Model", L"ShadowRecorder", 0, ini.c_str()) != 0;
+  {
+    wchar_t scope[32];
+    GetPrivateProfileStringW(L"Model", L"ShadowRecorderScope", L"0x101", scope, 32, ini.c_str());
+    c.shadowRecorderScope = static_cast<uint32_t>(wcstoul(scope, nullptr, 0)) & 0x3ff;  // decimal or 0x hex
+  }
+  c.shadowRecorderWaitUs = GetPrivateProfileIntW(L"Model", L"ShadowRecorderWaitUs", 200, ini.c_str());
+  if (c.shadowRecorderWaitUs < 0) c.shadowRecorderWaitUs = 0;
+  if (c.shadowRecorderWaitUs > 20000) c.shadowRecorderWaitUs = 20000;
+  c.shadowRecorderPriority = static_cast<int>(GetPrivateProfileIntW(L"Model", L"ShadowRecorderPriority", 0, ini.c_str()));
+  if (c.shadowRecorderPriority < -2) c.shadowRecorderPriority = -2;
+  if (c.shadowRecorderPriority > 2) c.shadowRecorderPriority = 2;
+  {
+    wchar_t split[32];
+    GetPrivateProfileStringW(L"Model", L"ShadowRecorderSplit", L"0x3", split, 32, ini.c_str());
+    c.shadowRecorderSplit = static_cast<uint32_t>(wcstoul(split, nullptr, 0)) & 0xf;
+  }
+  c.shadowRecorderInstancing = GetPrivateProfileIntW(L"Model", L"ShadowRecorderInstancing", 1, ini.c_str()) != 0;
+  c.suiteShadowRecVerify = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerify", 0, ini.c_str()) != 0;
+  c.suiteShadowRecVerifySec = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerifySec", 5, ini.c_str());
+  if (c.suiteShadowRecVerifySec < 1) c.suiteShadowRecVerifySec = 1;
+  if (c.suiteShadowRecVerifySec > 120) c.suiteShadowRecVerifySec = 120;
+  c.suiteBenchShadowRecorder = GetPrivateProfileIntW(L"Suite", L"BenchShadowRecorder", 0, ini.c_str()) != 0;
   c.gbufferBatch = GetPrivateProfileIntW(L"Model", L"GBufferBatching", 0, ini.c_str()) != 0;
   c.suiteGBufferInstVerify = GetPrivateProfileIntW(L"Suite", L"GBufferInstVerify", 0, ini.c_str()) != 0;
   c.suiteBenchGBufferInst = GetPrivateProfileIntW(L"Suite", L"BenchGBufferInst", 0, ini.c_str()) != 0;
@@ -475,9 +549,12 @@ void LoadConfig(bool initial) {
   ApplyShadowTexSkip();
   ApplyBigPages(c.bigPages && !g_engineOff.load());
   ApplyParUpload(c.parUpload && !g_engineOff.load());
+  ApplyDirectUpload(c.directUpload && !g_engineOff.load());
+  ApplySplitFilter(c.splitFilter && !g_engineOff.load());
   ApplyShadowInst();
   ApplyShadowBatch();
   ApplyGBufferBatch();
+  ApplyShadowRecorder();
   ApplyHoldYaw(c.holdYawDeg);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
@@ -773,6 +850,7 @@ void RestoreD3dHooks();
 #include <condition_variable>
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
+#include "deferred_rec.h"  // R15 A1 infrastructure (not wired yet)
 namespace {
 
 void ApplyTimerConfig() {
@@ -1039,12 +1117,20 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "shadow_inst.h"
 #include "shadow_batch.h"
 #include "gb_batch.h"
+#include "fx_apply_count.h"
 #include "pacer.h"
 #include "pose_sweep.h"
 #include "edtime.h"
+#include "srv_span_count.h"
+#include "join_tail_count.h"
+#include "shadow_rec_count.h"
+#include "split_filter.h"
+#include "shadow_rec.h"
 #include "frame_heap.h"
 #include "big_pages.h"
 #include "par_upload.h"
+#include "du_count.h"
+#include "direct_upload.h"
 #include "motion_probes.h"
 #include "motion.h"
 
@@ -1227,12 +1313,15 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   }
 
   if (allocslab::g_state.load(std::memory_order_relaxed) > 0) allocslab::OnCollect();
+  if (directupload::g_state.load(std::memory_order_relaxed) > 0) directupload::OnCollect();
   if (partw::g_orig) SafeApplyWeights(static_cast<uint8_t*>(self));
 
   LARGE_INTEGER t0, t1;
+  const uint32_t joinId = jointail::Begin();  // 0 unless [Suite] JoinTailCount is counting
   QueryPerformanceCounter(&t0);
   g_origCollect(self, count, infos, outs, taskQueue, flags);
   QueryPerformanceCounter(&t1);
+  jointail::End(joinId);
 
   for (int i = 0; i < patched; ++i) *reinterpret_cast<uint8_t**>(patches[i].slot) = patches[i].original;
 
@@ -1363,6 +1452,65 @@ void ApplyParUpload(bool on) {
   parupload::g_on = on;
 }
 
+// Installed on first use (needs the model allocator hooks, written at a
+// collect call: retried every second by LoadConfig); off = pass-through.
+void ApplyDirectUpload(bool on) {
+  if (on && allocslab::g_state.load() == 0) allocslab::Prepare();
+  if (on && !directupload::Install()) {
+    directupload::g_on = false;
+    return;
+  }
+  directupload::g_on = on;
+}
+
+// Installed on first use (dx11backend checks; the first draw then hands it
+// DCS's context: retried every second). Off = sites, call-table entries and
+// context table restored (stock). A verify mismatch latches it off.
+void ApplySplitFilter(bool on) {
+  if (sfilt::g_disabled.load()) on = false;
+  if (!on) {
+    if (sfilt::g_attached.load() || sfilt::g_hooked.load() || sfilt::g_sitesPatched.load()) {
+      sfilt::Detach();
+      if (sfilt::g_disabled.load()) Log("split filter: off for this session (verify mismatch or fault)");
+    }
+    return;
+  }
+  sfilt::g_opMask = g_cfg.splitFilterOps;
+  if (!sfilt::Install()) return;
+  if (sfilt::g_attached.load() && sfilt::g_active != sfilt::g_opMask.load()) sfilt::Detach();  // ops changed
+  if (!sfilt::Live()) sfilt::Attach();
+}
+
+// Suite: installs and attaches (whatever [D3D] SplitFilter says) and waits
+// for the context; false (logged) when the filter cannot run.
+bool SplitFilterReady() {
+  if (sfilt::g_disabled.load()) {
+    Log("  split filter is latched off for this session");
+    return false;
+  }
+  sfilt::g_opMask = g_cfg.splitFilterOps;
+  if (!sfilt::Install()) {
+    Log("  split filter not available (install state %d, see the log above)", sfilt::g_state.load());
+    return false;
+  }
+  if (sfilt::g_attached.load() && sfilt::g_active != sfilt::g_opMask.load()) sfilt::Detach();
+  for (int i = 0; i < 60 && !sfilt::Attach(); ++i) Sleep(50);
+  if (sfilt::Live()) return true;
+  Log("  split filter: DCS's context was not captured (no DX11Renderer::draw seen)");
+  ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
+  return false;
+}
+
+// Suite: waits for the allocate detour (written at the next collect) and installs.
+bool DirectUploadReady() {
+  if (allocslab::g_state.load() == 0) allocslab::Prepare();
+  for (int i = 0; i < 40 && allocslab::g_state.load() == 1; ++i) Sleep(50);
+  if (directupload::Install()) return true;
+  Log("  direct upload not ready (model allocator state %d, direct upload state %d)", allocslab::g_state.load(),
+      directupload::g_state.load());
+  return false;
+}
+
 void ApplyBigPages(bool on) {
   if (bigpages::g_state.load() == 0) bigpages::g_bigBytes = g_cfg.bigPageBytes;
   if (on && !bigpages::Install()) return;
@@ -1391,6 +1539,7 @@ void ApplyShadowBatch() {
     shadowbatch::g_on = false;
     return;
   }
+  shadowbatch::g_async = g_cfg.shadowPlanAsync;
   shadowbatch::g_on = on;
 }
 
@@ -1404,6 +1553,23 @@ void ApplyGBufferBatch() {
     return;
   }
   gbbatch::g_on = on;
+}
+
+// R17 S3-S6 recorder: installed on first use (needs shadow batching's hooks and
+// the compiled keys: retried every second); off = pass-through. Off while
+// G-buffer batching is on (its leaders swap [item+0xd4]).
+void ApplyShadowRecorder() {
+  shrec::g_scope = g_cfg.shadowRecorderScope;
+  shrec::g_waitUs = static_cast<uint32_t>(g_cfg.shadowRecorderWaitUs);
+  shrec::g_priority = g_cfg.shadowRecorderPriority;  // THREAD_PRIORITY_* are -2..2
+  shrec::g_split = g_cfg.shadowRecorderSplit;
+  shrec::g_instancing = g_cfg.shadowRecorderInstancing;
+  const bool on = g_cfg.shadowRecorder && !g_engineOff.load() && !(g_cfg.gbufferBatch && g_cfg.shadowInst);
+  if (on && !shrec::Install()) {
+    shrec::g_on = false;
+    return;
+  }
+  shrec::g_on = on;
 }
 
 // Installed on first use; detached (DCS's own slot 5) while off. Its masks
@@ -1444,9 +1610,12 @@ void SetEngineOff(bool off) {
   ApplyShadowTexSkip();
   ApplyBigPages(g_cfg.bigPages && !off);
   ApplyParUpload(g_cfg.parUpload && !off);
+  ApplyDirectUpload(g_cfg.directUpload && !off);
+  ApplySplitFilter(g_cfg.splitFilter && !off);
   ApplyShadowInst();
   ApplyShadowBatch();
   ApplyGBufferBatch();
+  ApplyShadowRecorder();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
@@ -1719,6 +1888,50 @@ void InstallDiagnostics() {
   texbind::Install(g_tscHz);
 }
 
+// Suite: the recorder installed and warmed up (2 s on: the probes learn the
+// keys and meshes). verify: then the same-frame compare and 2 s recorded,
+// and the configured state back. False (logged) when it cannot run.
+bool ShadowRecPhase(bool verify) {
+  shrec::g_scope = g_cfg.shadowRecorderScope;
+  shrec::g_waitUs = static_cast<uint32_t>(g_cfg.shadowRecorderWaitUs);
+  shrec::g_priority = g_cfg.shadowRecorderPriority;
+  shrec::g_split = g_cfg.shadowRecorderSplit;
+  shrec::g_instancing = g_cfg.shadowRecorderInstancing;
+  if (g_cfg.gbufferBatch && g_cfg.shadowInst) {
+    Log("  shadow recorder: off while [Model] GBufferBatching=1");
+    return false;
+  }
+  for (int i = 0; i < 20 && shrec::g_state.load() == 0 && !shrec::Install(); ++i) Sleep(250);
+  if (!shrec::Ready()) {
+    Log("  shadow recorder not available (state %d%s; needs [Model] ShadowInstancing=1 and shadow batching's hooks, "
+        "see the log above)",
+        shrec::g_state.load(), shrec::g_disabled.load() ? ", latched off" : "");
+    return false;
+  }
+  const bool was = shrec::g_on.load();
+  shrec::g_on = true;
+  Sleep(2000);
+  if (!verify) return true;  // the A/B toggles it per block, then ApplyShadowRecorder
+  shrec::ResetCounters();
+  uint64_t f0 = g_quadFrame.load();
+  shrec::g_verify = true;
+  for (int t = 0; t < g_cfg.suiteShadowRecVerifySec * 10 && !g_benchAbort && !shrec::g_disabled.load(); ++t) Sleep(100);
+  shrec::g_verify = false;
+  Sleep(100);
+  shrec::LogCounters("verify", static_cast<double>(g_quadFrame.load() - f0));
+  if (shrec::g_disabled.load()) {
+    Log("  verify: differences found or a fault -> recorder NOT SAFE, latched off for this session");
+  } else {
+    shrec::ResetCounters();
+    f0 = g_quadFrame.load();
+    Sleep(2000);
+    shrec::LogCounters("2 s recorded", static_cast<double>(g_quadFrame.load() - f0));
+  }
+  shrec::g_on = was;
+  ApplyShadowRecorder();
+  return true;
+}
+
 DWORD WINAPI SuiteThread(void*) {
   InstallDiagnostics();
   g_benchRunningFlag = true;
@@ -1889,6 +2102,38 @@ DWORD WINAPI SuiteThread(void*) {
     shadowinst::SuitePhaseGb(3000, g_benchAbort, &g_quadFrame);
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteGBufferTexCount && !g_benchAbort) {
+    Log("-- g-buffer texture sets the deferred P0 never reads (R14 lead 3 counter; collect 1 s, wait for the keys, "
+        "count 5 s) --");
+    shadowinst::SuitePhaseGbTex(1000, 5000, g_benchAbort, &g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteDirectUploadCount && !g_benchAbort) {
+    Log("-- direct upload gates: draws and allocations around the mapped-page window (R16 G1-G3, 5 s) --");
+    ducount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
+    Log("-- FX pass Apply: same pass again (R14 lead 4 counter, 5 s) --");
+    fxapply::Measure(5000, g_quadFrame, g_tscHz);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteSrvSpanCount && !g_benchAbort) {
+    Log("-- setShaderResources: passed span vs changed span, identical tail (R15 F2 counter, 5 s) --");
+    srvspan::Measure(5000, g_quadFrame, g_tscHz);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteJoinTailCount && !g_benchAbort) {
+    Log("-- culling join: render-thread chunk tail after the last worker chunk (R15 F3 counter, 5 s) --");
+    jointail::Measure(5000, g_quadFrame, g_qpcToUs);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteShadowRecCount && !g_benchAbort) {
+    Log("-- shadow recorder S0 counters: caster mix and loop time per cascade, pass setup stability, material and "
+        "texture checks, driver support (R17, 1 s discovery + 5 s) --");
+    shadowrec::Measure(5000, g_quadFrame, g_tscHz);
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteYawScan && !g_benchAbort) {
     Log("-- yaw scan: fps per held view yaw (2 s settle + 2 s each) --");
     int best = 0;
@@ -1936,6 +2181,13 @@ DWORD WINAPI SuiteThread(void*) {
       shadowbatch::LogCounters("2 s batched");
     }
   }
+  if (ok && g_cfg.suiteShadowRecVerify && !g_benchAbort) {
+    Log("-- shadow recorder (R17 S3-S6, scope 0x%x): 2 s warm-up (probes), then same-frame depth compare per "
+        "recorded cascade, stock vs recorded (%d s), then 2 s recorded --",
+        g_cfg.shadowRecorderScope, g_cfg.suiteShadowRecVerifySec);
+    ShadowRecPhase(true);
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteBenchParUpload && parupload::Install() && !g_benchAbort) {
     Log("-- A/B: parallel copy for large dynamic structured-buffer uploads --");
     parupload::g_calls = parupload::g_bytes = parupload::g_cycles = 0;
@@ -1947,9 +2199,109 @@ DWORD WINAPI SuiteThread(void*) {
           parupload::g_calls / f, parupload::g_bytes / f / 1048576.0, parupload::g_cycles / g_tscHz * 1000.0 / f);
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteDirectUploadVerify && !g_benchAbort) {
+    Log("-- direct upload: sentinel verify of the mapped model data pages (R16 checks a-c, 3 s), then 2 s direct --");
+    if (!DirectUploadReady()) {
+      // logged
+    } else if (directupload::g_disabled.load()) {
+      Log("  direct upload is latched off for this session; not verified");
+    } else if (!directupload::StartVerify()) {
+      Log("  direct upload verify: no memory for the block log");
+    } else {
+      const bool was = directupload::g_on.load();
+      directupload::ResetCounters();
+      uint64_t f0 = g_quadFrame.load();
+      directupload::g_on = true;
+      Sleep(3000);
+      directupload::g_on = was;
+      directupload::StopVerify();
+      Sleep(100);
+      directupload::LogCounters("verify", static_cast<double>(g_quadFrame.load() - f0));
+      directupload::LogVerify();
+      if (!directupload::g_disabled.load()) {
+        directupload::ResetCounters();
+        f0 = g_quadFrame.load();
+        directupload::g_on = true;
+        Sleep(2000);
+        directupload::g_on = was;
+        Sleep(100);
+        directupload::LogCounters("2 s direct", static_cast<double>(g_quadFrame.load() - f0));
+      }
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchDirectUpload && !g_benchAbort && DirectUploadReady()) {
+    Log("-- A/B: direct upload into mapped GPU pages (OFF = stock memcpy upload, ON = direct) --");
+    if (directupload::g_disabled.load()) {
+      Log("  direct upload is latched off for this session; A/B skipped");
+    } else {
+      directupload::ResetCounters();
+      const uint64_t f0 = g_quadFrame.load();
+      ok = RunBenchmark(26, false);
+      directupload::LogCounters("A/B, whole run (mapping in ON blocks only)",
+                                static_cast<double>(g_quadFrame.load() - f0));
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteSplitFilterVerify && !g_benchAbort) {
+    Log("-- split-path D3D11 state filter (R15 F5): every skip checked against d3d11 (10 s), then 5 s filtered --");
+    if (SplitFilterReady()) {
+      sfilt::ResetCounters();
+      sfilt::g_count = true;
+      sfilt::g_verify = true;
+      uint64_t f0 = g_quadFrame.load();
+      Sleep(10000);
+      sfilt::g_verify = false;
+      sfilt::LogCounters("verify", static_cast<double>(g_quadFrame.load() - f0));
+      if (sfilt::g_disabled.load()) {
+        Log("  verify: mismatches found -> split filter NOT SAFE, latched off for this session");
+      } else {
+        Log("  verify: 0 mismatches");
+        sfilt::ResetCounters();
+        f0 = g_quadFrame.load();
+        Sleep(5000);
+        sfilt::LogCounters("5 s filtered", static_cast<double>(g_quadFrame.load() - f0));
+      }
+      sfilt::g_count = false;
+      ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchSplitFilter && !g_benchAbort && SplitFilterReady()) {
+    Log("-- A/B: split-path D3D11 state filter (OFF = stock, no patch or hook; ON = filter, no counting) --");
+    // No counting in the A/B: the per-call counters (site lookup by return
+    // address) cost more than the skips save [M 2026-10-09: -2.6% with them].
+    sfilt::ResetCounters();
+    sfilt::g_count = false;
+    const uint64_t f0 = g_quadFrame.load();
+    ok = RunBenchmark(27, false);
+    sfilt::g_count = false;
+    sfilt::LogCounters("A/B, whole run (filter in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteBenchShadowInst && shadowbatch::Install() && !g_benchAbort) {
     Log("-- A/B: shadow caster instancing --");
     ok = RunBenchmark(22, false);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchShadowRecorder && !g_benchAbort) {
+    Log("-- A/B: shadow recorder (OFF = DCS draws every caster, ON = the recorded casters from a worker's command "
+        "list; scope 0x%x) --",
+        g_cfg.shadowRecorderScope);
+    if (ShadowRecPhase(false)) {
+      shrec::ResetCounters();
+      const uint64_t f0 = g_quadFrame.load();
+      ok = RunBenchmark(28, false);
+      shrec::LogCounters("A/B, whole run (recorder in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchShadowPlanAsync && shadowbatch::Install() && !g_benchAbort) {
+    Log("-- A/B: shadow batching plans on planner threads --");
+    if (!shadowbatch::g_on.load()) Log("  shadow batching is off ([Model] ShadowBatching or the kill switch)");
+    shadowbatch::ResetCounters();
+    ok = RunBenchmark(25, false);
+    shadowbatch::LogCounters("plan A/B");
     Chime(1000, 60);
   }
   if (ok && g_cfg.suiteGBufferInstVerify && !g_benchAbort) {
@@ -2156,6 +2508,8 @@ void StartBench() {
 }
 
 DWORD WINAPI WorkerThread(void*) {
+  reloc::g_log = [](const char* line) { Log("%s", line); };
+  reloc::g_slotRead = [](void** slot) { return SlotOriginal(slot); };
   LARGE_INTEGER f;
   QueryPerformanceFrequency(&f);
   g_qpcToUs = 1e6 / static_cast<double>(f.QuadPart);
@@ -2280,6 +2634,13 @@ DWORD WINAPI WorkerThread(void*) {
       if (g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load() && gbbatch::g_state.load() == 0 &&
           !g_benchRunningFlag.load())
         ApplyGBufferBatch();
+      if (g_cfg.shadowRecorder && !g_engineOff.load() && shrec::g_state.load() == 0 && !g_benchRunningFlag.load())
+        ApplyShadowRecorder();
+      // Split filter: waits for dx11backend and the first draw; detaches after a verify mismatch.
+      if (!g_benchRunningFlag.load() &&
+          ((g_cfg.splitFilter && !g_engineOff.load() && sfilt::g_state.load() >= 0 && !sfilt::Live()) ||
+           (sfilt::g_disabled.load() && sfilt::g_attached.load())))
+        ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
     }
     // Re-read the Quad-Views-Foveated edge smoothing every 10 s once quad views run.
     static ULONGLONG lastQv = 0;
@@ -2359,6 +2720,18 @@ DWORD WINAPI WorkerThread(void*) {
           ToggleEngine();
         }
       }
+      // Remote trigger: run_profile.flag starts a CPU profile alone (no suite
+      // phases, so no diagnostic hooks: the production-mode profile, R15 F4).
+      for (const std::wstring& pf : {g_dir + L"run_profile.flag",
+                                     g_devDir.empty() ? std::wstring() : g_devDir + L"run_profile.flag"}) {
+        if (!pf.empty() && GetFileAttributesW(pf.c_str()) != INVALID_FILE_ATTRIBUTES) {
+          DeleteFileW(pf.c_str());
+          if (!g_benchRunningFlag.load()) {
+            Log("profile: started by run_profile.flag");
+            if (HANDLE t = CreateThread(nullptr, 0, ProfileThread, nullptr, 0, nullptr)) CloseHandle(t);
+          }
+        }
+      }
       std::wstring flag = g_dir + L"run_suite.flag";
       std::wstring devFlag = g_devDir.empty() ? std::wstring() : g_devDir + L"run_suite.flag";
       if (!devFlag.empty() && GetFileAttributesW(devFlag.c_str()) != INVALID_FILE_ATTRIBUTES) flag = devFlag;
@@ -2383,6 +2756,11 @@ DWORD WINAPI WorkerThread(void*) {
       lastCensus = now;
       uint64_t fr = g_quadFrame.load();
       CensusDump(fr - censusFrames0);
+      // Shadow recorder outside suites: its counters every 10 s while on.
+      if (shrec::g_on.load() && shrec::Ready() && !g_benchRunningFlag.load()) {
+        shrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
+        shrec::ResetCounters();
+      }
       censusFrames0 = fr;
     }
     if (now - lastStats >= static_cast<ULONGLONG>(g_cfg.statsIntervalSec) * 1000) {
@@ -2450,8 +2828,27 @@ void SetBenchVariant(bool on) {
     ApplyParUpload(on);
     return;
   }
+  if (g_benchActiveMode.load() == 26) {
+    directupload::g_on = on;
+    return;
+  }
+  if (g_benchActiveMode.load() == 27) {
+    if (on)
+      sfilt::Attach();
+    else
+      sfilt::Detach();
+    return;
+  }
   if (g_benchActiveMode.load() == 22) {
     shadowbatch::g_on = on;
+    return;
+  }
+  if (g_benchActiveMode.load() == 28) {
+    shrec::g_on = on;
+    return;
+  }
+  if (g_benchActiveMode.load() == 25) {
+    shadowbatch::g_async = on;
     return;
   }
   if (g_benchActiveMode.load() == 23) {
@@ -2567,10 +2964,16 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   allocslab::Invalidate();
   posesweep::Stop();
   d3ds::Uninstall();
+  srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
+  sfilt::Shutdown();    // call sites, FX call-table entries and context table back to stock
+  jointail::Shutdown();
+  shadowrec::Shutdown();  // chained pointers and class slots back before batching's own shutdown
+  shrec::Shutdown();      // recorder chain out, its worker joined, before batching's shutdown
   timercache::g_on = false;  // until the new payload re-patches, pass through
   timercache::g_stopUpdater = true;
   gbbatch::Shutdown();      // G-buffer batching callbacks first
   gbverify::Shutdown();
+  directupload::Shutdown();  // waits for mapped pages to be restored; before the update hook goes
   parupload::Shutdown();
   shadowbatch::Shutdown();  // unhooks the batching callbacks before the VS objects go
   shadowinst::Shutdown();  // joins the compile workers, then releases our VS objects

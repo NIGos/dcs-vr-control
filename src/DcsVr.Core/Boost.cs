@@ -132,6 +132,8 @@ public sealed record BoostStatus
     public IReadOnlyList<string> Reopened { get; init; } = [];
     /// <summary>What Lower the monitor while flying did last, or null when it is off.</summary>
     public string? Monitor { get; init; }
+    /// <summary>What Pause the desktop Tobii eye tracker did last, or null when it is off.</summary>
+    public string? Tobii { get; init; }
     public int Restored { get; init; }
     public IReadOnlyList<string> Errors { get; init; } = [];
     public string Prefetch { get; init; } = "off";

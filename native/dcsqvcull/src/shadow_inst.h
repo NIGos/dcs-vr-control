@@ -73,7 +73,11 @@
 // posStructOffset must be read by the VS only). Map entries carry the gate:
 // FindVsEx, PrevTransformUnused, CbUsedDwords. Keys come from
 // SceneRenderable vt[1] (gb_count.h's hook, observer GbObserver), collected
-// by [Suite] GBufferInstCompile only.
+// by [Suite] GBufferInstCompile only. Each G-buffer pass also keeps the
+// resources its stages bind in (a) (PassGate::reads, GbPassReadTextures),
+// for the R14 lead 3 counter [Suite] GBufferTexCount (measurement only).
+// Compile results persist in <module dir>\cache\ (see "Disk cache" below):
+// later starts load them without D3DCompile.
 // Included once from main.cpp inside its anonymous namespace, after
 // inst_count.h, gb_count.h and shadow_tex.h.
 #pragma once
@@ -573,13 +577,22 @@ inline bool TechniqueReads(const FxEffect& fx, const std::string& tech, TechRead
 // counts, compared) and the names of every variable of the effect (the live
 // parameter records must all be among them).
 inline void AnalyseShadowReads(const FxEffect& fx, const char* const techs[2], const uint32_t livePasses[2],
-                               std::vector<TechReads>& reads, std::vector<std::string>& vars) {
-  reads.clear();
+                               std::vector<TechReads>& reads, std::vector<std::string>& vars);
+
+// Every variable name of the effect (object, numeric, constant buffer,
+// interface), sorted and unique: the live parameter records must be among them.
+inline void EffectVarNames(const FxEffect& fx, std::vector<std::string>& vars) {
   vars.clear();
   for (const FxObjectVar& v : fx.vars) vars.push_back(v.name);
   for (const std::string& n : fx.otherNames) vars.push_back(n);
   std::sort(vars.begin(), vars.end());
   vars.erase(std::unique(vars.begin(), vars.end()), vars.end());
+}
+
+inline void AnalyseShadowReads(const FxEffect& fx, const char* const techs[2], const uint32_t livePasses[2],
+                               std::vector<TechReads>& reads, std::vector<std::string>& vars) {
+  reads.clear();
+  EffectVarNames(fx, vars);
   for (int t = 0; t < 2; ++t) {
     bool dup = false;
     for (const TechReads& x : reads) dup |= x.name == techs[t];
@@ -710,6 +723,54 @@ inline std::wstring Widen(const std::string& s) {
   return w;
 }
 
+// FNV-1a 64 (cache checksums and source content hashes).
+inline uint64_t Fnv64(const void* p, size_t n, uint64_t h = 0xcbf29ce484222325ull) {
+  const auto* b = static_cast<const uint8_t*>(p);
+  for (size_t i = 0; i < n; ++i) {
+    h ^= b[i];
+    h *= 0x100000001b3ull;
+  }
+  return h;
+}
+
+// What the compiles of one key read, for the disk cache: every source file
+// read by CompileEffect / FxInclude (path relative to the shaders root as
+// probed, raw content before our edits) and every include probe that found
+// no file (a file appearing there would change the lookup). Set per worker
+// thread around one key's compiles (t_sourceLog).
+struct SourceFile {
+  std::string rel;
+  uint64_t size = 0, hash = 0;
+};
+struct SourceLog {
+  std::vector<SourceFile> files;
+  std::vector<std::string> missing;
+  uint32_t compiles = 0;    // D3DCompile2 calls
+  bool unreliable = false;  // a file changed between reads, or exists but was unreadable
+  void AddFile(const std::string& relRaw, const std::string& text) {
+    const std::string rel = LowerSlashes(relRaw);
+    const uint64_t h = Fnv64(text.data(), text.size());
+    for (const SourceFile& f : files)
+      if (f.rel == rel) {
+        if (f.size != text.size() || f.hash != h) unreliable = true;
+        return;
+      }
+    files.push_back({rel, text.size(), h});
+  }
+  void AddMissing(const std::wstring& path, const std::string& relRaw) {
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      unreliable = true;  // there but not readable: not a stable input
+      return;
+    }
+    const std::string rel = LowerSlashes(relRaw);
+    for (const std::string& m : missing)
+      if (m == rel) return;
+    missing.push_back(rel);
+  }
+};
+thread_local SourceLog* t_sourceLog = nullptr;
+std::atomic<uint32_t> g_d3dCompiles{0};  // every D3DCompile2 call of CompileEffect (tests: a cache hit adds none)
+
 class FxInclude : public ID3DInclude {
  public:
   // root: ...\Bazar\shaders\ (trailing backslash); folder: the main file's
@@ -732,8 +793,11 @@ class FxInclude : public ID3DInclude {
       std::wstring path = root_ + Widen(relTry);
       for (wchar_t& c : path)
         if (c == L'/') c = L'\\';
-      if (ReadWholeFile(path, text)) {
+      if (!ReadWholeFile(path, text)) {
+        if (t_sourceLog) t_sourceLog->AddMissing(path, relTry);
+      } else {
         found = true;
+        if (t_sourceLog) t_sourceLog->AddFile(relTry, text);
         wchar_t full[MAX_PATH];
         const DWORD n = GetFullPathNameW(path.c_str(), MAX_PATH, full, nullptr);
         rel = LowerSlashes(n && n < MAX_PATH ? Narrow(full) : relTry);
@@ -877,6 +941,10 @@ inline std::string FolderOf(const std::string& path) {
   return s == std::string::npos ? std::string() : path.substr(0, s + 1);
 }
 
+// DCS's target and flags [V 0x2e720]; also part of the disk cache's environment.
+constexpr const char* kFxTarget = "fx_5_0";
+constexpr UINT kFxFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+
 // Compiles one effect as DCS does. edit = serve the edited includes; with
 // instanced = kVarShadow (or true) uniforms.hlsl + lk_shadow.hlsl are edited
 // and QV_SHADOW_INSTANCED is added (shadow variant b); with kVarModel
@@ -897,9 +965,11 @@ inline bool CompileEffect(const Compiler& c, const std::wstring& root, const Sou
   for (wchar_t& ch : mainPath)
     if (ch == L'/') ch = L'\\';
   if (!ReadWholeFile(mainPath, src)) {
+    if (t_sourceLog) t_sourceLog->AddMissing(mainPath, k.path);
     err = "source file not found under Bazar\\shaders";
     return false;
   }
+  if (t_sourceLog) t_sourceLog->AddFile(k.path, src);
   std::vector<D3D_SHADER_MACRO> macros;
   for (const Define& d : k.defines) macros.push_back({d.name.c_str(), d.value.c_str()});
   if (instanced == kVarShadow) macros.push_back({kInstDefine, "1"});
@@ -913,9 +983,11 @@ inline bool CompileEffect(const Compiler& c, const std::wstring& root, const Sou
   ID3DBlob* code = nullptr;
   ID3DBlob* errs = nullptr;
   LARGE_INTEGER t0, t1, f;
+  g_d3dCompiles.fetch_add(1);
+  if (t_sourceLog) ++t_sourceLog->compiles;
   QueryPerformanceCounter(&t0);
-  const HRESULT hr = c.compile2(src.data(), src.size(), k.path.c_str(), macros.data(), &inc, nullptr, "fx_5_0",
-                                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, 0, nullptr, 0, &code, &errs);
+  const HRESULT hr = c.compile2(src.data(), src.size(), k.path.c_str(), macros.data(), &inc, nullptr, kFxTarget,
+                                kFxFlags, 0, 0, nullptr, 0, &code, &errs);
   QueryPerformanceCounter(&t1);
   QueryPerformanceFrequency(&f);
   if (ms) *ms = 1000.0 * (t1.QuadPart - t0.QuadPart) / f.QuadPart;
@@ -1609,6 +1681,12 @@ struct PassGate {
   uint32_t psTargets = 0;   // SV_Target outputs of the pass's PS (G-buffer stage 2: the deferred PS writes 5-6)
   std::vector<std::string> names[kStages];  // used def_uniforms members per stage
   std::string why;
+  // R14 lead 3 (G1) counter, from (a) independently of the CB gate above:
+  // every resource the RDEF chunk of any stage of this pass binds (sorted,
+  // unique), as TechniqueReads for one pass. readsOk false: readsWhy says why.
+  bool readsOk = false;
+  std::vector<std::string> reads;
+  std::string readsWhy;
 };
 
 inline void MarkDwords(uint64_t m[2], uint32_t off, uint32_t size) {
@@ -1693,6 +1771,43 @@ inline void GatePass(const Compiler& c, const FxPass& pass, PassGate& g) {
   g.psoVsOnly = psoVs && !psoOther;
 }
 
+// The pass's read set for the G1 counter (PassGate::reads): the RDEF binding
+// names of every shader the pass selects, any stage. Same rejections as
+// TechniqueReads: a shader selected at run time, an assignment naming no
+// variable, a blob without a program or a readable resource list.
+inline void PassReads(const FxPass& pass, PassGate& g) {
+  g.readsOk = false;
+  g.reads.clear();
+  g.readsWhy.clear();
+  std::vector<std::string> reads;
+  const char* names[shadowtex::kMaxBindings];
+  for (const FxAssign& a : pass.assigns) {
+    if (a.dynamic) {
+      g.readsWhy = "a shader or state is selected at run time";
+      return;
+    }
+    if (a.unresolved) {
+      g.readsWhy = "an assignment names no variable of the effect";
+      return;
+    }
+    if (!a.shader.p) continue;  // state assignment or NULL shader
+    if (DxbcProgramType(a.shader.p, a.shader.n) < 0) {
+      g.readsWhy = "a shader blob has no program";
+      return;
+    }
+    const int n = shadowtex::ParseDxbcBindings(a.shader.p, a.shader.n, names, shadowtex::kMaxBindings);
+    if (n < 0) {
+      g.readsWhy = "a shader blob has no readable resource list";
+      return;
+    }
+    for (int i = 0; i < n; ++i) reads.push_back(names[i]);
+  }
+  std::sort(reads.begin(), reads.end());
+  reads.erase(std::unique(reads.begin(), reads.end()), reads.end());
+  g.reads = std::move(reads);
+  g.readsOk = true;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime: observed shaders, compile workers, the variant map
 // ---------------------------------------------------------------------------
@@ -1715,6 +1830,16 @@ constexpr uint32_t kTechVtbl = 0xb9608;     // .?AUSTechnique@D3DX11Effects@@
 constexpr uint32_t kPassVtbl = 0xb96b0;     // .?AUSPassBlock@D3DX11Effects@@
 // NGModel.dll
 constexpr uint32_t kModelMatVtbl = 0x592f0;  // .?AVModelMaterialMT@model@@
+
+// Where this build has them: the recorded RVAs above, or where reloc.h
+// re-found them in another build (0 = not found). Set by VerifyBuild; until
+// then the recorded RVAs (the tests' fake modules use those).
+struct Addrs {
+  uint32_t shader = kShaderVtbl, effect = kEffectVtbl, effectGetDevice = kEffectGetDevice;
+  uint32_t shaderVar = kShaderVarVtbl, getVertexShader = kGetVertexShader, tech = kTechVtbl, pass = kPassVtbl;
+  uint32_t model = kModelMatVtbl;
+};
+Addrs g_at;
 
 constexpr int kMaxPasses = 16;  // normal_cockpit*: 9 passes
 constexpr int kMaxDefines = 128;
@@ -1767,6 +1892,7 @@ struct KeyResult {
   int kind = kKindShadow;
   uint32_t index = 0;          // order of completion
   bool ok = false, done = false;
+  bool cached = false;         // loaded from the disk cache (no compile ran)
   double msA = 0, msB = 0;
   size_t defines = 0;
   std::vector<PassVs> vs;  // distinct (b) VS blobs
@@ -1802,6 +1928,10 @@ struct MapEntry {
   void* techBegin = nullptr;
   void* dcsVs = nullptr;
   std::atomic<ID3D11VertexShader*> vs{nullptr};  // set once created
+  // The finished key and this pass's gate (immutable once published; freed
+  // only by Shutdown). GbPassReadTextures reads the pass's read set from it.
+  const KeyResult* result = nullptr;
+  const PassGate* gate = nullptr;
 };
 constexpr size_t kMapSize = 8192;  // power of two
 MapEntry* g_map = nullptr;
@@ -1968,7 +2098,7 @@ const char* SnapshotRaw(uint8_t* mat, uint8_t* sh, Snapshot& s) {
   s.shader = sh;
   s.effect = *reinterpret_cast<void**>(sh + 0x50);
   s.techBegin = *reinterpret_cast<void**>(sh + 0xb0);
-  if (!s.effect || *static_cast<void**>(s.effect) != g_dx + kEffectVtbl) return "effect at +0x50 is not a CEffect";
+  if (!s.effect || *static_cast<void**>(s.effect) != g_dx + g_at.effect) return "effect at +0x50 is not a CEffect";
   if (!CopyStdString(sh + 0x58, s.path, sizeof(s.path))) return "+0x58 is not a plausible std::string";
   if (!CopyStdString(sh + 0x78, s.key, sizeof(s.key))) return "+0x78 is not a plausible std::string";
   const size_t pl = strlen(s.path);
@@ -2001,7 +2131,7 @@ const char* SnapshotRaw(uint8_t* mat, uint8_t* sh, Snapshot& s) {
     uint8_t* rec = static_cast<uint8_t*>(s.techBegin) + (s.tech[t] - 1) * 0x50;
     if (!CopyStdString(rec, s.techName[t], sizeof(s.techName[t]))) return "technique name unreadable";
     void* tech = *reinterpret_cast<void**>(rec + 0x20);
-    if (!tech || *static_cast<void**>(tech) != g_dx + kTechVtbl) return "technique is not an FX technique";
+    if (!tech || *static_cast<void**>(tech) != g_dx + g_at.tech) return "technique is not an FX technique";
     struct {
       const char* name;
       uint32_t passes, annotations;
@@ -2012,13 +2142,13 @@ const char* SnapshotRaw(uint8_t* mat, uint8_t* sh, Snapshot& s) {
     for (uint32_t p = 0; p < td.passes; ++p) {
       s.dcsVs[t][p] = nullptr;
       void* pass = VSlot<void*(__fastcall*)(void*, uint32_t)>(tech, 7)(tech, p);
-      if (!pass || *static_cast<void**>(pass) != g_dx + kPassVtbl) return "pass is not an FX pass block";
+      if (!pass || *static_cast<void**>(pass) != g_dx + g_at.pass) return "pass is not an FX pass block";
       struct {
         void* var;
         uint32_t index;
       } pd = {};
       if (VSlot<long(__fastcall*)(void*, void*)>(pass, 5)(pass, &pd) < 0 || !pd.var) return "pass VS desc failed";
-      if (*static_cast<void**>(pd.var) != g_dx + kShaderVarVtbl) continue;  // not a global shader variable
+      if (*static_cast<void**>(pd.var) != g_dx + g_at.shaderVar) continue;  // not a global shader variable
       ID3D11VertexShader* vs = nullptr;
       if (VSlot<long(__fastcall*)(void*, uint32_t, ID3D11VertexShader**)>(pd.var, 32)(pd.var, pd.index, &vs) >= 0 &&
           vs) {
@@ -2118,6 +2248,8 @@ void PublishLocked(const Snapshot& s, KeyResult& r) {
         e.kind = static_cast<uint8_t>(r.kind);
         e.flags = 0;
         e.cbUsed[0] = e.cbUsed[1] = 0;
+        e.result = &r;
+        e.gate = p < tv->gates.size() ? &tv->gates[p] : nullptr;
         bool useVs = true;
         if (p < tv->gates.size()) {
           const PassGate& g = tv->gates[p];
@@ -2237,6 +2369,37 @@ int ShadowReadTextures(void* shader, uint64_t tech, std::vector<std::string>* bo
         st = shadowtex::kReadsReady;
         if (bound) *bound = r.reads[e->reads].bound;
         if (vars) *vars = r.fxVars;
+      }
+    }
+  }
+  g_inObserver.fetch_sub(1);
+  return st;
+}
+
+// G-buffer counterpart (R14 lead 3 counter): the resources bound by any stage
+// of pass `pass` of technique handle `tech` in our (a) compile of the
+// shader's G-buffer key (PassGate::reads), and (vars, optional) every
+// variable name of that effect. kReadsPending: no published map entry (key
+// not compiled yet, failed, or never collected); kReadsFailed: the pass's
+// read set is not usable (why says why); kReadsReady.
+int GbPassReadTextures(void* shader, uint64_t tech, uint32_t pass, std::vector<std::string>* bound,
+                       std::vector<std::string>* vars, std::string* why, std::string* key) {
+  g_inObserver.fetch_add(1);  // seq_cst: Shutdown sets g_stop, then waits for 0
+  int st = shadowtex::kReadsPending;
+  if (!g_stop.load() && g_state.load() == 1) {
+    const MapEntry* e = FindEntry(shader, tech, pass);
+    if (e && e->kind == kKindGb && e->result) {
+      if (key) *key = e->result->key;
+      if (!e->gate) {
+        st = shadowtex::kReadsFailed;
+        if (why) *why = "gbuffer inst: pass not analysed";
+      } else if (!e->gate->readsOk) {
+        st = shadowtex::kReadsFailed;
+        if (why) *why = "gbuffer inst: " + e->gate->readsWhy;
+      } else {
+        st = shadowtex::kReadsReady;
+        if (bound) *bound = e->gate->reads;
+        if (vars) *vars = e->result->fxVars;
       }
     }
   }
@@ -2430,6 +2593,8 @@ void CompileGbKey(const Snapshot& s, KeyResult& r) {
     r.why = "effect parse: " + err;
     return;
   }
+  // (a)'s variable names, for the G1 counter's record check (as the shadow keys).
+  EffectVarNames(ea, r.fxVars);
   // Checks 1-4 once per distinct (a, b) VS blob pair (all passes share model_vs_c).
   std::vector<std::pair<const uint8_t*, int>> checked;
   for (int t = 0; t < 2; ++t) {
@@ -2484,6 +2649,7 @@ void CompileGbKey(const Snapshot& s, KeyResult& r) {
       tv.passVs.push_back(idx);
       PassGate g;
       GatePass(g_compiler, ta->passes[p], g);
+      PassReads(ta->passes[p], g);
       tv.gates.push_back(std::move(g));
     }
     r.techs.push_back(std::move(tv));
@@ -2540,14 +2706,22 @@ inline GbSummary SummarizeGb(const KeyResult& r) {
   return s;
 }
 
+// "a N ms, b M ms", or "cached" for a result loaded from the disk cache.
+inline std::string Timing(const KeyResult& r) {
+  if (r.cached) return "cached";
+  char b[64];
+  snprintf(b, sizeof(b), "a %.0f ms, b %.0f ms", r.msA, r.msB);
+  return b;
+}
+
 void LogGbResult(KeyResult& r, uint32_t index) {
   char key[260];
   snprintf(key, sizeof(key), "%s", r.key.c_str());
   if (r.key.size() >= sizeof(key)) memcpy(key + sizeof(key) - 4, "...", 4);
   char b[1024];
   if (!r.ok) {
-    snprintf(b, sizeof(b), "gbuffer inst: [%u] %s (%zu defines): FAILED, %s; a %.0f ms, b %.0f ms; key %s", index,
-             r.path.c_str(), r.defines, r.why.c_str(), r.msA, r.msB, key);
+    snprintf(b, sizeof(b), "gbuffer inst: [%u] %s (%zu defines): FAILED, %s; %s; key %s", index, r.path.c_str(),
+             r.defines, r.why.c_str(), Timing(r).c_str(), key);
     r.line = b;
     Log("%s", b);
     return;
@@ -2562,10 +2736,10 @@ void LogGbResult(KeyResult& r, uint32_t index) {
   const GbSummary g = SummarizeGb(r);
   std::string line;
   snprintf(b, sizeof(b),
-           "gbuffer inst: [%u] %s (%zu defines): OK, a %.0f ms, b %.0f ms; %s; %zu VS (%u created), VS %u->%u instr, "
+           "gbuffer inst: [%u] %s (%zu defines): OK, %s; %s; %zu VS (%u created), VS %u->%u instr, "
            "%u->%u temps, +SV_InstanceID v%u, %s %u B posStructOffset->qvPsoBase @0x%x, +qvInstOffsets t127, "
            "dataflow: %u output components identical, (b) adds %s; ",
-           index, r.path.c_str(), r.defines, r.msA, r.msB, techs.c_str(), r.vs.size(), created, dd.instrA, dd.instrB,
+           index, r.path.c_str(), r.defines, Timing(r).c_str(), techs.c_str(), r.vs.size(), created, dd.instrA, dd.instrB,
            d.tempsA, d.tempsB, d.iidRegister, d.cbName.c_str(), d.cbSize, d.cbOffset, dd.outputs, dd.extra.c_str());
   line = b;
   snprintf(b, sizeof(b),
@@ -2615,8 +2789,8 @@ void LogResult(KeyResult& r, uint32_t index) {
   snprintf(key, sizeof(key), "%s", r.key.c_str());
   if (r.key.size() >= sizeof(key)) memcpy(key + sizeof(key) - 4, "...", 4);
   if (!r.ok) {
-    snprintf(line, sizeof(line), "shadow inst: [%u] %s (%zu defines): FAILED, %s; a %.0f ms, b %.0f ms; key %s",
-             index, r.path.c_str(), r.defines, r.why.c_str(), r.msA, r.msB, key);
+    snprintf(line, sizeof(line), "shadow inst: [%u] %s (%zu defines): FAILED, %s; %s; key %s", index,
+             r.path.c_str(), r.defines, r.why.c_str(), Timing(r).c_str(), key);
     r.line = line + ReadsSummary(r);
     Log("%s", r.line.c_str());
     return;
@@ -2632,12 +2806,569 @@ void LogResult(KeyResult& r, uint32_t index) {
   uint32_t created = 0;
   for (const PassVs& p : r.vs) created += p.vs != nullptr;
   snprintf(line, sizeof(line),
-           "shadow inst: [%u] %s (%zu defines): OK, a %.0f ms, b %.0f ms; %s; %zu VS (%u created), VS %u->%u instr, "
+           "shadow inst: [%u] %s (%zu defines): OK, %s; %s; %zu VS (%u created), VS %u->%u instr, "
            "%u->%u temps, +SV_InstanceID v%u, %s %u B posStructOffset->qvPsoBase @0x%x, +qvInstOffsets t127; key %s",
-           index, r.path.c_str(), r.defines, r.msA, r.msB, techs.c_str(), r.vs.size(), created, d.instrA, d.instrB,
+           index, r.path.c_str(), r.defines, Timing(r).c_str(), techs.c_str(), r.vs.size(), created, d.instrA, d.instrB,
            d.tempsA, d.tempsB, d.iidRegister, d.cbName.c_str(), d.cbSize, d.cbOffset, key);
   r.line = line + ReadsSummary(r);
   Log("%s", r.line.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Disk cache of compiled keys: <module dir>\cache\ (Saved Games\DCS\Scripts\
+// DcsQvCull\cache), one file per (kind, key, defines, techniques, live pass
+// counts). A hit fills the KeyResult without D3DCompile; the VS objects are
+// still created on DCS's device as after a compile. Read and written by the
+// compile workers only (never the render thread); a missing or read-only
+// folder just means no cache.
+//
+// File: 32-byte header
+//   char magic[8] "QVSICACH", u32 format (kCacheFormat), u32 edit version
+//   (kCacheEditVersion), u64 payload size, u64 FNV-1a 64 of the payload;
+// payload (u32 lengths/counts, little endian):
+//   identity: kind, key, path, defines (name, value, keyValue), both
+//     technique names + live pass counts (byte-compared with the snapshot);
+//   environment: target, flags, both instancing define names, d3dcompiler_47
+//     size + FNV hash (byte-compared);
+//   sources: every file read (rel path, size, hash), every include probe
+//     that found no file (re-checked on load);
+//   result: everything KeyResult needs but the VS objects and the timings:
+//     why, ok, (b) VS bytecode + check results per distinct VS, techniques
+//     (pass -> VS index, G-buffer gates and per-pass read sets), shadow
+//     texture read sets, the effect's variable names.
+// Invalidation: any header, identity, environment or source mismatch, a bad
+// checksum or a malformed payload rejects the file; the key is compiled and
+// the file rewritten (temp file + MoveFileEx, atomic).
+// ---------------------------------------------------------------------------
+
+constexpr char kCacheMagic[8] = {'Q', 'V', 'S', 'I', 'C', 'A', 'C', 'H'};
+constexpr uint32_t kCacheFormat = 1;  // file layout
+// Bump whenever anything that shapes a KeyResult changes: the in-memory source
+// edits, the static checks (CompareVariants, CompareDisasm), the gate, the
+// texture-read analysis, or the result fields.
+// 2: per-pass G-buffer read sets (PassGate::reads*) and the G-buffer keys'
+//    variable names (R14 lead 3 counter).
+constexpr uint32_t kCacheEditVersion = 2;
+constexpr size_t kCacheHeader = 32;
+
+std::mutex g_cacheMutex;  // everything below
+std::wstring g_cacheDir;  // trailing backslash; empty = no cache
+bool g_cacheConfigured = false;
+uint32_t g_cacheEditVersion = kCacheEditVersion;
+uint64_t g_cacheCompilerSize = 0, g_cacheCompilerHash = 0;
+bool g_cacheWritable = false;
+uint32_t g_cacheHits = 0, g_cacheCompiled = 0, g_cacheRejected = 0, g_cacheWriteFails = 0;
+uint32_t g_cacheLoggedAt = 0;  // hits + compiled at the last summary
+std::map<std::string, std::pair<uint32_t, std::string>> g_cacheRejectWhy;  // reason -> count, first detail
+struct SrcMemo {
+  uint64_t size, hash;
+  FILETIME written;
+};
+std::unordered_map<std::wstring, SrcMemo> g_cacheSrcMemo;  // full path -> content hash (this start)
+
+// dir: the cache folder (trailing backslash), empty for none. Hashes the
+// compiler DLL and creates the folder. nullptr when usable, else why not.
+const char* CacheInit(const std::wstring& dir, const Compiler& c, uint32_t editVersion = kCacheEditVersion) {
+  std::lock_guard<std::mutex> lock(g_cacheMutex);
+  g_cacheConfigured = true;
+  g_cacheDir.clear();
+  g_cacheWritable = false;
+  g_cacheEditVersion = editVersion;
+  g_cacheHits = g_cacheCompiled = g_cacheRejected = g_cacheWriteFails = g_cacheLoggedAt = 0;
+  g_cacheRejectWhy.clear();
+  g_cacheSrcMemo.clear();
+  if (dir.empty()) return "no module folder";
+  wchar_t p[MAX_PATH];
+  const DWORD n = c.dll ? GetModuleFileNameW(c.dll, p, MAX_PATH) : 0;
+  std::string bytes;
+  if (!n || n >= MAX_PATH || !ReadWholeFile(p, bytes)) return "d3dcompiler_47.dll not readable";
+  g_cacheCompilerSize = bytes.size();
+  g_cacheCompilerHash = Fnv64(bytes.data(), bytes.size());
+  CreateDirectoryW(dir.c_str(), nullptr);
+  const DWORD a = GetFileAttributesW(dir.c_str());
+  if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return "folder missing and not creatable";
+  g_cacheDir = dir;
+  g_cacheWritable = true;
+  return nullptr;
+}
+
+class CacheWriter {
+ public:
+  std::string b;
+  void U8(uint8_t v) { b.push_back(static_cast<char>(v)); }
+  void U32(uint32_t v) { b.append(reinterpret_cast<const char*>(&v), 4); }
+  void U64(uint64_t v) { b.append(reinterpret_cast<const char*>(&v), 8); }
+  void Str(const std::string& s) {
+    U32(static_cast<uint32_t>(s.size()));
+    b.append(s);
+  }
+  void Strs(const std::vector<std::string>& v) {
+    U32(static_cast<uint32_t>(v.size()));
+    for (const std::string& s : v) Str(s);
+  }
+  void Bytes(const std::vector<uint8_t>& v) {
+    U32(static_cast<uint32_t>(v.size()));
+    b.append(reinterpret_cast<const char*>(v.data()), v.size());
+  }
+};
+
+class CacheReader {
+ public:
+  CacheReader(const uint8_t* p, size_t n) : p_(p), n_(n) {}
+  bool ok = true;
+  size_t pos = 0;
+  bool Take(void* out, size_t k) {
+    if (!ok || n_ - pos < k) return ok = false;
+    memcpy(out, p_ + pos, k);
+    pos += k;
+    return true;
+  }
+  uint8_t U8() {
+    uint8_t v = 0;
+    Take(&v, 1);
+    return v;
+  }
+  uint32_t U32() {
+    uint32_t v = 0;
+    Take(&v, 4);
+    return v;
+  }
+  uint64_t U64() {
+    uint64_t v = 0;
+    Take(&v, 8);
+    return v;
+  }
+  uint32_t Count(uint32_t max) {
+    const uint32_t v = U32();
+    if (v > max) ok = false;
+    return ok ? v : 0;
+  }
+  std::string Str() {
+    const uint32_t k = U32();
+    if (!ok || n_ - pos < k) {
+      ok = false;
+      return std::string();
+    }
+    std::string s(reinterpret_cast<const char*>(p_ + pos), k);
+    pos += k;
+    return s;
+  }
+  std::vector<std::string> Strs() {
+    std::vector<std::string> v(Count(1u << 16));
+    for (std::string& s : v) s = Str();
+    return v;
+  }
+  std::vector<uint8_t> Bytes() {
+    const uint32_t k = U32();
+    if (!ok || n_ - pos < k) {
+      ok = false;
+      return {};
+    }
+    std::vector<uint8_t> v(p_ + pos, p_ + pos + k);
+    pos += k;
+    return v;
+  }
+  bool AtEnd() const { return ok && pos == n_; }
+
+ private:
+  const uint8_t* p_;
+  size_t n_;
+};
+
+inline int KindOf(const Snapshot& s) { return s.kind == kKindGb ? kKindGb : kKindShadow; }
+
+inline void WriteIdentity(CacheWriter& w, const Snapshot& s) {
+  w.U32(static_cast<uint32_t>(KindOf(s)));
+  w.Str(s.key);
+  w.Str(s.path);
+  const uint32_t n = std::min<uint32_t>(s.defineCount, kMaxDefines);
+  w.U32(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    w.Str(s.defines[i].name);
+    w.Str(s.defines[i].value);
+    w.U8(s.defines[i].keyValue ? 1 : 0);
+  }
+  for (int t = 0; t < 2; ++t) {
+    w.Str(s.passes[t] ? s.techName[t] : "");
+    w.U32(s.passes[t]);
+  }
+}
+
+// Caller holds g_cacheMutex (compiler identity).
+inline void WriteEnvLocked(CacheWriter& w) {
+  w.Str(kFxTarget);
+  w.U32(kFxFlags);
+  w.Str(kInstDefine);
+  w.Str(kModelInstDefine);
+  w.U64(g_cacheCompilerSize);
+  w.U64(g_cacheCompilerHash);
+}
+
+inline void WriteResult(CacheWriter& w, const KeyResult& r) {
+  w.Str(r.key);
+  w.Str(r.path);
+  w.Str(r.why);
+  w.U32(static_cast<uint32_t>(r.kind));
+  w.U8(r.ok ? 1 : 0);
+  w.U64(r.defines);
+  w.U32(static_cast<uint32_t>(r.vs.size()));
+  for (const PassVs& p : r.vs) {
+    w.Bytes(p.bytecode);
+    const VariantDiff& d = p.diff;
+    for (uint32_t v : {d.instrA, d.instrB, d.tempsA, d.tempsB, d.cbOffset, d.cbSize, d.iidRegister}) w.U32(v);
+    w.Str(d.cbName);
+    w.U32(p.disasm.instrA);
+    w.U32(p.disasm.instrB);
+    w.U32(p.disasm.outputs);
+    w.Str(p.disasm.extra);
+  }
+  w.U32(static_cast<uint32_t>(r.techs.size()));
+  for (const TechVs& t : r.techs) {
+    w.Str(t.name);
+    w.U32(static_cast<uint32_t>(t.passVs.size()));
+    for (int i : t.passVs) w.U32(static_cast<uint32_t>(i));
+    w.U32(static_cast<uint32_t>(t.gates.size()));
+    for (const PassGate& g : t.gates) {
+      w.U8(g.ok ? 1 : 0);
+      w.U8(g.prevUnused ? 1 : 0);
+      w.U8(g.psoVsOnly ? 1 : 0);
+      w.U64(g.used[0]);
+      w.U64(g.used[1]);
+      w.U32(g.stages);
+      w.U32(g.psTargets);
+      for (int st = 0; st < kStages; ++st) w.Strs(g.names[st]);
+      w.Str(g.why);
+      w.U8(g.readsOk ? 1 : 0);
+      w.Strs(g.reads);
+      w.Str(g.readsWhy);
+    }
+  }
+  w.U32(static_cast<uint32_t>(r.reads.size()));
+  for (const TechReads& t : r.reads) {
+    w.Str(t.name);
+    w.Str(t.why);
+    w.U8(t.ok ? 1 : 0);
+    w.U32(t.passes);
+    w.U32(t.shaders);
+    w.Strs(t.bound);
+  }
+  w.Strs(r.fxVars);
+}
+
+// Reads a result and re-runs the cheap static checks on it: every stored VS
+// is a vertex-shader DXBC blob, every pass index is in range, an OK result
+// has a VS per pass. nullptr or what is wrong.
+inline const char* ReadResult(CacheReader& rd, KeyResult& r) {
+  r.key = rd.Str();
+  r.path = rd.Str();
+  r.why = rd.Str();
+  r.kind = rd.U32() == kKindGb ? kKindGb : kKindShadow;
+  r.ok = rd.U8() != 0;
+  r.defines = static_cast<size_t>(rd.U64());
+  r.vs.resize(rd.Count(256));
+  for (PassVs& p : r.vs) {
+    p.bytecode = rd.Bytes();
+    VariantDiff& d = p.diff;
+    for (uint32_t* v : {&d.instrA, &d.instrB, &d.tempsA, &d.tempsB, &d.cbOffset, &d.cbSize, &d.iidRegister})
+      *v = rd.U32();
+    d.cbName = rd.Str();
+    p.disasm.instrA = rd.U32();
+    p.disasm.instrB = rd.U32();
+    p.disasm.outputs = rd.U32();
+    p.disasm.extra = rd.Str();
+    if (rd.ok && DxbcProgramType(p.bytecode.data(), p.bytecode.size()) != 1) return "a stored VS is not a VS blob";
+  }
+  r.techs.resize(rd.Count(16));
+  for (TechVs& t : r.techs) {
+    t.name = rd.Str();
+    t.passVs.resize(rd.Count(kMaxPasses));
+    for (int& i : t.passVs) {
+      const uint32_t v = rd.U32();
+      if (rd.ok && v >= r.vs.size()) return "a pass VS index is out of range";
+      i = static_cast<int>(v);
+    }
+    t.gates.resize(rd.Count(kMaxPasses));
+    for (PassGate& g : t.gates) {
+      g.ok = rd.U8() != 0;
+      g.prevUnused = rd.U8() != 0;
+      g.psoVsOnly = rd.U8() != 0;
+      g.used[0] = rd.U64();
+      g.used[1] = rd.U64();
+      g.stages = rd.U32();
+      g.psTargets = rd.U32();
+      for (int st = 0; st < kStages; ++st) g.names[st] = rd.Strs();
+      g.why = rd.Str();
+      g.readsOk = rd.U8() != 0;
+      g.reads = rd.Strs();
+      g.readsWhy = rd.Str();
+    }
+  }
+  r.reads.resize(rd.Count(16));
+  for (TechReads& t : r.reads) {
+    t.name = rd.Str();
+    t.why = rd.Str();
+    t.ok = rd.U8() != 0;
+    t.passes = rd.U32();
+    t.shaders = rd.U32();
+    t.bound = rd.Strs();
+  }
+  r.fxVars = rd.Strs();
+  if (!rd.AtEnd()) return "payload malformed";
+  if (r.ok && (r.vs.empty() || r.techs.empty())) return "OK result without VS";
+  for (const TechVs& t : r.techs)
+    if (r.ok && t.passVs.empty()) return "OK result without passes";
+  return nullptr;
+}
+
+inline std::wstring CachePathLocked(const Snapshot& s) {
+  CacheWriter id;
+  WriteIdentity(id, s);
+  char name[40];
+  snprintf(name, sizeof(name), "%s%016llx.qvc", KindOf(s) == kKindGb ? "g_" : "s_",
+           static_cast<unsigned long long>(Fnv64(id.b.data(), id.b.size())));
+  return g_cacheDir + Widen(name);
+}
+
+// Size and content hash of a source file (memoized per start, revalidated by
+// size and last-write time). false if unreadable.
+inline bool SourceHash(const std::wstring& path, uint64_t& size, uint64_t& hash) {
+  WIN32_FILE_ATTRIBUTE_DATA fa;
+  if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) return false;
+  const uint64_t sz = (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    auto it = g_cacheSrcMemo.find(path);
+    if (it != g_cacheSrcMemo.end() && it->second.size == sz &&
+        CompareFileTime(&it->second.written, &fa.ftLastWriteTime) == 0) {
+      size = it->second.size;
+      hash = it->second.hash;
+      return true;
+    }
+  }
+  std::string text;
+  if (!ReadWholeFile(path, text)) return false;
+  size = text.size();
+  hash = Fnv64(text.data(), text.size());
+  std::lock_guard<std::mutex> lock(g_cacheMutex);
+  g_cacheSrcMemo[path] = {size, hash, fa.ftLastWriteTime};
+  return true;
+}
+
+inline std::wstring SourcePath(const std::string& rel) {
+  std::wstring p = g_root + Widen(rel);
+  for (wchar_t& c : p)
+    if (c == L'/') c = L'\\';
+  return p;
+}
+
+// Loads the snapshot's cached result into out. nullptr on a hit; else the
+// reject reason ("missing" when there is no file; detail: the first source
+// that changed).
+const char* CacheLoad(const Snapshot& s, KeyResult& out, std::string& detail) {
+  std::wstring path;
+  std::string id, env;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    if (g_cacheDir.empty()) return "missing";
+    path = CachePathLocked(s);
+    CacheWriter w;
+    WriteIdentity(w, s);
+    id = std::move(w.b);
+    CacheWriter e;
+    WriteEnvLocked(e);
+    env = std::move(e.b);
+  }
+  std::string file;
+  if (!ReadWholeFile(path, file)) return GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ? "missing" : "unreadable";
+  const auto* b = reinterpret_cast<const uint8_t*>(file.data());
+  uint32_t format = 0, edit = 0;
+  uint64_t size = 0, sum = 0;
+  if (file.size() < kCacheHeader || memcmp(b, kCacheMagic, 8) != 0) return "bad magic";
+  memcpy(&format, b + 8, 4);
+  memcpy(&edit, b + 12, 4);
+  memcpy(&size, b + 16, 8);
+  memcpy(&sum, b + 24, 8);
+  if (format != kCacheFormat) return "format version";
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    if (edit != g_cacheEditVersion) return "edit version";
+  }
+  if (size != file.size() - kCacheHeader) return "truncated";
+  if (Fnv64(b + kCacheHeader, static_cast<size_t>(size)) != sum) return "checksum";
+  const uint8_t* p = b + kCacheHeader;
+  if (size < id.size() || memcmp(p, id.data(), id.size()) != 0) return "key mismatch";
+  if (size - id.size() < env.size() || memcmp(p + id.size(), env.data(), env.size()) != 0)
+    return "compiler or flags changed";
+  const size_t head = id.size() + env.size();
+  CacheReader rd(p + head, static_cast<size_t>(size - head));
+  const uint32_t files = rd.Count(4096);
+  for (uint32_t i = 0; i < files && rd.ok; ++i) {
+    const std::string rel = rd.Str();
+    const uint64_t fsize = rd.U64(), fhash = rd.U64();
+    uint64_t nsize = 0, nhash = 0;
+    if (rd.ok && (!SourceHash(SourcePath(rel), nsize, nhash) || nsize != fsize || nhash != fhash)) {
+      detail = rel;
+      return "source changed";
+    }
+  }
+  const uint32_t missing = rd.Count(4096);
+  for (uint32_t i = 0; i < missing && rd.ok; ++i) {
+    const std::string rel = rd.Str();
+    if (rd.ok && GetFileAttributesW(SourcePath(rel).c_str()) != INVALID_FILE_ATTRIBUTES) {
+      detail = rel + " appeared";
+      return "source changed";
+    }
+  }
+  if (!rd.ok) return "payload malformed";
+  if (files == 0) return "no sources recorded";
+  KeyResult r;
+  if (const char* why = ReadResult(rd, r)) return why;
+  if (r.key != s.key || r.kind != KindOf(s)) return "key mismatch";
+  out.key = std::move(r.key);
+  out.path = std::move(r.path);
+  out.why = std::move(r.why);
+  out.kind = r.kind;
+  out.ok = r.ok;
+  out.defines = r.defines;
+  out.vs = std::move(r.vs);
+  out.techs = std::move(r.techs);
+  out.reads = std::move(r.reads);
+  out.fxVars = std::move(r.fxVars);
+  out.msA = out.msB = 0;
+  out.cached = true;
+  return nullptr;
+}
+
+// Whether a finished compile is worth storing: the compiler ran, every input
+// was recorded, the workers were not stopping, and the failure (if any) is a
+// property of the inputs (not e.g. an out-of-memory HRESULT).
+inline bool Cacheable(const KeyResult& r, const SourceLog& log) {
+  return !g_stop.load() && log.compiles > 0 && !log.unreliable && !log.files.empty() &&
+         r.why.find("compile failed: hr ") == std::string::npos;
+}
+
+// Writes the result atomically (temp file, then MoveFileEx). Worker thread.
+void CacheSave(const Snapshot& s, const KeyResult& r, const SourceLog& log) {
+  CacheWriter w;
+  std::wstring path;
+  uint32_t edit;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    if (g_cacheDir.empty() || !g_cacheWritable) return;
+    path = CachePathLocked(s);
+    WriteIdentity(w, s);
+    WriteEnvLocked(w);
+    edit = g_cacheEditVersion;
+  }
+  w.U32(static_cast<uint32_t>(log.files.size()));
+  for (const SourceFile& f : log.files) {
+    w.Str(f.rel);
+    w.U64(f.size);
+    w.U64(f.hash);
+  }
+  w.Strs(log.missing);
+  WriteResult(w, r);
+  std::string file(kCacheMagic, 8);
+  const uint64_t size = w.b.size(), sum = Fnv64(w.b.data(), w.b.size());
+  file.append(reinterpret_cast<const char*>(&kCacheFormat), 4);
+  file.append(reinterpret_cast<const char*>(&edit), 4);
+  file.append(reinterpret_cast<const char*>(&size), 8);
+  file.append(reinterpret_cast<const char*>(&sum), 8);
+  file += w.b;
+  const std::wstring tmp = path + L"." + std::to_wstring(GetCurrentThreadId()) + L".tmp";
+  bool ok = false;
+  HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  DWORD err = GetLastError();
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD put = 0;
+    ok = WriteFile(h, file.data(), static_cast<DWORD>(file.size()), &put, nullptr) && put == file.size();
+    if (!ok) err = GetLastError();
+    CloseHandle(h);
+    if (ok && !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      ok = false;
+      err = GetLastError();
+    }
+    if (!ok) DeleteFileW(tmp.c_str());
+  }
+  if (ok) return;
+  bool first;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    first = g_cacheWriteFails++ == 0;
+    g_cacheWritable = false;  // read-only folder: stop trying, keep reading
+  }
+  if (first)
+    Log("shadow inst: cache: cannot write %ls (error %lu); continuing without saving", path.c_str(),
+        static_cast<unsigned long>(err));
+}
+
+// Worker: the snapshot's key from the disk cache, else compiled (at idle
+// priority) and stored.
+void CompileKeyCached(const Snapshot& s, KeyResult& r) {
+  bool useCache;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    useCache = !g_cacheDir.empty();
+  }
+  if (useCache) {
+    std::string detail;
+    const char* why = CacheLoad(s, r, detail);
+    if (!why) {
+      std::lock_guard<std::mutex> lock(g_cacheMutex);
+      ++g_cacheHits;
+      return;
+    }
+    if (strcmp(why, "missing") != 0) {
+      std::lock_guard<std::mutex> lock(g_cacheMutex);
+      ++g_cacheRejected;
+      auto& e = g_cacheRejectWhy[why];
+      if (e.first++ == 0) e.second = detail;
+    }
+  }
+  SourceLog log;
+  t_sourceLog = &log;
+  const int prio = GetThreadPriority(GetCurrentThread());
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);  // first start: leave the cores to DCS
+  CompileKey(s, r);
+  SetThreadPriority(GetCurrentThread(), prio == THREAD_PRIORITY_ERROR_RETURN ? THREAD_PRIORITY_NORMAL : prio);
+  t_sourceLog = nullptr;
+  if (!useCache) return;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    ++g_cacheCompiled;
+  }
+  if (Cacheable(r, log)) CacheSave(s, r, log);
+}
+
+// "shadow inst: cache: N hits, M compiled, K rejected (reason n: detail, ...)";
+// M counts the rejected keys too. Empty when the cache is off.
+std::string CacheSummary() {
+  std::lock_guard<std::mutex> lock(g_cacheMutex);
+  if (g_cacheDir.empty()) return std::string();
+  char b[160];
+  snprintf(b, sizeof(b), "shadow inst: cache: %u hits, %u compiled, %u rejected", g_cacheHits, g_cacheCompiled,
+           g_cacheRejected);
+  std::string s = b;
+  std::string why;
+  for (auto& kv : g_cacheRejectWhy)
+    why += (why.empty() ? "" : ", ") + kv.first + " " + std::to_string(kv.second.first) +
+           (kv.second.second.empty() ? "" : ": " + kv.second.second);
+  if (!why.empty()) s += " (" + why + ")";
+  if (g_cacheWriteFails) s += "; " + std::to_string(g_cacheWriteFails) + " not written (folder not writable)";
+  return s;
+}
+
+// Logs the summary when the workers went idle and something changed since
+// the last one (once per start, plus once per later batch of new keys).
+void LogCacheSummaryIfChanged() {
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    const uint32_t n = g_cacheHits + g_cacheCompiled;
+    if (g_cacheDir.empty() || n == g_cacheLoggedAt) return;
+    g_cacheLoggedAt = n;
+  }
+  const std::string s = CacheSummary();
+  if (!s.empty()) Log("%s", s.c_str());
 }
 
 // Publishes one snapshot of a finished key (caller holds g_mutex). With a
@@ -2654,7 +3385,8 @@ void FinishLocked(Snapshot* s, KeyResult* r) {
 }
 
 DWORD WINAPI Worker(void*) {
-  // Below the game's threads: compiles only fill the idle cores.
+  // Below the game's threads; CompileKeyCached drops to idle while compiling,
+  // so compiles only fill the idle cores.
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
   for (;;) {
     Snapshot* s = nullptr;
@@ -2688,7 +3420,7 @@ DWORD WINAPI Worker(void*) {
           break;
         }
     }
-    CompileKey(*s, *r);
+    CompileKeyCached(*s, *r);
     {
       std::lock_guard<std::mutex> lock(g_mutex);
       for (Snapshot*& c : g_compiling)
@@ -2697,20 +3429,25 @@ DWORD WINAPI Worker(void*) {
     }
     const uint32_t idx = g_logIndex.fetch_add(1) + 1;
     if (!g_stop.load()) LogResult(*r, idx);
-    std::lock_guard<std::mutex> lock(g_mutex);
-    r->done = true;
-    (r->kind == kKindGb ? g_keysDoneGb : g_keysDone).fetch_add(1);
-    if (r->ok) (r->kind == kKindGb ? g_keysOkGb : g_keysOk).fetch_add(1);
-    if (g_stop.load()) {
-      delete s;  // Shutdown frees the waiters with the result
+    bool idle;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      r->done = true;
+      (r->kind == kKindGb ? g_keysDoneGb : g_keysDone).fetch_add(1);
+      if (r->ok) (r->kind == kKindGb ? g_keysOkGb : g_keysOk).fetch_add(1);
+      if (g_stop.load()) {
+        delete s;  // Shutdown frees the waiters with the result
+        --g_busy;
+        return 0;
+      }
+      FinishLocked(s, r);
+      for (Snapshot* w : r->waiters) FinishLocked(w, r);
+      r->waiters.clear();
       --g_busy;
-      return 0;
+      g_cv.notify_all();
+      idle = g_queue.empty() && g_busy == 0;
     }
-    FinishLocked(s, r);
-    for (Snapshot* w : r->waiters) FinishLocked(w, r);
-    r->waiters.clear();
-    --g_busy;
-    g_cv.notify_all();
+    if (idle) LogCacheSummaryIfChanged();
   }
 }
 
@@ -2879,11 +3616,256 @@ void NoteSelectionGuarded(uint8_t* r, uint8_t* item, uint8_t* mat) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// R14 lead 3 (G1) counter, measurement only ([Suite] GBufferTexCount).
+// Per G-buffer ModelMaterialMT draw (model pass 1, opaque, outside the
+// cockpit: technique [mat+0x1d8] P0, the deferred normal* pass [V 0x15e20];
+// cross-checked with the selection mirror when it is verified): the
+// material's bound texture handles, mat+0x240+8i for i < [mat+0x2d8] with
+// handle != -1 (0xcf80 sets each through DX11Shader slot 26 on every slot-4
+// call), and how many of them name an effect variable that no stage of that
+// technique pass reads in our (a) compile of the shader's key
+// (GbPassReadTextures). Live parameter records are matched by name exactly as
+// shadow_tex.h's masks (MapRecords: every live record name must be a variable
+// of (a); a record is read when a binding NameRefers to it). A draw whose key
+// is not compiled/published yet, or whose records do not map, counts its sets
+// as unknown. Runs in GbObserver, before the original draw (it reads the
+// material and the shader's records only, which that draw does not change).
+// One thread counts (the first that calls; the G-buffer items run on the
+// render thread); items seen on other threads are only tallied. No DCS state
+// is written.
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t kTexCountMaxHandles = 64;
+
+struct TexCountMask {
+  shadowtex::MaskEntry e;          // read bit per live parameter record; state 1 usable, -1 unknown
+  std::vector<std::string> names;  // live record names (copied), for the per-variable counts
+  std::string why;                 // state -1: why
+};
+struct TexCountTotals {
+  uint64_t draws = 0, sets = 0, unread = 0, unknownSets = 0, unknownDraws = 0;
+  uint64_t cockpit = 0, selMismatch = 0;
+};
+std::atomic<bool> g_texCountOn{false};
+std::atomic<int> g_inTexCount{0};
+std::atomic<DWORD> g_texCountThread{0};
+std::atomic<uint64_t> g_texCountOtherThread{0};
+// Counting thread only while g_texCountOn; the suite phase reads and clears
+// them after g_inTexCount dropped to 0.
+TexCountTotals g_tc;
+std::unordered_map<const MapEntry*, TexCountMask*> g_tcMasks;
+std::vector<TexCountMask*> g_tcOldMasks;                            // replaced (records moved); freed with the rest
+std::unordered_map<const std::string*, uint64_t> g_tcUnreadByName;  // key: an element of some TexCountMask::names
+std::unordered_map<const char*, uint64_t> g_tcUnknownWhy;          // reason (literal or TexCountMask::why) -> sets
+
+struct TexCountDraw {
+  uint8_t* shader;
+  uint64_t tech;
+  uint32_t n, extra;  // handles != -1 kept in h; extra: those past kTexCountMaxHandles
+  bool dx;
+  int64_t h[kTexCountMaxHandles];
+};
+
+// 0: not a G-buffer ModelMaterialMT draw; 1: counted; 2: cockpit; 3: the
+// selection mirror disagrees. Plain C: runs under __try.
+int ReadTexCountDrawRaw(uint8_t* r, TexCountDraw& d) {
+  if (*reinterpret_cast<uint32_t*>(r + 0x60) != 1) return 0;
+  uint8_t* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+  uint8_t* mat = item ? *reinterpret_cast<uint8_t**>(item + 0x10) : nullptr;
+  if (!mat || *reinterpret_cast<void**>(mat) != g_modelVtbl) return 0;
+  const uint8_t* props = *reinterpret_cast<uint8_t**>(mat + 0x28);
+  if (props[0x33]) return 0;  // transparent: forward passes of normal*
+  if (r[0x64]) return 2;      // cockpit: normal_cockpit*
+  if (g_selOk) {
+    const Selection s = SelectionOf(r, item, mat);
+    if (s.slot != 0 || s.pass != 0) return 3;
+  }
+  d.shader = *reinterpret_cast<uint8_t**>(mat + 0x30);
+  d.dx = d.shader && *reinterpret_cast<void**>(d.shader) == g_shaderVtbl;
+  d.tech = *reinterpret_cast<uint64_t*>(mat + 0x1d8);
+  d.n = d.extra = 0;
+  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  for (uint32_t i = 0; i < n; ++i) {
+    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * static_cast<uint64_t>(i));
+    if (h == -1) continue;
+    if (d.n < kTexCountMaxHandles)
+      d.h[d.n++] = h;
+    else
+      ++d.extra;
+  }
+  return 1;
+}
+
+int ReadTexCountDrawGuarded(uint8_t* r, TexCountDraw& d) {
+  __try {
+    return ReadTexCountDrawRaw(r, d);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+  }
+}
+
+const char* MapTexCountGuarded(shadowtex::MaskEntry& e, const char* const* bound, int nBound, const char* const* vars,
+                               int nVars, uint32_t* bad) {
+  __try {
+    return shadowtex::MapRecords(e, bound, nBound, vars, nVars, bad);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return "access violation while reading the parameter records";
+  }
+}
+
+// Name of live parameter record i (0x50 bytes, name at +0x30), "" if none.
+bool CopyRecordNameGuarded(const uint8_t* recBegin, uint32_t i, char* out, size_t cap) {
+  __try {
+    const char* n = *reinterpret_cast<const char* const*>(recBegin + static_cast<uint64_t>(i) * 0x50 + 0x30);
+    size_t k = 0;
+    if (n)
+      for (; k + 1 < cap && n[k]; ++k) out[k] = n[k];
+    out[k] = 0;
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    out[0] = 0;
+    return false;
+  }
+}
+
+// The read mask of (shader, normal* P0) for this map entry: cached, else
+// built from GbPassReadTextures. nullptr while the key's read set is pending.
+TexCountMask* TexCountMaskFor(const MapEntry* me, uint8_t* shader, uint64_t tech) {
+  void* recBegin = *reinterpret_cast<void**>(shader + 0xc8);
+  void* recEnd = *reinterpret_cast<void**>(shader + 0xd0);
+  auto it = g_tcMasks.find(me);
+  if (it != g_tcMasks.end() && it->second->e.recBegin == recBegin && it->second->e.recEnd == recEnd)
+    return it->second;
+  std::vector<std::string> bound, vars;
+  std::string why;
+  const int st = GbPassReadTextures(shader, tech, 0, &bound, &vars, &why, nullptr);
+  if (st == shadowtex::kReadsPending) return nullptr;
+  auto* m = new TexCountMask;
+  shadowtex::MaskEntry& e = m->e;
+  e.effect = *reinterpret_cast<void**>(shader + 0x50);
+  e.recBegin = recBegin;
+  e.recEnd = recEnd;
+  e.techBegin = *reinterpret_cast<void**>(shader + 0xb0);
+  e.techA = e.techB = tech;
+  const uint64_t span = static_cast<uint8_t*>(recEnd) - static_cast<uint8_t*>(recBegin);
+  e.recCount = recBegin && recEnd > recBegin ? static_cast<uint32_t>(span / 0x50) : 0;
+  if (st != shadowtex::kReadsReady) {
+    m->why = why.empty() ? "gbuffer inst: read set not usable" : why;
+  } else if (!recBegin || recEnd < recBegin || span % 0x50 != 0) {
+    m->why = "parameter records at +0xc8 are not plausible";
+  } else if (e.recCount > shadowtex::kMaxRecords) {
+    m->why = "more than 512 parameter records";
+  } else {
+    std::vector<const char*> b, v;
+    for (const std::string& n : bound) b.push_back(n.c_str());
+    for (const std::string& n : vars) v.push_back(n.c_str());  // sorted: std::string order is strcmp order
+    uint32_t bad = ~0u;
+    if (const char* w = MapTexCountGuarded(e, b.data(), static_cast<int>(b.size()), v.data(),
+                                           static_cast<int>(v.size()), &bad))
+      m->why = w;
+  }
+  e.state = m->why.empty() ? 1 : -1;
+  if (e.state > 0) {
+    m->names.resize(e.recCount);
+    char buf[256];
+    for (uint32_t i = 0; i < e.recCount; ++i)
+      if (CopyRecordNameGuarded(static_cast<const uint8_t*>(recBegin), i, buf, sizeof(buf))) m->names[i] = buf;
+  }
+  if (it != g_tcMasks.end()) {
+    g_tcOldMasks.push_back(it->second);  // its names may be keys of g_tcUnreadByName
+    it->second = m;
+  } else {
+    g_tcMasks[me] = m;
+  }
+  return m;
+}
+
+// One SceneRenderable item on the counting thread.
+void TexCountNote(uint8_t* r) {
+  TexCountDraw d;
+  const int k = ReadTexCountDrawGuarded(r, d);
+  if (k == 0) return;
+  if (k == 2) {
+    ++g_tc.cockpit;
+    return;
+  }
+  if (k == 3) {
+    ++g_tc.selMismatch;
+    return;
+  }
+  ++g_tc.draws;
+  const uint64_t sets = static_cast<uint64_t>(d.n) + d.extra;
+  g_tc.sets += sets;
+  if (!sets) return;
+  const char* unknown = nullptr;
+  TexCountMask* m = nullptr;
+  if (!d.dx) {
+    unknown = "not a DX11Shader";
+  } else if (d.extra) {
+    unknown = "more than 64 texture handles";
+  } else {
+    const MapEntry* me = FindEntry(d.shader, d.tech, 0);
+    m = me ? TexCountMaskFor(me, d.shader, d.tech) : nullptr;
+    if (!m)
+      unknown = "key not compiled yet or failed (no published normal* P0 entry)";
+    else if (m->e.state <= 0)
+      unknown = m->why.c_str();
+  }
+  if (unknown) {
+    g_tc.unknownSets += sets;
+    ++g_tc.unknownDraws;
+    g_tcUnknownWhy[unknown] += sets;
+    return;
+  }
+  bool anyUnknown = false;
+  for (uint32_t i = 0; i < d.n; ++i) {
+    const int64_t h = d.h[i];
+    if (h < 0 || static_cast<uint64_t>(h) >= m->e.recCount) {
+      ++g_tc.unknownSets;
+      ++g_tcUnknownWhy["handle outside the parameter records"];
+      anyUnknown = true;
+      continue;
+    }
+    if (shadowtex::Skippable(m->e, h)) {
+      ++g_tc.unread;
+      ++g_tcUnreadByName[&m->names[static_cast<size_t>(h)]];
+    }
+  }
+  g_tc.unknownDraws += anyUnknown;
+}
+
+void TexCountObserve(uint8_t* r) {
+  g_inTexCount.fetch_add(1);  // seq_cst: the phase clears g_texCountOn, then waits for 0
+  if (g_texCountOn.load()) {
+    DWORD expected = 0;
+    const DWORD me = GetCurrentThreadId();
+    if (g_texCountThread.compare_exchange_strong(expected, me) || expected == me)
+      TexCountNote(r);
+    else
+      g_texCountOtherThread.fetch_add(1, std::memory_order_relaxed);
+  }
+  g_inTexCount.fetch_sub(1);
+}
+
+void TexCountClear() {
+  for (auto& kv : g_tcMasks) delete kv.second;
+  for (TexCountMask* m : g_tcOldMasks) delete m;
+  g_tcMasks.clear();
+  g_tcOldMasks.clear();
+  g_tcUnreadByName.clear();
+  g_tcUnknownWhy.clear();
+  g_tc = TexCountTotals();
+  g_texCountThread = 0;
+  g_texCountOtherThread = 0;
+}
+
 // Model passes whose shaders are G-buffer keys: 1 (G-buffer, opaque P0) and
 // 2; both reach normal* / normal_cockpit* through 0x15e20.
 void GbObserver(void* self, void*) {
   g_inObserver.fetch_add(1, std::memory_order_acquire);
   if (!g_stop.load(std::memory_order_relaxed)) {
+    if (g_texCountOn.load(std::memory_order_relaxed)) TexCountObserve(static_cast<uint8_t*>(self));
     if (g_collectGb.load(std::memory_order_relaxed)) {
       auto* r = static_cast<uint8_t*>(self);
       uint8_t* item = *reinterpret_cast<uint8_t**>(r + 0x10);
@@ -2916,24 +3898,36 @@ std::wstring FindShaderRoot(HMODULE ng) {
   return a == INVALID_FILE_ATTRIBUTES ? std::wstring() : s;
 }
 
-// Returns nullptr when the binaries are the analysed build.
+// Returns nullptr when the binaries are the analysed build (or another build
+// with the same code, see reloc.h). Sets g_at.
 const char* VerifyBuild(uint8_t* ng, uint8_t* dx) {
-  if (!allocslab::RttiIs(ng, reinterpret_cast<void**>(ng + kModelMatVtbl), ".?AVModelMaterialMT@model@@"))
+  Addrs& a = g_at;
+  a.model = reloc::Rva(hooksig::NG_ModelMaterialMT_vtbl, kModelMatVtbl);
+  a.shader = reloc::Rva(hooksig::DX_DX11Shader_vtbl, kShaderVtbl);
+  a.effect = reloc::Rva(hooksig::DX_CEffect_vtbl, kEffectVtbl);
+  a.effectGetDevice = reloc::Rva(hooksig::DX_CEffect_GetDevice, kEffectGetDevice);
+  a.shaderVar = reloc::Rva(hooksig::DX_SShaderGlobalVariable_vtbl, kShaderVarVtbl);
+  a.getVertexShader = reloc::Rva(hooksig::DX_SShaderGlobalVariable_GetVertexShader, kGetVertexShader);
+  a.tech = reloc::Rva(hooksig::DX_STechnique_vtbl, kTechVtbl);
+  a.pass = reloc::Rva(hooksig::DX_SPassBlock_vtbl, kPassVtbl);
+  if (!a.model || !allocslab::RttiIs(ng, reinterpret_cast<void**>(ng + a.model), ".?AVModelMaterialMT@model@@"))
     return "shadow inst: NGModel ModelMaterialMT does not match this build; skipped";
-  auto** effectVt = reinterpret_cast<void**>(dx + kEffectVtbl);
-  auto** varVt = reinterpret_cast<void**>(dx + kShaderVarVtbl);
-  if (!allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kShaderVtbl), ".?AVDX11Shader@RenderAPI@@") ||
+  if (!a.shader || !a.effect || !a.effectGetDevice || !a.shaderVar || !a.getVertexShader || !a.tech || !a.pass)
+    return "shadow inst: dx11backend DX11Shader/effects code does not match this build; skipped";
+  auto** effectVt = reinterpret_cast<void**>(dx + a.effect);
+  auto** varVt = reinterpret_cast<void**>(dx + a.shaderVar);
+  if (!allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.shader), ".?AVDX11Shader@RenderAPI@@") ||
       !allocslab::RttiIs(dx, effectVt, ".?AVCEffect@D3DX11Effects@@") ||
       !allocslab::RttiIs(dx, varVt, ".?AUSShaderGlobalVariable@D3DX11Effects@@") ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kTechVtbl), ".?AUSTechnique@D3DX11Effects@@") ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kPassVtbl), ".?AUSPassBlock@D3DX11Effects@@") ||
-      reinterpret_cast<uint8_t*>(effectVt[4]) != dx + kEffectGetDevice ||
-      reinterpret_cast<uint8_t*>(varVt[32]) != dx + kGetVertexShader ||
-      !shadowtex::CodeIs(dx, kEffectGetDevice, kEffectGetDeviceEnd, kEffectGetDeviceHash) ||
-      !shadowtex::CodeIs(dx, kGetVertexShader, kGetVertexShaderEnd, kGetVertexShaderHash) ||
-      !shadowtex::CodeIs(dx, kCtorFields, kCtorFieldsEnd, kCtorFieldsHash) ||
-      !shadowtex::CodeIs(dx, kKeyBuilder, kKeyBuilderEnd, kKeyBuilderHash) ||
-      !shadowtex::CodeIs(dx, kMacroBuilder, kMacroBuilderEnd, kMacroBuilderHash))
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.tech), ".?AUSTechnique@D3DX11Effects@@") ||
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.pass), ".?AUSPassBlock@D3DX11Effects@@") ||
+      reinterpret_cast<uint8_t*>(effectVt[4]) != dx + a.effectGetDevice ||
+      reinterpret_cast<uint8_t*>(varVt[32]) != dx + a.getVertexShader ||
+      !reloc::CodeIs(hooksig::DX_CEffect_GetDevice, dx, kEffectGetDevice, kEffectGetDeviceEnd, kEffectGetDeviceHash) ||
+      !reloc::CodeIs(hooksig::DX_SShaderGlobalVariable_GetVertexShader, dx, kGetVertexShader, kGetVertexShaderEnd, kGetVertexShaderHash) ||
+      !reloc::CodeIs(hooksig::DX_DX11Shader_ctor_fieldStores, dx, kCtorFields, kCtorFieldsEnd, kCtorFieldsHash) ||
+      !reloc::CodeIs(hooksig::DX_DX11Shader_keyBuilder, dx, kKeyBuilder, kKeyBuilderEnd, kKeyBuilderHash) ||
+      !reloc::CodeIs(hooksig::DX_DX11Shader_macroBuilder, dx, kMacroBuilder, kMacroBuilderEnd, kMacroBuilderHash))
     return "shadow inst: dx11backend DX11Shader/effects code does not match this build; skipped";
   return nullptr;
 }
@@ -2965,19 +3959,35 @@ bool Install() {
   }
   g_ng = ng;
   g_dx = dx;
-  g_shaderVtbl = dx + kShaderVtbl;
-  g_modelVtbl = ng + kModelMatVtbl;
+  g_shaderVtbl = dx + g_at.shader;
+  g_modelVtbl = ng + g_at.model;
   g_map = new MapEntry[kMapSize];
   g_mapUsed = 0;
   for (auto& u : g_mapUsedKind) u = 0;
   g_texMap = new TexEntry[kTexMapSize];
   g_texMapUsed = 0;
   g_stop = false;
+  // Disk cache in the module's folder (tests configure their own first).
+  bool configured;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    configured = g_cacheConfigured;
+  }
+  const char* cacheWhy = configured ? nullptr : CacheInit(g_dir.empty() ? std::wstring() : g_dir + L"cache\\", g_compiler);
+  std::wstring cacheDir;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    cacheDir = g_cacheDir;
+  }
   for (int i = 0; i < kWorkers; ++i) g_workers[i] = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
   instcount::g_observer.store(&Observer);
   g_state = 1;
   Log("shadow inst: ready (compiler %s; DCS process had %s; sources %ls; %d compile workers)",
       g_compiler.path.c_str(), already, g_root.c_str(), kWorkers);
+  if (!cacheDir.empty())
+    Log("shadow inst: cache: %ls (format %u, edit version %u)", cacheDir.c_str(), kCacheFormat, kCacheEditVersion);
+  else
+    Log("shadow inst: cache: off (%s); every key is compiled", cacheWhy ? cacheWhy : "not configured");
   return true;
 }
 
@@ -2991,7 +4001,7 @@ bool InstallGb() {
     Log("gbuffer inst: SceneRenderable hook unavailable; skipped");
     return false;
   }
-  auto** matVt = reinterpret_cast<void**>(g_ng + kModelMatVtbl);
+  auto** matVt = reinterpret_cast<void**>(g_ng + g_at.model);
   g_selOk = reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) == g_ng + kModelDraw &&
             shadowtex::CodeIs(g_ng, kSceneRenderable, kSceneRenderableEnd, kSceneRenderableHash) &&
             shadowtex::CodeIs(g_ng, kSelCode, kSelCodeEnd, kSelCodeHash) &&
@@ -3116,6 +4126,8 @@ void SuitePhase(int collectMs, const std::atomic<bool>& abort) {
   Log("  shadow inst: %u DX11Shader objects seen (%u unusable), %u keys: %u OK, %u failed, %u not finished; "
       "%u VS objects created, %u map entries; waited %.1f s",
       t.seen, t.rejected, t.keys, t.ok, t.done - t.ok, t.keys - t.done, t.created, t.map, waitS);
+  const std::string cache = CacheSummary();
+  if (!cache.empty()) Log("  %s", cache.c_str());
 }
 
 // [Suite] GBufferInstCompile (R13 stage 1): collect the G-buffer keys seen in
@@ -3203,11 +4215,90 @@ void SuitePhaseGb(int collectMs, const std::atomic<bool>& abort, const std::atom
   }
 }
 
+// [Suite] GBufferTexCount (R14 lead 3 gate): collect the G-buffer keys for
+// warmMs and wait for their compiles (disk cache hits are fast), then count
+// for countMs (collection stays on) and log per-frame figures. frames: the
+// quad-frame counter (per second without it).
+void SuitePhaseGbTex(int warmMs, int countMs, const std::atomic<bool>& abort, const std::atomic<uint64_t>* frames) {
+  if (!InstallGb()) {
+    Log("  gbuffer tex: not available (see above)");
+    return;
+  }
+  g_collectGb = true;
+  Sleep(warmMs);
+  const double waitS = WaitCompiles(abort);
+  TexCountClear();
+  const uint64_t f0 = frames ? frames->load() : 0;
+  g_texCountOn = true;
+  Sleep(countMs);
+  g_texCountOn = false;
+  for (int i = 0; i < 2000 && g_inTexCount.load() != 0; ++i) Sleep(1);
+  const uint64_t nf = frames ? frames->load() - f0 : 0;
+  g_collectGb = g_onGb.load();
+  if (g_inTexCount.load() != 0) {
+    Log("  gbuffer tex: the counting thread did not leave the counter within 2 s; no report");  // its data stays (leaked)
+    return;
+  }
+  const Totals t = Snap(kKindGb);
+  const double per = nf ? static_cast<double>(nf) : countMs / 1000.0;
+  const char* unit = nf ? "frame" : "s";
+  const TexCountTotals& c = g_tc;
+  Log("  gbuffer tex: %llu frames counted; waited %.1f s for the G-buffer keys first (%u keys: %u OK, %u failed, %u not "
+      "finished)",
+      static_cast<unsigned long long>(nf), waitS, t.keys, t.ok, t.done - t.ok, t.keys - t.done);
+  Log("  gbuffer tex: G-buffer ModelMaterialMT draws (model pass 1, opaque, normal* P0) %.1f/%s, bound texture sets "
+      "(handles != -1) %.1f/%s, %.2f per draw",
+      c.draws / per, unit, c.sets / per, unit, c.draws ? static_cast<double>(c.sets) / c.draws : 0.0);
+  const uint64_t known = c.sets - c.unknownSets;
+  Log("  gbuffer tex: sets whose variable no stage of that technique pass reads in our (a) compile: %.1f/%s = %.1f%% "
+      "of all sets, %.1f%% of the %.1f/%s known sets; at ~19 ns per set (R10 C2 rate) about %.3f ms/%s",
+      c.unread / per, unit, c.sets ? 100.0 * c.unread / c.sets : 0.0, known ? 100.0 * c.unread / known : 0.0,
+      known / per, unit, c.unread * 19e-6 / per, unit);
+  {
+    std::map<std::string, uint64_t> why;
+    for (auto& kv : g_tcUnknownWhy) why[kv.first] += kv.second;
+    std::vector<std::pair<uint64_t, std::string>> v;
+    for (auto& kv : why) v.push_back({kv.second, kv.first});
+    std::sort(v.rbegin(), v.rend());
+    std::string line;
+    char b[64];
+    for (size_t i = 0; i < v.size() && i < 8; ++i) {
+      snprintf(b, sizeof(b), " %.1f", v[i].first / per);
+      line += (i ? "; " : ": ") + v[i].second + b;
+    }
+    Log("  gbuffer tex: unknown sets %.1f/%s (%.1f%% of all sets) on %.1f draws/%s%s", c.unknownSets / per, unit,
+        c.sets ? 100.0 * c.unknownSets / c.sets : 0.0, c.unknownDraws / per, unit, line.c_str());
+  }
+  {
+    std::map<std::string, uint64_t> byName;
+    for (auto& kv : g_tcUnreadByName) byName[kv.first->empty() ? std::string("(unnamed)") : *kv.first] += kv.second;
+    std::vector<std::pair<uint64_t, std::string>> v;
+    for (auto& kv : byName) v.push_back({kv.second, kv.first});
+    std::sort(v.rbegin(), v.rend());
+    std::string line;
+    char b[64];
+    for (size_t i = 0; i < v.size() && i < 10; ++i) {
+      snprintf(b, sizeof(b), " %.1f", v[i].first / per);
+      line += (i ? ", " : "") + v[i].second + b;
+    }
+    Log("  gbuffer tex: top unread variables (sets/%s, %zu distinct): %s", unit, v.size(),
+        line.empty() ? "-" : line.c_str());
+  }
+  uint32_t unmappable = 0;
+  for (auto& kv : g_tcMasks) unmappable += kv.second->e.state <= 0;
+  Log("  gbuffer tex: not counted: pass-1 opaque cockpit draws %.1f/%s, selection mirror disagreed %.1f/%s, items on "
+      "other threads %.1f/%s; %zu (shader, normal* P0) masks, %u unknown",
+      c.cockpit / per, unit, c.selMismatch / per, unit, g_texCountOtherThread.load() / per, unit, g_tcMasks.size(),
+      unmappable);
+  TexCountClear();
+}
+
 // Payload unload: stop collecting, join the workers, then release.
 void Shutdown() {
   if (g_state.load() <= 0) return;
   instcount::g_observer.store(nullptr);
   if (gbcount::g_observer.load() == &GbObserver) gbcount::g_observer.store(nullptr);
+  g_texCountOn = false;
   g_collect = false;
   g_collectGb = false;
   g_stop = true;

@@ -139,11 +139,11 @@ Test("Transaction detects altered backup", () =>
     AtomicFile.WriteText(Path.Combine(store.StateDirectory, j.Id, j.Entries[0].BackupFile!), "corrupt"); Throws<InvalidDataException>(() => store.Restore(j.Id)); Require(File.ReadAllBytes(path).SequenceEqual(new byte[] { 4 }));
 });
 Test("Transaction rejects unsafe restore ID", () => Throws<InvalidDataException>(() => new TransactionStore(root).Restore("../other")));
-// ---- Original files: back up once, overwrite afterwards, Restore originals puts everything back ----------------------
+// ---- Original files: back up once, overwrite afterwards, Back to stock DCS puts everything back ----------------------
 ApplyPlan Plan(string profile, params FileMutation[] files) => new(profile, profile, files, new Dictionary<string, string>(), "fixture");
 FileMutation Write(string path, string content, string? root = null, IReadOnlyList<string>? logs = null) =>
     new(path, File.Exists(path) ? Hashing.FileSha256(path) : null, Encoding.UTF8.GetBytes(content), "test", RuntimeLogs: logs, Root: root);
-Test("Originals: the first write backs up, later applies overwrite anything without conflicts, Restore originals puts back exact bytes", () =>
+Test("Originals: the first write backs up, later applies overwrite anything without conflicts, Back to stock DCS puts back exact bytes", () =>
 {
     var replaced = Make("originals/basic/replaced.cfg", "original\r\nexact"); var created = Path.Combine(root, "originals/basic/created.json");
     var store = new OriginalsStore(Path.Combine(root, "originals/basic/state"));
@@ -208,12 +208,12 @@ Test("Originals: options.lua keeps every user edit; only owned settings go back,
     AtomicFile.WriteText(path, "options={}\nos.execute('never')");
     Require(store.RestoreOriginals().Complete && new LuaOptions(File.ReadAllText(path)).Get("VR", "enable") == "false");
 });
-Test("Originals: an interrupted apply keeps every original; the next apply or Restore originals finishes it", () =>
+Test("Originals: an interrupted apply keeps every original; the next apply or Back to stock DCS finishes it", () =>
 {
     var a = Make("originals/interrupted/a.cfg", "A"); var b = Path.Combine(root, "originals/interrupted/b.cfg");
     var store = new OriginalsStore(Path.Combine(root, "originals/interrupted/state"));
     try { store.Apply(Plan("p", Write(a, "a1"), Write(b, "b1")), i => { if (i == 1) throw new IOException("Injected failure"); }); throw new Exception("No failure"); }
-    catch (IOException e) { Require(e.Message.Contains("Restore originals") && e.Message.Contains("Injected failure"), e.Message); }
+    catch (IOException e) { Require(e.Message.Contains("Back to stock DCS") && e.Message.Contains("Injected failure"), e.Message); }
     Require(File.ReadAllText(a) == "a1" && !File.Exists(b) && store.Status() is { Count: 2, State: "applying", Current: null }, "Both originals recorded before anything was written");
     Require(store.Apply(Plan("p", Write(a, "a2"), Write(b, "b2"))).Current.Status == "applied" && File.ReadAllText(b) == "b2", "Launching again completes it");
     Require(store.RestoreOriginals().Complete && File.ReadAllText(a) == "A" && !File.Exists(b));
@@ -228,7 +228,7 @@ Test("Originals: a damaged backup is reported and kept listed; every other path 
     Require(!result.Complete && result.Conflicts.Single().StartsWith(a) && File.ReadAllText(a) == "a1" && File.ReadAllText(b) == "B", "Damaged backup never written");
     Require(store.Status() is { Count: 1, State: "restoring" } && store.Apply(Plan("p", Write(a, "a2"))).Current is not null, "Still listed, and never blocks the next apply");
 });
-Test("Originals: an in-place update records the new bytes and Restore originals still brings the original back", () =>
+Test("Originals: an in-place update records the new bytes and Back to stock DCS still brings the original back", () =>
 {
     var settings = Make("originals/update/settings.cfg", "original"); var lua = Make("originals/update/options.lua", "options={VR={enable=false}}");
     var store = new OriginalsStore(Path.Combine(root, "originals/update/state"));
@@ -247,7 +247,7 @@ Test("Originals: an in-place update records the new bytes and Restore originals 
 // the normally started app could not see A, so its own apply (journal B) found A's files: Cheeky's host, runtime and INI
 // and the managed files were gone (removed in between, recorded nowhere), dxgi.dll, dxgi2.dll and nvngx_dlssnr.dll were
 // A's bytes and were "backed up" as originals, and options.lua already held A's settings. Both journals say "applied".
-Test("Conversion: two applied journals (this PC's state) give the true originals; Restore originals and a new apply work", () =>
+Test("Conversion: two applied journals (this PC's state) give the true originals; Back to stock DCS and a new apply work", () =>
 {
     var dir = Path.Combine(root, "convert-two-applied"); var bin = Path.Combine(dir, "DCSWorld/bin"); var config = Path.Combine(dir, "Saved Games/DCS/Config");
     var managed = Path.Combine(dir, "state/managed"); var profileDir = Path.Combine(managed, "profiles/pimax-qv-dlss5-fg-boost");
@@ -292,9 +292,9 @@ Test("Conversion: two applied journals (this PC's state) give the true originals
     Require(status.Files.Where(f => f.Path != options).All(f => f.Action == "remove" && !f.Foreign), "Every other path was absent before DCS VR Control: " + string.Join(", ", status.Files.Where(f => f.Action != "remove").Select(f => f.Path)));
     Require(Directory.Exists(realStore.StateDirectory + ".converted") && !Directory.Exists(realStore.StateDirectory) && Directory.Exists(sandboxCopy.StateDirectory), "The old folder is kept renamed; the sandbox copy is left as it is");
     Require(File.ReadAllText(store.LogPath).Contains("2 journals were marked applied at once"), "The conversion is logged");
-    // The launch contract reads the applied profile; Restore originals puts back the true originals.
+    // The launch contract reads the applied profile; Back to stock DCS puts back the true originals.
     Require(store.ReadCurrent()!.Entries.Count == 10);
-    Require(store.RestoreOriginals().Complete, "Restore originals completes");
+    Require(store.RestoreOriginals().Complete, "Back to stock DCS completes");
     Require(File.ReadAllText(options) == original, "options.lua is the true original");
     Require(!File.Exists(dxgi) && !File.Exists(dxgi2) && !Directory.Exists(cheekyDir) && !File.Exists(loaderLog) && !Directory.Exists(profileDir + "/cheeky") && !File.Exists(profileJson), "DCS VR Control's files are gone, A's leftovers included");
     Require(File.ReadAllText(userFile) == "not ours" && Directory.Exists(bin), "Nothing else touched");
@@ -339,7 +339,20 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(new VrProfile().FrameGenFactor == VrProfile.FrameGenAuto && ConfigurationWriters.Ofxr(auto).Contains("adaptive_frame_gen=1") && ConfigurationWriters.Ofxr(auto).Contains("triple_frame_gen=0") && ConfigurationWriters.Ofxr(triple).Contains("adaptive_frame_gen=0"));
     Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
     Require(ConfigurationWriters.QuadViews(new VrProfile { QuadTurbo = true }).Contains("turbo_mode=1") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("turbo_mode=0"));
-    Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("focus_view_shape=2") && ConfigurationWriters.QuadViews(new VrProfile { QuadRoundFocus = false }).Contains("focus_view_shape=0"));
+    {
+        var tracked = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia });
+        Require(tracked.Contains("dcsvr_saccade_widening=1") && tracked.Contains("dcsvr_saccade_lead_ms=85") && tracked.Contains("dcsvr_gaze_deadzone=0.5") && tracked.Contains("dcsvr_saccade_max_extend=0.35"));
+        Require(ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 }).Contains("dcsvr_saccade_lead_ms=55") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_saccade_lead_ms=25"));
+        var fixedGaze = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.Fixed });
+        bool Line(string text, string line) => text.ReplaceLineEndings("\n").Split('\n').Any(l => l.Trim() == line);
+        Require(Line(fixedGaze, "dcsvr_saccade_widening=0") && Line(fixedGaze, "dcsvr_gaze_deadzone=0"), "a fixed focus has no gaze to filter");
+        var off = ConfigurationWriters.QuadViews(new VrProfile { QuadSaccadeLead = false, QuadGazeStabilize = false });
+        Require(Line(off, "dcsvr_saccade_widening=0") && Line(off, "dcsvr_gaze_deadzone=0") && Line(tracked, "dcsvr_gaze_deadzone=0.5"));
+    }
+    Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("focus_view_shape=2") && ConfigurationWriters.QuadViews(new VrProfile { QuadRoundFocus = false }).Contains("focus_view_shape=8"));
+    Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_periphery_sharpen=0.3") && ConfigurationWriters.QuadViews(new VrProfile { QuadPeripheryContrast = 0 }).Split('\n').Any(l => l.Trim() == "dcsvr_periphery_sharpen=0"));
+    Require(ProfileValidation.Validate(new VrProfile { QuadPeripheryContrast = 1.5 }).Any(i => i.Code == "quad-periphery-contrast"));
+    Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_sharpen_taper=1") && ConfigurationWriters.QuadViews(new VrProfile { QuadSharpenTaper = false }).Contains("dcsvr_sharpen_taper=0"));
 });
 Test("The smoothness buffer writes OFXR's deep_pipeline in 2x, 3x and Auto, on unless the profile turns it off", () =>
 {
@@ -666,7 +679,7 @@ Test("Profile launches skip the DCS launcher, whose restart loses the profile pr
     var kept = new DeploymentPlanner(new(null, null, null)).Build(new VrProfile { QuadViews = QuadProvider.None, KeepDcsLauncher = true }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }, Path.Combine(root, "nolauncher/managed-kept"));
     Require(kept.Files.Where(f => f.Path == options).SelectMany(f => f.LuaChanges ?? []).All(c => c.Path != "miscellaneous.launcher"));
 });
-Test("Another mod's dxgi.dll is backed up, replaced and reported, and Restore originals brings it back", () =>
+Test("Another mod's dxgi.dll is backed up, replaced and reported, and Back to stock DCS brings it back", () =>
 {
     var exe = Make("loaders/bin/DCS.exe", "fixture"); var options = Make("loaders/options.lua", Lua); var other = Make("loaders/bin/dxgi.dll", "other-mod");
     var runtime = Make("loaders/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("loaders/runtime.dll", "fixture");
@@ -727,10 +740,10 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0" })
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0x3", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
-    var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false });
-    Require(trimmed.Contains("SlabBytes=4096") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowTextureSkip=0")
+    var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false });
+    Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
         && ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false }).Contains("TaskQueueClock=0"));
     // Developer mode: [Dev] paths only while it is on; full paths to existing files, otherwise refused or flagged.
     Require(ini.Contains("PayloadPath=\r\n") || ini.Contains("PayloadPath=\n"));
@@ -778,6 +791,8 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(File.Exists(Path.Combine(module, "run_suite.flag")));
     Make("engine/sg/DCS/Scripts/DcsQvCull/bench_20261007_210000.csv", "block"); Make("engine/sg/DCS/Scripts/DcsQvCull/payload/active_1.dll", "copy");
     Make("engine/sg/DCS/Scripts/DcsQvCull/payload/active_2.dll", "copy");
+    // The shadow shader cache, including a temp file left by a write that was cut short.
+    Make("engine/sg/DCS/Scripts/DcsQvCull/cache/s_0123456789abcdef.qvc", "entry"); Make("engine/sg/DCS/Scripts/DcsQvCull/cache/g_0123456789abcdef.qvc.12345.tmp", "partial");
 
     Require(store.RestoreOriginals().Complete);
     Require(!Directory.Exists(module) && !File.Exists(Path.Combine(scripts, "Hooks", "DcsQvCull.lua")) && File.ReadAllText(otherHook) == "-- user's own hook");
@@ -865,7 +880,7 @@ Test("Application installation refuses unknown existing files", () =>
     var source = ReleaseFixture("existing", "1", "first"); var target = Path.Combine(root, "app-install/existing"); Directory.CreateDirectory(target); AtomicFile.WriteText(Path.Combine(target, "app.bin"), "mine");
     Throws<IOException>(() => new ApplicationInstaller(target).Install(source)); Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "mine");
 });
-Test("Restore originals merges owned settings back and keeps later graphics edits", () =>
+Test("Back to stock DCS merges owned settings back and keeps later graphics edits", () =>
 {
     var path = Make("lua-merge/options.lua", Lua); var patched = LuaOptions.Patch(Lua, new Dictionary<string, object> { ["VR.enable"] = true, ["VR.openxr_eyeGaze"] = true });
     var before = new LuaOptions(Lua); var after = new LuaOptions(patched);
@@ -874,20 +889,20 @@ Test("Restore originals merges owned settings back and keeps later graphics edit
     AtomicFile.WriteText(path, File.ReadAllText(path).Replace("maxFPS=89", "maxFPS=120")); Require(store.RestoreOriginals().Complete);
     var result = new LuaOptions(File.ReadAllText(path)); Require(result.Get("VR", "enable") == "false"); Require(result.Get("VR", "openxr_eyeGaze") is null); Require(result.Get("graphics", "maxFPS") == "120"); Require(File.ReadAllText(path).Contains("preserve comment"));
 });
-Test("Restore originals sets an edited owned setting back, never refusing", () =>
+Test("Back to stock DCS sets an edited owned setting back, never refusing", () =>
 {
     var path = Make("lua-conflict/options.lua", Lua); var change = new LuaValueChange("graphics.Upscaling", "\"DLSS\"", "\"DLSS\""); var store = new OriginalsStore(Path.Combine(root, "originals/lua-conflict"));
     store.Apply(new("lua", "Lua test", [new(path, Hashing.FileSha256(path), Encoding.UTF8.GetBytes(Lua), "options", [change])], new Dictionary<string, string>(), "fixture"));
     AtomicFile.WriteText(path, Lua.Replace("\"DLSS\"", "\"FSR\"").Replace("maxFPS=89", "maxFPS=120")); Require(store.RestoreOriginals().Complete);
     Require(new LuaOptions(File.ReadAllText(path)).Get("graphics", "Upscaling") == "\"DLSS\"" && new LuaOptions(File.ReadAllText(path)).Get("graphics", "maxFPS") == "120");
 });
-Test("Restore originals recognizes equivalent Lua string quoting", () =>
+Test("Back to stock DCS recognizes equivalent Lua string quoting", () =>
 {
     var path = Make("lua-quotes/options.lua", Lua); var change = new LuaValueChange("graphics.Upscaling", "\"DLSS\"", "\"DLSS\""); var store = new OriginalsStore(Path.Combine(root, "originals/lua-quotes"));
     store.Apply(new("lua", "Lua test", [new(path, Hashing.FileSha256(path), Encoding.UTF8.GetBytes(Lua), "options", [change])], new Dictionary<string, string>(), "fixture"));
     var quoted = Lua.Replace("\"DLSS\"", "'DLSS'").Replace("maxFPS=89", "maxFPS=120"); AtomicFile.WriteText(path, quoted); Require(store.RestoreOriginals().Complete); Require(File.ReadAllText(path) == quoted, "An equivalent value is left exactly as written");
 });
-Test("Restore originals puts the whole original back when options.lua can no longer be read, without executing it", () =>
+Test("Back to stock DCS puts the whole original back when options.lua can no longer be read, without executing it", () =>
 {
     var path = Make("lua-execution/options.lua", Lua); var change = new LuaValueChange("VR.enable", "false", "true"); var store = new OriginalsStore(Path.Combine(root, "originals/lua-execution"));
     store.Apply(new("lua", "Lua test", [new(path, Hashing.FileSha256(path), Encoding.UTF8.GetBytes(Lua.Replace("enable=false", "enable=true")), "options", [change])], new Dictionary<string, string>(), "fixture"));
@@ -906,7 +921,7 @@ Test("Combined profiles opt into the bounded focus adapter", () =>
 Test("Focus adapter rejects unverified alternative compositors", () => Require(ProfileValidation.Validate(new() { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, ExperimentalAcknowledged = true, QuadViewsLayerDirectory = "alternative" }).Any(i => i.Code == "quad-adapter-provider")));
 Test("Focus configuration avoids nested foveation and duplicate peripheral processing", () =>
 {
-    var ini = ConfigurationWriters.Cheeky(ProfilePresets.All[5]);
+    var ini = ConfigurationWriters.Cheeky(ProfilePresets.All[5] with { QuadNeuralEdgeFade = false });
     foreach (var field in new[] { "PeripheralDlaa=0", "Width=1", "Height=1", "CenterMode=0", "AutoStereoAlignment=0", "NrFoveated=0", "NrUseSrFoveation=0", "D3D11D3D12Transport=1" }) Require(ini.Split('\n').Any(l => l.Trim() == field), field);
 });
 Test("DLSS 5 area writes a central feathered NR region only with the focus adapter", () =>
@@ -914,7 +929,11 @@ Test("DLSS 5 area writes a central feathered NR region only with the focus adapt
     bool Has(VrProfile p, params string[] fields) { var lines = ConfigurationWriters.Cheeky(p).Split('\n').Select(l => l.Trim()).ToHashSet(); return fields.All(lines.Contains); }
     var focus = ProfilePresets.All[5] with { NeuralBeforeUpscaling = false, NeuralRuntimePath = "nvngx_dlssnr.dll" };
     Require(focus.NeuralFocusArea == 100 && !focus.UsesCentralNeuralArea, "Whole focus area is the default");
-    Require(Has(focus, "NrFoveated=0", "NrUseSrFoveation=0", "NrWidth=1", "NrHeight=1", "Enabled=0", "PeripheralDlaa=0"), "Whole focus area keeps whole-view NR");
+    Require(Has(focus with { QuadNeuralEdgeFade = false }, "NrFoveated=0", "NrUseSrFoveation=0", "NrWidth=1", "NrHeight=1", "Enabled=0", "PeripheralDlaa=0"), "Whole focus area keeps whole-view NR");
+    // By default the whole-area DLSS 5 fades out with the Quad Views edge band (round or rectangular), capped at 0.3.
+    Require(focus.UsesNeuralEdgeFade && Has(focus with { QuadEdgeBlend = 0.1, QuadRoundFocus = true }, "NrFoveated=1", "NrUseSrFoveation=0", "NrWidth=1", "NrHeight=1", "NrRoundness=1", "NrTransitionWidth=0.2", "Enabled=0"), "Edge fade, round");
+    Require(Has(focus with { QuadEdgeBlend = 0.3, QuadRoundFocus = false }, "NrFoveated=1", "NrRoundness=0", "NrTransitionWidth=0.3"), "Edge fade, rectangle, capped");
+    Require(Has(focus with { QuadEdgeBlend = 0 }, "NrFoveated=0") && !(focus with { QuadEdgeBlend = 0 }).UsesNeuralEdgeFade, "A sharp Quad Views edge keeps whole-view NR");
     foreach (var area in new[] { 80, 70, 50 })
         Require(Has(focus with { NeuralFocusArea = area }, "NrFoveated=1", "NrUseSrFoveation=0", $"NrWidth=0.{area / 10}", $"NrHeight=0.{area / 10}",
             "NrRoundness=0", "NrTransitionWidth=0.12", "Enabled=0", "PeripheralDlaa=0", "CenterMode=0", "AutoStereoAlignment=0", "NrProcessingOrder=0"), "Central " + area + "%");
@@ -1192,7 +1211,7 @@ Test("FPS cap insertion restores absent cap and VSync fields", () =>
     var f = PacingFixture("missing-fields", new() { FpsLimit = FpsLimitMode.Custom, DisableDcsVSync = true }, missingCap: true); var before = File.ReadAllText(f.Options);
     var journal = f.Service.Apply(f.Plan); Require(new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "45"); Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Options) == before);
 });
-Test("Saved launch rejects owned FPS edits; Restore originals sets the owned cap back and keeps the rest", () =>
+Test("Saved launch rejects owned FPS edits; Back to stock DCS sets the owned cap back and keeps the rest", () =>
 {
     var f = PacingFixture("edited-cap", new() { FpsLimit = FpsLimitMode.Custom }); f.Service.Apply(f.Plan);
     AtomicFile.WriteText(f.Options, new LuaOptions(File.ReadAllText(f.Options)).Set(["graphics", "maxFPS"], 61).Replace("-- preserve comment", "-- user"));
@@ -1298,7 +1317,7 @@ Test("NVIDIA signer requires the exact organization", () =>
     Require(!NativeBinary.IsNvidiaSigner("CN=NVIDIA Corporation"));
     Require(!NativeBinary.IsNvidiaSigner(null));
 });
-Test("Component-normalized INI keeps launch working and Restore originals removes it either way", () =>
+Test("Component-normalized INI keeps launch working and Back to stock DCS removes it either way", () =>
 {
     var ini = ConfigurationWriters.Cheeky(new VrProfile { NeuralRendering = true, NeuralIntensity = .35 });
     var target = Path.Combine(root, "ini-normalized/CheekyFoveatedDLSS.ini");
@@ -1806,6 +1825,27 @@ Test("Boost helper command passes the DCS executable and log, hidden when elevat
     }
 });
 
+Test("Desktop Tobii pause: only the desktop tracker's services, never the headset's; the helper starts elevated for it", () =>
+{
+    // Service names and image paths as installed on the test PC (Tobii Experience 4.72, Eye Tracker 5, Pimax Crystal Super).
+    Require(TobiiDesktop.IsDesktopService("Tobii Service", @"""C:\Program Files\Tobii\Tobii EyeX\Tobii.Service.exe"" -WaitForEULA=0"));
+    Require(TobiiDesktop.IsDesktopService("TobiiIS5LEYETRACKER5", @"C:\WINDOWS\System32\DriverStore\FileRepository\eyetracker5.inf_amd64_a\platform_runtime_IS5LEYETRACKER5_service.exe"));
+    Require(!TobiiDesktop.IsDesktopService("Tobii VR4PIMAXP3B Platform Runtime", @"C:\Program Files\Pimax\Runtime\EyeTrackingServer\platform_runtime\platform_runtime_VR4PIMAXP3B_service.exe"), "the headset's runtime is never paused");
+    Require(!TobiiDesktop.IsDesktopService("TobiiXR5", @"C:\Somewhere\platform_runtime_XR5EYECHIP_WIN10_x64.exe"));
+    Require(!TobiiDesktop.IsDesktopService("TobiiGeneric", @"C:\WINDOWS\System32\DriverStore\FileRepository\tobii_generic.inf_amd64_8\TobiiVirtualDevice.exe"));
+    Require(!TobiiDesktop.IsDesktopService("Tobii Service", @"C:\Program Files\Pimax\Tobii.Service.exe") && !TobiiDesktop.IsDesktopService("Other Service", @"C:\x\platform_runtime_IS5.exe"));
+    var on = new VrProfile { PauseTobiiDesktop = true };
+    Require(on.UsesBoostHelper && on.BoostHelperElevated && !new VrProfile().BoostHelperElevated && new VrProfile { CpuBoost = true, BoostElevated = true }.BoostHelperElevated);
+    var prefix = "boost-start/tobii";
+    var exe = Make(prefix + "/install/bin/DCS.exe", "Never execute this fixture"); var options = Make(prefix + "/sg/DCS/Config/options.lua", Lua);
+    var runtime = Make(prefix + "/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make(prefix + "/runtime.dll", "Never load this fixture");
+    var cli = Make(prefix + "/cli/DcsVr.Cli.exe", "Never execute this fixture");
+    var service = new ControlService(root, Path.Combine(root, prefix, "state"));
+    service.Apply(service.Preview(on with { QuadViews = QuadProvider.None }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }));
+    Require(service.BuildCpuBoostStart(4242, Path.GetDirectoryName(cli)) is { UseShellExecute: true, Verb: "runas" }, "Tobii pause alone starts the helper elevated");
+    Require(service.RestoreOriginals().Complete);
+});
+
 Test("Profiles saved without foveaSource keep their own focus values; new profiles follow Pimax Play", () =>
 {
     Require(new VrProfile().FoveaSource == FoveaSource.PimaxPlay && ProfilePresets.All.All(p => p.FoveaSource == FoveaSource.PimaxPlay), "New profiles and presets follow Pimax Play");
@@ -1960,7 +2000,7 @@ Test("Launch sets the profile's own DCS settings back in place when DCS rewrote 
     var replaced = f.Service.SyncApplied(draft with { RenderedFpsCap = 72 }, f.Inventory);
     Require(replaced.Kind == LaunchSyncKind.Applied && replaced.ReplacedProfileId == applied.Journal.ProfileId && replaced.Journal.Id != applied.Journal.Id, replaced.Message);
     Require(new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "72" && File.ReadAllText(f.Options).Contains("-- written by DCS"));
-    // Restore originals merges the owned keys back and keeps DCS's own change.
+    // Back to stock DCS merges the owned keys back and keeps DCS's own change.
     Require(f.Service.RestoreOriginals().Complete && new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "89" && File.ReadAllText(f.Options).Contains("-- written by DCS"));
 });
 Test("Launch applies the same profile again when an external dependency changed since Apply", () =>
@@ -1973,7 +2013,7 @@ Test("Launch applies the same profile again when an external dependency changed 
     Require(again.Kind == LaunchSyncKind.Applied && again.Message.Contains("again") && again.Journal.Id != first.Journal.Id && start.FileName == f.Inventory.DcsExecutable, again.Message);
     Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Options) == Lua);
 });
-Test("Launch updates only Pimax Play's focus values in place, and Restore originals stays clean", () =>
+Test("Launch updates only Pimax Play's focus values in place, and Back to stock DCS stays clean", () =>
 {
     var source = Path.Combine(workspace, "external/quadviews/bin/x64/Release");
     var quadDir = Path.Combine(root, "launch-sync/pimax/dist/components/quadviews"); Directory.CreateDirectory(quadDir);
@@ -2006,7 +2046,7 @@ Test("Launch updates only Pimax Play's focus values in place, and Restore origin
         // An edited settings.cfg is not updated in place: the profile is written again in full, over the edit.
         File.WriteAllText(pimax, PimaxJson(1, .66, .20, .66, .66)); AtomicFile.WriteText(settings, File.ReadAllText(settings) + "# user\n");
         Require(service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied && !File.ReadAllText(settings).EndsWith("# user\n") && File.ReadAllText(settings).Contains("horizontal_focus_section=0.57"), "Written again");
-        Require(service.RestoreOriginals().Complete && File.ReadAllText(options) == Lua && !File.Exists(settings) && !File.Exists(fovea), "Restore originals after in-place updates completes");
+        Require(service.RestoreOriginals().Complete && File.ReadAllText(options) == Lua && !File.Exists(settings) && !File.Exists(fovea), "Back to stock DCS after in-place updates completes");
     }
     finally { PimaxFovea.SettingsPath = previous; }
 });
@@ -2196,6 +2236,11 @@ Test("Free VRAM reopens each program once, as it was started, and never its help
     Require(FreeVram.Arguments($"{hue}", hue) == "" && FreeVram.Arguments(null, hue) == "" && FreeVram.Arguments("\"unterminated", hue) == "\"unterminated");
     Require(FreeVram.IsHelperProcess("--type=gpu-process") && FreeVram.IsHelperProcess("x \"--type=utility\"") && !FreeVram.IsHelperProcess("--typeface=x"));
     Require(FreeVram.ReopenTargets([], []).Count == 0);
+    // Edge kept in the background (no visible window) comes back in the background, not as a new browser window.
+    var background = FreeVram.ReopenTargets([new(20, 1, "msedge", edge, $"\"{edge}\" --profile-directory=Default", HadWindow: false), new(21, 20, "msedge", edge, $"\"{edge}\" --type=renderer")], []);
+    Require(background.Single() == new ReopenTarget("msedge", edge, "--profile-directory=Default --no-startup-window"), string.Join(" | ", background));
+    // A windowless program that is not a browser (no helper processes) starts with its own arguments only.
+    Require(FreeVram.ReopenTargets([new(30, 1, "HueSync", hue, $"\"{hue}\" -silent", HadWindow: false)], []).Single().Arguments == "-silent");
 });
 Test("A profile with the old close list keeps closing those apps through Free VRAM", () =>
 {
@@ -2209,7 +2254,7 @@ Test("A profile with the old close list keeps closing those apps through Free VR
     var current = JsonData.Deserialize<VrProfile>(JsonData.Serialize(new VrProfile { FreeVram = true }));
     Require(current is { FreeVram: true, FreeVramReopen: true, FreeVramForce: false } && current == new VrProfile { FreeVram = true }, "new profiles round-trip unchanged");
 });
-Test("Small DCS window owns graphics width, height, fullScreen and aspect, and Restore originals puts the user's values back", () =>
+Test("Small DCS window owns graphics width, height, fullScreen and aspect, and Back to stock DCS puts the user's values back", () =>
 {
     var exe = Make("small-window/bin/DCS.exe", "fixture"); var runtime = Make("small-window/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("small-window/runtime.dll", "fixture");
     const string original = "options = {\n\t[\"graphics\"] = {\n\t\t[\"aspect\"] = 2.3888888888889,\n\t\t[\"fullScreen\"] = true,\n\t\t[\"height\"] = 1440,\n\t\t[\"sync\"] = false,\n\t\t[\"width\"] = 3440,\n\t},\n\t[\"VR\"] = {\n\t\t[\"enable\"] = true,\n\t},\n}\n";
@@ -2230,7 +2275,7 @@ Test("Small DCS window owns graphics width, height, fullScreen and aspect, and R
     store.Apply(off);
     Require(File.ReadAllText(options) == original, "turning it off puts the user's values back");
     store.Apply(planner.Build(p, inventory, managed, ownedSettings: store.OwnedSettings(options)));
-    Require(store.RestoreOriginals().Complete && File.ReadAllText(options) == original, "Restore originals is byte-exact");
+    Require(store.RestoreOriginals().Complete && File.ReadAllText(options) == original, "Back to stock DCS is byte-exact");
     var already = Make("small-window/already.lua", "options = {\n\t[\"graphics\"] = {\n\t\t[\"fullScreen\"] = false,\n\t\t[\"height\"] = 720,\n\t\t[\"width\"] = 1280,\n\t},\n\t[\"VR\"] = {\n\t\t[\"enable\"] = true,\n\t},\n}\n");
     Require(planner.Build(p, inventory with { OptionsPath = already }, Path.Combine(root, "small-window/managed2")).Files.All(f => f.Path != already), "already small: options.lua is not touched");
 });

@@ -9,7 +9,7 @@ const pages = [
   ['engine','Engine Optimizations','CPU optimizations inside DCS: less work on its render and model threads, the same image.','CPU work inside DCS','M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z M12 3v2.6 M12 18.4V21 M3 12h2.6 M18.4 12H21 M5.6 5.6l1.9 1.9 M16.5 16.5l1.9 1.9 M5.6 18.4l1.9-1.9 M16.5 7.5l1.9-1.9','Optimizations'],
   ['setup','Game & headset','DCS files, the headset runtime and, on the Sboys route, its driver.','Paths & drivers','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
-  ['recovery','Recovery','Put back the original files DCS VR Control changed, in one step.','Original files','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
+  ['recovery','Stock DCS','Put DCS back exactly as it was before DCS VR Control: every file and setting it changed, in one step.','Undo every change','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
 ];
 // The feature checklist in the right panel; each feature has its own page.
 const FEATURES = [
@@ -176,7 +176,7 @@ function featureSummary(key, p) {
     return `${p.frameGen === 'Nvidia' ? 'NVIDIA' : 'FidelityFX'} · ${factor} · renders ${Number((p.headsetRefreshHz/(p.frameGenFactor === 3 ? 3 : 2)).toFixed(1))} FPS`;
   }
   // The flight helpers on the same page run with or without CPU Boost.
-  const helpers = [p.freeVram ? 'VRAM freed' : null, p.smallDcsWindow ? 'small DCS window' : null, p.lowerMonitor ? `monitor ${p.flightDisplayWidth}×${p.flightDisplayHeight}` : null];
+  const helpers = [p.freeVram ? 'VRAM freed' : null, p.pauseTobiiDesktop ? 'desktop Tobii paused' : null, p.smallDcsWindow ? 'small DCS window' : null, p.lowerMonitor ? `monitor ${p.flightDisplayWidth}×${p.flightDisplayHeight}` : null];
   if (!p.cpuBoost) return ['Off · Windows scheduling', ...helpers].filter(Boolean).join(' · ');
   const apps = p.boostMoveBackgroundApps ? (p.boostBackgroundApps || []).length : 0;
   return [PRIORITY[p.boostDcsPriority] || p.boostDcsPriority, apps ? apps+' apps moved' : null, p.boostPrefetch === 'Skip' ? 'prefetch fix' : p.boostPrefetch === 'Observe' ? 'prefetch observed' : null, ...helpers].filter(Boolean).join(' · ');
@@ -191,7 +191,7 @@ function featureNotes(p) {
   if (pimaxSource(p) && state?.pimax && !state.pimax.found) notes.quad.push(['needs','Pimax Play values not found.','foveaSource','Open']);
   // The app keeps a verified copy of the runtime file, so it is asked for only when there is neither that copy nor a file of the profile's own.
   if (p.neuralRendering && !p.neuralRuntimePath && !state?.savedRuntime) notes.dlss.push(['needs','Needs nvngx_dlssnr.dll.','neuralRuntimePath','Select file']);
-  if (p.cpuBoost && p.boostElevated) notes.boost.push(['info','Asks for admin rights (UAC) at launch.']);
+  if ((p.cpuBoost && p.boostElevated) || p.pauseTobiiDesktop) notes.boost.push(['info','Asks for admin rights (UAC) at launch.']);
   return notes;
 }
 function noteHtml([kind,text,path,action]) { return `<div class="feature-note ${kind}"><span>${escape(text)}</span>${path ? `<button class="link-button" data-reveal="${path}"${action === 'Select file' ? ' data-browse-after="1"' : ''}>${escape(action)} →</button>` : ''}</div>`; }
@@ -411,7 +411,12 @@ function buildFields() {
   field(c,'foveaHeight','Focus height','Without Quad Views: vertical share of the view in high detail.','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
   field(c,'peripheralScale','Peripheral resolution','Foveated Super Resolution without Quad Views: lower values save GPU outside the focus area.','number',[.15,1,.01],foveatedSr,'ratio',stereoHidden);
   field(c,'quadSharpening','Focus sharpening','Extra sharpening of the focus area.','number',[0,1,.01],quad,'ratio');
-  field(c,'quadRoundFocus','Round focus area','The sharp area is a circle that fades into the periphery down to nothing, instead of the rectangle Quad Views uses, whose edge stays visible.','toggle',null,quad);
+  field(c,'quadPeripheryContrast','Periphery contrast','Restores the local contrast the periphery loses when Quad Views enlarges it, so it reads less blurred next to the focus area. Runs at the periphery\u2019s own low resolution: a fraction of a millisecond. 0 turns it off; raise it slowly, too much makes the edges of the periphery shimmer.','number',[0,1,.05],quad,'ratio');
+  field(c,'quadSharpenTaper','Sharpening fades at the edge','The focus sharpening fades out over the same band as the focus area, so detail steps down gradually into the periphery and the edge is harder to see. Almost no GPU cost.','toggle',null,quad);
+  field(c,'quadRoundFocus','Round focus area','On: the sharp area is a circle. Off: a rectangle with slightly rounded corners, which keeps more sharp area at the corners. Both fade into the periphery down to nothing over Focus edge blending.','toggle',null,quad);
+  const tracked = p => quad(p) && p.gaze === 'EyeTracked';
+  field(c,'quadSaccadeLead','Focus ahead of fast eye movements','When your eyes jump, the sharp area reaches ahead along the movement for that moment, so with frame generation you land in it instead of waiting a frame or two for it. No GPU cost: the focus keeps its pixels and is briefly a little less dense while the eyes move.','toggle',null,tracked);
+  field(c,'quadGazeStabilize','Steady focus while looking','Keeps the sharp area still while your eyes rest (movements under half a degree), so eye-tracker noise does not make its edge shimmer. Real eye movements are followed at once.','toggle',null,tracked);
   field(c,'quadEdgeBlend','Focus edge blending','How wide the focus area fades into the periphery: wider is softer, with a little less fully sharp area. Following Pimax Play, 0 (a sharp edge) when its Transition Mode is Off.','number',[0,.5,.01],quad,'ratio');
   // DLSS 5 page: on/off and the runtime file first, Foveated Super Resolution (stereo only) on its own, then the image controls.
   c = card('dlssControls','DLSS 5','Neural rendering with your own NVIDIA runtime file, which is not included with this app.');
@@ -423,6 +428,7 @@ function buildFields() {
   field(c,'foveatedDlss','Foveated Super Resolution','Performance: DLSS at full quality only where you look, lighter in the periphery. For stereo without Quad Views.','toggle',null,null,'',p => p.quadViews !== 'None');
   c = card('dlssProcessing','DLSS 5 image','Working scale and area set the GPU cost; intensity and style set the look.');
   field(c,'neuralWorkingScale','Working scale','Lower scale reduces GPU work and neural detail.','number',[.1,1,.01],nr,'ratio');
+  field(c,'quadNeuralEdgeFade','DLSS 5 fades at the focus edge','The DLSS 5 look (tone, colour, detail) fades out toward the edge of the focus area together with it, so the focus area does not stand out as a patch with a different look. No GPU cost.','toggle',null,p => nr(p) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter && p.neuralFocusArea >= 100);
   field(c,'neuralFocusArea','DLSS 5 area','Part of each focus view DLSS 5 processes; the edge fades into normal DLSS. GPU time for both eyes, measured on an RTX 5090 at 1764×2480 per eye and full working scale.','select',[[100,'Whole focus area · 10.8 ms · default'],[80,'Central 80% · 7.9 ms'],[70,'Central 70% · 6.4 ms'],[50,'Central 50% · 4.8 ms']],p => nr(p) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter);
   field(c,'neuralIntensity','Intensity','Blend strength of the neural image. Default 1.','number',[0,1,.01],nr,'ratio');
   field(c,'neuralStyle','Model style','The look of the DLSS 5 model.','select',[['Standard','Standard · default'],['Natural','Natural'],['Cinematic','Cinematic']],nr);
@@ -480,22 +486,25 @@ function buildFields() {
   field(c,'freeVramApps','Programs to close','Process names, one per line, without .exe; * and ? are wildcards. Voice chat (Discord) and recording (OBS) are left out on purpose.','list',null,vram);
   field(c,'freeVramReopen','Reopen after the flight','Starts the closed programs again, as your user, when DCS exits.','toggle',null,vram);
   field(c,'freeVramForce','End programs that do not close','After 5 seconds, ends a program that ignored the close request. Unsaved work in it is lost. Off: it keeps running.','toggle',null,vram);
-  field(c,'smallDcsWindow','Small DCS window in VR','Sets the DCS window on the monitor to 1280×720, windowed (options.lua; your values return with Restore originals). The headset image is unaffected: DCS and Windows just keep smaller desktop buffers, which saves some VRAM and GPU time.','toggle');
+  field(c,'pauseTobiiDesktop','Pause the desktop Tobii eye tracker','For a Tobii Eye Tracker 5 or 4C next to a Pimax Crystal: its software (Tobii Experience) also grabs the eye tracker of the headset, and Pimax eye tracking stops working. While DCS runs, the services of the desktop tracker are stopped; they start again when DCS exits. The eye tracking of the headset is never touched. Asks for administrator rights (UAC) when DCS starts.','toggle');
+  field(c,'smallDcsWindow','Small DCS window in VR','Sets the DCS window on the monitor to 1280×720, windowed (options.lua; your values return with Back to stock DCS). The headset image is unaffected: DCS and Windows just keep smaller desktop buffers, which saves some VRAM and GPU time.','toggle');
   field(c,'lowerMonitor','Lower the monitor while flying','Switches the main monitor to the mode below when DCS starts and back when DCS exits. Never saved as a Windows setting: a restart also brings your mode back. HDR is left as it is.','toggle');
   field(c,'flightDisplayMode','Monitor mode in flight','Modes your main monitor reports. 1920×1080 at 60 Hz suits most setups.','select',[[displayModeKey(profileDefaults),displayModeLabel(profileDefaults)]],p => p.lowerMonitor,'',null,
     {prop:'flightDisplayMode',get:p => displayModeKey(p),set:(p,v) => { const [w,h,hz] = v.split(/[x@]/).map(Number); p.flightDisplayWidth = w; p.flightDisplayHeight = h; p.flightDisplayRefresh = hz; }});
   // Engine Optimizations page: the DcsQvCull module, installed in Saved Games with the profile.
   const engine = p => p.engineOptimizations;
-  c = card('engineControls','Engine optimizations (CPU)','Measured together on a CPU-bound VR airfield: about 23% more FPS, p95 frame time 18% lower, 17% less CPU. No visual change.');
+  c = card('engineControls','Engine optimizations (CPU)','Measured together on a busy VR airfield: about 30% more FPS, p95 frame time 20 to 23% lower, 11% less CPU. No visual change.');
   field(c,'engineOptimizations','Engine optimizations','Launch DCS installs a small module that DCS loads from Saved Games\\DCS\\Scripts; nothing in the DCS install changes. Off removes it. Tested on DCS 2.9.30 in single player.','toggle');
   field(c,'engineShaderTimeCache','Streaming timer cache','DCS reads a high-resolution clock on every texture bind, only to timestamp texture-streaming use. The module serves it from a value refreshed every millisecond; streaming decisions are unchanged. Measured: 5 to 6% more FPS.','toggle',null,engine);
   field(c,'enginePartitionBoost','Culling partition boost','DCS splits the search for visible objects into 12 uneven tasks and waits for the slowest. The module splits the same work into 16; the same objects are found. Measured: 2% more FPS, p95 frame time 3% lower.','toggle',null,engine);
   field(c,'engineCostWeights','Culling partition by real cost','The split of the visible-object search into tasks follows what each object actually costs to check, measured as DCS runs, instead of a fixed estimate, so the tasks end together. Measured: 2.75% more FPS, p95 frame time 4% lower.','toggle',null,engine);
-  field(c,'engineShadowInstancing','Shadow caster instancing (exact)','Identical objects casting shadows are drawn with one instanced draw per shadow cascade instead of one draw each. The module compiles instanced versions of the shadow shader DCS ships in the background (about 2.5 minutes after DCS starts); nothing in the DCS install is written. Shadow draws also skip the textures those shaders never read. Verified texel-identical; it turns itself off on any fault. Measured: 2.8% more FPS.','toggle',null,engine);
+  field(c,'engineShadowInstancing','Shadow caster instancing (exact)','Identical objects casting shadows are drawn with one instanced draw per shadow cascade instead of one draw each. The module compiles instanced versions of the shadow shader DCS ships in the background (about 2.5 minutes after DCS starts); nothing in the DCS install is written. Shadow draws also skip the textures those shaders never read, and the grouping is planned off the render thread. Verified texel-identical; it turns itself off on any fault. Measured: 2.8% more FPS, and about 1.9% more from planning in the background.','toggle',null,engine);
   field(c,'engineModelAllocator','Model data allocator (parallel)','The threads that prepare aircraft and object models take memory from one shared allocator and wait for each other. The module gives each thread its own blocks. Measured: 6% more FPS, p95 frame time 9% lower.','toggle',null,engine);
   field(c,'engineFrameHeap','Frame memory per thread','Short-lived per-frame memory comes from one shared heap the model threads queue for. Each thread gets its own blocks; near the end of the heap the original is used. Measured: 1.5% more FPS, culling 9% faster.','toggle',null,engine);
   field(c,'engineTaskQueueClock','Task queue clock cache (camera motion)','At the start of each frame DCS drains its task queue and reads the clock for every task. Only that unlimited drain uses the cached clock. Helps while the camera moves fast: render-thread drain 2.9 to 1.6 ms per frame in a fast flight; nothing changes when static. Needs the streaming timer cache.','toggle',null,p => engine(p) && p.engineShaderTimeCache);
   field(c,'engineTextureDedupe','Texture streaming dedupe','DCS often asks the streamer for the same texture at the same size several times within a millisecond. The repeats are skipped. Measured: 2% more FPS.','toggle',null,engine);
+  field(c,'engineShadowRecorder','Multi-threaded shadows','DCS draws the shadow cascades on its render thread, one object at a time. The module records those draws on 8 worker threads and DCS replays them, so the render thread waits less. Verified texel-identical; measured 3 to 5% more FPS and 4 to 7% shorter p95 frames. Total CPU use rises a little because the work moves to other cores.','toggle',null,engine);
+  field(c,'engineStateFilter','Redundant state filter','DCS sets graphics state (shaders, buffers, textures) that is already set, hundreds of thousands of times a frame. The repeat is skipped where DCS makes the call. Verified identical; measured about 1.2% less CPU and 0.5 to 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
   field(c,'engineEffectBufferSkip','Effect constant-buffer skip','The effect system sets the same constant buffer again although it is already set. The repeat is skipped. Measured together with the counter below: 3.6% more FPS.','toggle',null,engine);
   field(c,'enginePlainCounter','Statistics counter without lock','A triangle counter used only for statistics is updated without a locked instruction, which made all model threads wait on one cache line.','toggle',null,engine);
   field(c,'engineToggleKey','In-flight switch','Turns all the optimizations above off and back on in flight, to compare: one beep off, two beeps on. Click, then press the keys. Default Alt+Shift+F11.','hotkey',null,engine);
@@ -648,9 +657,12 @@ function renderBoostPlan({plan:b, dcsLog}) {
   const monitor = `<h3 class="boost-section">Monitor while flying</h3>` + off(profile.lowerMonitor,'Off. The monitor keeps its mode.') + (m
     ? `<dl class="boost-cores" id="monitorPlan"><dt>Display</dt><dd>${escape(m.name)}</dd><dt>Mode</dt><dd>${escape(mode(m.current))} → ${escape(mode(m.flight))}</dd></dl><p class="fine">${escape(m.note)}</p>`
     : '<p class="fine">No display could be read.</p>');
-  const small = `<h3 class="boost-section">Small DCS window in VR</h3>` + off(profile.smallDcsWindow,'Off. The DCS window keeps your size.') + `<p class="fine">options.lua: ${escape(b.smallWindow || '')}. Restore originals puts your values back.</p>`;
+  const small = `<h3 class="boost-section">Small DCS window in VR</h3>` + off(profile.smallDcsWindow,'Off. The DCS window keeps your size.') + `<p class="fine">options.lua: ${escape(b.smallWindow || '')}. Back to stock DCS puts your values back.</p>`;
+  const tobii = `<h3 class="boost-section">Desktop Tobii eye tracker</h3>` + off(profile.pauseTobiiDesktop,'Off. A desktop Tobii tracker keeps running.') + ((b.tobiiServices || []).length
+    ? `<p class="fine">Paused while DCS runs, started again when it exits: ${(b.tobiiServices || []).map(s => '<b>'+escape(s)+'</b>').join(', ')}. The eye tracking services of the headset are not touched.</p>`
+    : '<p class="fine">No desktop Tobii eye tracker is installed on this PC: nothing would be paused.</p>');
   // Same order as the switches on the left.
-  $('boostPlan').innerHTML = cpu + vram + small + monitor;
+  $('boostPlan').innerHTML = cpu + vram + tobii + small + monitor;
   fillDisplayModes(m);
 }
 function updateControls() {
@@ -799,7 +811,7 @@ const CHECK_INFO = {
   'refresh-rate':['Refresh rate',{reveal:'headsetRefreshHz',label:'Open'}], 'external-limiters':['Other FPS limits',null], 'runtime-reprojection':['Motion smoothing',null],
   'route-mismatch':['Headset route',{page:'setup',label:'Open'}], 'steamvr-not-found':['SteamVR',{guide:'steamvr',label:'Guide'}],
   'gaze-bridge-missing':['Eye tracking on Sboys',{guide:'gaze',label:'Guide'}], 'runtime':['OpenXR runtime',{page:'setup',label:'Open'}],
-  'active-backup':['Applied profile',{page:'recovery',label:'Recovery'}], 'deployment':['Files and components',{page:'diagnostics',label:'Review',review:true}],
+  'active-backup':['Applied profile',{page:'recovery',label:'Stock DCS'}], 'deployment':['Files and components',{page:'diagnostics',label:'Review',review:true}],
   'neural-area':['DLSS 5 area',{reveal:'neuralFocusArea',label:'Open'}], 'neural-depth':['Depth convention',{reveal:'neuralDepth',label:'Open'}]
 };
 const GROUPS = [['fix','Must fix'],['check','Check yourself'],['ok','OK']];
@@ -901,7 +913,7 @@ function renderOriginals() {
   const folder = `<button class="link-button" id="openBackups" title="${escape(o.folder || '')}">Backups folder ↗</button>`;
   const rows = o.files.map(f => `<div class="file original-file"><b>${escape(f.path)}</b><p>${escape(ORIGINAL_ACTIONS[f.action] || f.action)}${f.detail ? ' · '+escape(f.detail) : ''}</p></div>`).join('');
   $('originals').innerHTML = o.count
-    ? `<div class="card originals-card" id="originalsCard"><div class="originals-head"><div><span class="tag">${state.appliedProfile ? 'APPLIED: '+escape(state.appliedProfile.toUpperCase()) : 'CHANGED'}</span><h3>Original files · ${o.count} ${o.count === 1 ? 'file' : 'files'} changed by DCS VR Control</h3><p>Restore originals puts each one back to what was there before DCS VR Control first wrote it, whatever it holds now. In options.lua only DCS VR Control's own settings go back; your other changes stay.</p>${last}</div><button class="button secondary" id="restoreOriginals" ${running || busy ? 'disabled' : ''} ${running ? 'title="Close DCS before restoring"' : ''}>Restore originals</button></div><details id="originalFiles"${open ? ' open' : ''}><summary>What Restore originals does, file by file</summary><div class="file-list">${rows}</div></details><div class="inline-actions">${folder}</div></div>`
+    ? `<div class="card originals-card" id="originalsCard"><div class="originals-head"><div><span class="tag">${state.appliedProfile ? 'APPLIED: '+escape(state.appliedProfile.toUpperCase()) : 'CHANGED'}</span><h3>Original files · ${o.count} ${o.count === 1 ? 'file' : 'files'} changed by DCS VR Control</h3><p>Back to stock DCS puts each one back to what was there before DCS VR Control first wrote it, whatever it holds now. In options.lua only DCS VR Control's own settings go back; your other changes stay.</p>${last}</div><button class="button secondary" id="restoreOriginals" ${running || busy ? 'disabled' : ''} ${running ? 'title="Close DCS before restoring"' : ''}>Back to stock DCS</button></div><details id="originalFiles"${open ? ' open' : ''}><summary>What Back to stock DCS does, file by file</summary><div class="file-list">${rows}</div></details><div class="inline-actions">${folder}</div></div>`
     : `<div class="card originals-card empty" id="originalsCard"><div class="empty-state"><h2>No changes to put back</h2><p>DCS VR Control has not changed any file. Launch DCS (or Apply without launching) backs up each original the first time it writes it.</p>${last}</div><div class="inline-actions">${folder}</div></div>`;
   $('restoreOriginals')?.addEventListener('click',() => run('restore').catch(()=>{}));
   $('openBackups').addEventListener('click',() => request('openBackups').catch(showError));
@@ -919,7 +931,7 @@ function renderSearch() {
     ['diagnostics','Checks','Must fix, check yourself and OK: what stands between this draft and a flight.','checkGroups'],
     ['overview','Last flight','Headset FPS, frame generation 2×/3×, DCS frame time, DLSS 5, CPU Boost and the prefetch fix from the last flight.','flightCard'],
     ['diagnostics','Diagnostic report','Export detected files, compatibility and backups.','export'],
-    ['recovery','Original files','Restore originals: put back every file DCS VR Control changed.','originals']
+    ['recovery','Original files','Back to stock DCS: put back every file DCS VR Control changed.','originals']
   ].map(([page,title,description,id]) => ({page,title,description,path:id,element:$(id),input:$(id)}));
   searchResults = [...fields,...shortcuts].filter(f => !query || normalize(f.title+' '+f.description+' '+f.path+' '+pages.find(p => p[0] === f.page).slice(1,4).join(' ')).includes(query));
   $('searchResults').innerHTML = searchResults.length ? searchResults.map((f,index) => `<button class="search-result" data-index="${index}"><div><b>${escape(f.title)}</b><small>${escape(f.description)}</small></div><span>${f.path === 'featureList' ? 'Right panel' : pages.find(p => p[0] === f.page)[1]} ›</span></button>`).join('') : '<div class="empty-state"><p>No settings match this search.</p></div>';
@@ -1002,7 +1014,7 @@ $('routeSwitch').addEventListener('keydown', e => {
   const next = buttons[(buttons.indexOf(document.activeElement) + 1) % buttons.length];
   next.focus(); next.click();
 });
-// Review files builds the read-only file list for the current draft; Restore originals opens Recovery.
+// Review files builds the read-only file list for the current draft; Back to stock DCS opens Recovery.
 $('reviewPlan').addEventListener('click', () => run('preview').catch(()=>{}));
 $('openRecovery').addEventListener('click', () => navigate('recovery'));
 document.querySelector('.panel-top').addEventListener('scroll', updatePanelScroll, {passive:true});

@@ -43,6 +43,8 @@ public sealed class BoostRuntime
     private readonly List<ClosedProcess> _closedForVram = [];
     private readonly List<string> _reopened = [];
     private string? _displayStatus;
+    private IReadOnlyList<string> _tobiiPaused = [];
+    private string? _tobiiStatus;
     private FlightDisplay? _display;
     private volatile bool _sessionEnding;
 
@@ -178,8 +180,11 @@ public sealed class BoostRuntime
 
         try
         {
-            Log($"Boost helper started (PID {Environment.ProcessId}). CPU Boost {(_profile.CpuBoost ? "on" : "off")}, Free VRAM {(_profile.FreeVram ? "on" : "off")}, monitor mode {(_profile.LowerMonitor ? FlightDisplay.Target(_profile).ToString() : "off")}. DCS hint PID {(_dcsPid?.ToString() ?? "none")}, executable {_dcsExecutable ?? "any"}, log {_dcsLog ?? "auto"}.");
+            Log($"Boost helper started (PID {Environment.ProcessId}). CPU Boost {(_profile.CpuBoost ? "on" : "off")}, Free VRAM {(_profile.FreeVram ? "on" : "off")}, desktop Tobii pause {(_profile.PauseTobiiDesktop ? "on" : "off")}, elevated {FreeVram.IsElevated()}, monitor mode {(_profile.LowerMonitor ? FlightDisplay.Target(_profile).ToString() : "off")}. DCS hint PID {(_dcsPid?.ToString() ?? "none")}, executable {_dcsExecutable ?? "any"}, log {_dcsLog ?? "auto"}.");
             if (_profile.LowerMonitor) ApplyDisplay();
+            // Before DCS creates its OpenXR session, so the headset's eye tracker is free when Quad Views asks for gaze.
+            ResumeLeftoverTobii();
+            if (_profile.PauseTobiiDesktop) PauseTobii();
             WriteStatus("waiting");
             output.WriteLine("CPU Boost waiting for DCS...");
 
@@ -226,6 +231,7 @@ public sealed class BoostRuntime
             var restored = RestoreOnce();
             // The monitor first: it is what the user sees, and a logoff leaves little time.
             RestoreDisplay("Restore");
+            ResumeTobii();
             if (_profile.FreeVram && _profile.FreeVramReopen && !_sessionEnding) ReopenClosed();
             if (_attachedPid is not null)
             {
@@ -383,7 +389,7 @@ public sealed class BoostRuntime
             Process process;
             try { process = Process.GetProcessById(fact.Pid); }
             catch (ArgumentException) { continue; }
-            var record = new ClosedProcess(fact.Pid, fact.ParentPid, fact.Name, SystemPaths.ProcessImagePath(fact.Pid), FreeVram.CommandLine(fact.Pid));
+            var record = new ClosedProcess(fact.Pid, fact.ParentPid, fact.Name, SystemPaths.ProcessImagePath(fact.Pid), FreeVram.CommandLine(fact.Pid), HasVisibleWindow(fact.Pid));
             try
             {
                 // A helper process of a program in the list (a browser's renderer) closes with its program.
@@ -448,6 +454,49 @@ public sealed class BoostRuntime
         { _errors.Add("Monitor mode: " + e.Message); }
     }
 
+    private string TobiiMarker => Path.Combine(_boostDir, TobiiDesktop.MarkerFile);
+
+    /// <summary>Stops the desktop Tobii services (elevated only) and records them, so a helper that dies before DCS exits
+    /// leaves a marker the next helper starts them from.</summary>
+    private void PauseTobii()
+    {
+        if (!FreeVram.IsElevated()) { _tobiiStatus = "not paused: needs administrator rights"; _errors.Add("Desktop Tobii: " + _tobiiStatus + " (the UAC prompt was declined?)."); Log("Desktop Tobii: " + _tobiiStatus); return; }
+        var (stopped, errors) = TobiiDesktop.Pause();
+        _tobiiPaused = stopped;
+        try { if (stopped.Count > 0) AtomicFile.WriteText(TobiiMarker, JsonData.Serialize(stopped)); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        _errors.AddRange(errors.Select(e => "Desktop Tobii: " + e));
+        _tobiiStatus = stopped.Count > 0 ? "paused " + string.Join(", ", stopped) : TobiiDesktop.InstalledServices().Count == 0 ? "no desktop Tobii eye tracker installed" : "nothing running to pause";
+        Log("Desktop Tobii: " + _tobiiStatus + (errors.Count > 0 ? "; " + string.Join("; ", errors) : ""));
+    }
+
+    private void ResumeTobii()
+    {
+        if (_tobiiPaused.Count == 0) return;
+        var errors = TobiiDesktop.Resume(_tobiiPaused);
+        _errors.AddRange(errors.Select(e => "Desktop Tobii: " + e));
+        _tobiiStatus = errors.Count == 0 ? "started again " + string.Join(", ", _tobiiPaused) : "could not start everything again: " + string.Join("; ", errors);
+        Log("Desktop Tobii: " + _tobiiStatus);
+        if (errors.Count == 0) try { File.Delete(TobiiMarker); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        _tobiiPaused = [];
+    }
+
+    /// <summary>Services an earlier helper paused and could not start again (it was ended before DCS exited).</summary>
+    private void ResumeLeftoverTobii()
+    {
+        try
+        {
+            if (!File.Exists(TobiiMarker)) return;
+            // Only names that are still desktop Tobii services on this PC; the marker never names anything else to start.
+            var installed = TobiiDesktop.InstalledServices();
+            var leftover = JsonData.Deserialize<string[]>(File.ReadAllText(TobiiMarker)).Where(s => installed.Contains(s, StringComparer.OrdinalIgnoreCase)).ToArray();
+            if (!FreeVram.IsElevated()) { Log("Desktop Tobii (earlier flight): services still paused; they start again with the next elevated helper or a restart."); return; }
+            var errors = TobiiDesktop.Resume(leftover);
+            Log("Desktop Tobii (earlier flight): " + (errors.Count == 0 ? "started again " + string.Join(", ", leftover) : string.Join("; ", errors)));
+            if (errors.Count == 0) File.Delete(TobiiMarker);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException) { }
+    }
+
     private void RestoreDisplay(string reason)
     {
         try
@@ -456,6 +505,19 @@ public sealed class BoostRuntime
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or EntryPointNotFoundException)
         { _errors.Add("Monitor mode: " + e.Message); }
+    }
+
+    private static bool HasVisibleWindow(int pid)
+    {
+        var found = false;
+        EnumWindowsProc callback = (hwnd, _) =>
+        {
+            if (GetWindowThreadProcessId(hwnd, out var owner) != 0 && owner == (uint)pid && IsWindowVisible(hwnd)) { found = true; return false; }
+            return true;
+        };
+        EnumWindows(callback, IntPtr.Zero);
+        GC.KeepAlive(callback);
+        return found;
     }
 
     private static int PostCloseToWindows(int pid)
@@ -542,6 +604,7 @@ public sealed class BoostRuntime
             Closed = _closed.ToArray(),
             Reopened = _reopened.ToArray(),
             Monitor = _displayStatus,
+            Tobii = _tobiiStatus,
             Restored = restored,
             Errors = _errors.ToArray()
         };
@@ -563,5 +626,6 @@ public sealed class BoostRuntime
     private const uint WM_CLOSE = 0x0010;
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 }

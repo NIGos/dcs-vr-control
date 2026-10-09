@@ -80,7 +80,7 @@ public static partial class BoostPlanner
         var vram = FreeVram.Describe(snapshot, profile.FreeVramApps, excluded, videoMemory);
         var monitor = displays is null ? null : FlightDisplay.Describe(displays, FlightDisplay.Target(profile));
         var small = $"graphics.width = {VrProfile.SmallWindowWidth}, graphics.height = {VrProfile.SmallWindowHeight}, graphics.fullScreen = false";
-        return cpu with { FreeVram = vram, FreeVramBytes = videoMemory is null ? null : vram.Sum(v => v.DedicatedBytes ?? 0), Monitor = monitor, SmallWindow = small };
+        return cpu with { FreeVram = vram, FreeVramBytes = videoMemory is null ? null : vram.Sum(v => v.DedicatedBytes ?? 0), Monitor = monitor, SmallWindow = small, TobiiServices = TobiiDesktop.InstalledServices() };
     }
 
     private static BoostPlan ComposeCpu(VrProfile profile, CpuTopology topology, BoostSnapshot snapshot)

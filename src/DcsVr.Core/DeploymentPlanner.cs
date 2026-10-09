@@ -115,7 +115,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         if (!profile.KeepDcsLauncher && current.Get("miscellaneous") is not null) Require("miscellaneous.launcher", false);
         // Small DCS window in VR: the desktop mirror becomes a 1280×720 window. The headset image is rendered at the
         // headset's own resolution either way; DCS and Windows only keep smaller desktop buffers. The aspect follows the
-        // window when DCS stores one. Owned keys like every setting above: Restore originals puts the user's values back.
+        // window when DCS stores one. Owned keys like every setting above: Back to stock DCS puts the user's values back.
         if (profile.SmallDcsWindow && current.Get("graphics") is not null)
         {
             Require("graphics.width", VrProfile.SmallWindowWidth);
@@ -176,7 +176,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore.
-                runtimeLogs: [.. new[] { "DcsQvCull.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll") }.Select(name => Path.Combine(module, name))]);
+                runtimeLogs: [.. new[] { "DcsQvCull.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp") }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
             AddText(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.

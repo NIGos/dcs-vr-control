@@ -82,7 +82,7 @@
       if (checking) body.querySelectorAll('button,input').forEach(control => control.disabled = true);
     } else {
       const manual = report?.checks.filter(c => c.state === 'Manual') || [], current = activeProfile();
-      body.innerHTML = `<h3>Ready to fly</h3><p>Start your headset software, then press <b>Launch DCS</b>. It ${current ? `writes over <b>${text(current)}</b>, ` : 'backs up the original files, then '}applies <b>${text(candidate.name)}</b> and starts DCS. <b>Restore originals</b> in Recovery puts everything back at any time.</p><ol class="flight-checklist">${manual.map(c => `<li><b>${text(c.title)}</b><p>${text(c.detail)}</p></li>`).join('')}</ol><div class="inline-actions"><button id="setupUseDraft" class="button quiet">Keep as draft without launching</button></div>`;
+      body.innerHTML = `<h3>Ready to fly</h3><p>Start your headset software, then press <b>Launch DCS</b>. It ${current ? `writes over <b>${text(current)}</b>, ` : 'backs up the original files, then '}applies <b>${text(candidate.name)}</b> and starts DCS. <b>Back to stock DCS</b> in Recovery puts everything back at any time.</p><ol class="flight-checklist">${manual.map(c => `<li><b>${text(c.title)}</b><p>${text(c.detail)}</p></li>`).join('')}</ol><div class="inline-actions"><button id="setupUseDraft" class="button quiet">Keep as draft without launching</button></div>`;
       el('setupUseDraft').addEventListener('click',() => { if (checking) return; adopt(); el('setupDialog').close(); });
       if (checking) body.querySelectorAll('button').forEach(control => control.disabled = true);
     }

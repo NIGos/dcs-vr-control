@@ -8,19 +8,19 @@ public sealed record OriginalFile
     public required string Path { get; init; }
     /// <summary>Folder the user authorized (bin, Config, managed state). Links below it are rejected at every write.</summary>
     public string? Root { get; init; }
-    /// <summary>Hash of the original bytes; null when the path did not exist (Restore originals removes it).</summary>
+    /// <summary>Hash of the original bytes; null when the path did not exist (Back to stock DCS removes it).</summary>
     public string? OriginalSha256 { get; init; }
     /// <summary>Copy of the original bytes in the originals folder; null when the original was absent.</summary>
     public string? BackupFile { get; init; }
     /// <summary>The original belonged to another program (another mod's dxgi.dll, ReShade): backed up and replaced.</summary>
     public bool Foreign { get; init; }
     /// <summary>A file identical to one of DCS VR Control's own components was there (left by an earlier install or
-    /// another copy of the app's state): it counts as absent, so Restore originals removes it.</summary>
+    /// another copy of the app's state): it counts as absent, so Back to stock DCS removes it.</summary>
     public bool Leftover { get; init; }
     /// <summary>options.lua: only these settings are owned. Setting path to its original literal (null: it was absent).
-    /// Restore originals sets back only these keys and keeps every other edit.</summary>
+    /// Back to stock DCS sets back only these keys and keeps every other edit.</summary>
     public Dictionary<string, string?>? Settings { get; set; }
-    /// <summary>Log files the installed component writes at runtime. Restore originals removes them with it.</summary>
+    /// <summary>Log files the installed component writes at runtime. Back to stock DCS removes them with it.</summary>
     public List<string>? RuntimeLogs { get; set; }
     public DateTimeOffset Since { get; init; } = DateTimeOffset.UtcNow;
 }
@@ -49,7 +49,7 @@ public sealed record OriginalsApply(TransactionJournal Current, IReadOnlyList<st
 /// <summary>
 /// One mental model for DCS VR Control's writes. The first time a path is written its original is backed up (or
 /// recorded as absent); later applies simply overwrite whatever is there, including files of an earlier profile,
-/// leftovers and other programs' files (backed up first). Restore originals puts every path back to its original
+/// leftovers and other programs' files (backed up first). Back to stock DCS puts every path back to its original
 /// whatever it holds now; options.lua is handled setting by setting. Replaces the per-apply journals (folder
 /// "transactions"), which are converted once on first use.
 /// </summary>
@@ -98,7 +98,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// Writes <paramref name="plan"/>: originals of paths written for the first time are backed up (and saved) before
     /// anything is written, paths an earlier profile wrote that this plan does not use are set back to their originals,
     /// then every file is overwritten. options.lua gets only the plan's settings, applied to the file as it is now.
-    /// An interrupted apply leaves every original recorded: launching again or Restore originals finishes the job.
+    /// An interrupted apply leaves every original recorded: launching again or Back to stock DCS finishes the job.
     /// </summary>
     public OriginalsApply Apply(ApplyPlan plan, Action<int>? beforeWrite = null)
     {
@@ -169,7 +169,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             try { Save(baseline); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             var where = index >= 0 && index < plan.Files.Count ? " at " + plan.Files[index].Path : "";
             Log($"Apply of {plan.ProfileId} stopped{where}: {error.Message}");
-            throw new IOException($"Applying stopped{where}: {error.Message} The original files are still backed up: launch again, or use Restore originals.", error);
+            throw new IOException($"Applying stopped{where}: {error.Message} The original files are still backed up: launch again, or use Back to stock DCS.", error);
         }
     }
 

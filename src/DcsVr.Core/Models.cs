@@ -59,10 +59,31 @@ public sealed record VrProfile
     public double PeripheralScale { get; init; } = 0.19;
     public double QuadFocusScale { get; init; } = 1.125;
     public double QuadSharpening { get; init; } = 0.7;
+    /// <summary>Bundled Quad Views: CAS on the periphery at its own resolution before Quad Views enlarges it, restoring
+    /// the local contrast the enlargement takes (dcsvr_periphery_sharpen; 0 = off).</summary>
+    public double QuadPeripheryContrast { get; init; } = 0.3;
     public double QuadEdgeBlend { get; init; } = 0.2;
     /// <summary>Quad Views focus area as the circle inscribed in the focus view, fading out radially over QuadEdgeBlend down
-    /// to nothing (focus_view_shape=2); off keeps Quad Views' rectangle, whose fade stops at 50 % and leaves a visible step.</summary>
+    /// to nothing (focus_view_shape=2); off keeps a rectangle with slightly rounded corners (focus_view_shape=8) that fades
+    /// out the same way, instead of upstream's rectangle whose fade stops at 50 % and leaves a visible step.</summary>
     public bool QuadRoundFocus { get; init; } = true;
+    /// <summary>Bundled Quad Views: the focus sharpening fades out over the same edge band as the focus area, so detail
+    /// steps down gradually into the periphery instead of ending at the edge (dcsvr_sharpen_taper).</summary>
+    public bool QuadSharpenTaper { get; init; } = true;
+    /// <summary>DLSS 5 over the whole focus area: its look (tone, colour, structure) fades out toward the focus edge with
+    /// the focus area itself, so the focus area is not a disc of a different look. Cheeky's NR feather over the whole
+    /// focus view (NrFoveated with NrWidth=1), as wide as the Quad Views edge band allows (Cheeky caps it at 0.3).</summary>
+    public bool QuadNeuralEdgeFade { get; init; } = true;
+    /// <summary>Eye-tracked bundled Quad Views: during a saccade the focus area reaches ahead along the eye's motion by the
+    /// display latency (<see cref="QuadSaccadeLeadMs"/>), so the eye lands in the sharp area even with frame generation.
+    /// No GPU cost: the focus view keeps its pixel count (native/quadviews/dcsvr_gaze.h).</summary>
+    public bool QuadSaccadeLead { get; init; } = true;
+    /// <summary>Eye-tracked bundled Quad Views: the focus stays put while the gaze moves less than 0.5 degrees, so tracker
+    /// noise does not make its edge shimmer. Real eye movements are followed in the same frame.</summary>
+    public bool QuadGazeStabilize { get; init; } = true;
+    /// <summary>The focus area's reach during a saccade, as gaze-to-headset latency: about one rendered frame without
+    /// frame generation, more with it (it waits for the next rendered frame), most in 3X.</summary>
+    public int QuadSaccadeLeadMs => FrameGen == FrameGeneration.Off ? 25 : FrameGenFactor == 2 ? 55 : 85;
     /// <summary>Quad Views turbo: DCS starts the next frame while the runtime still holds the previous one. Quad Views itself
     /// enables it on most runtimes and disables it on SteamVR; off by default until measured in the headset.</summary>
     public bool QuadTurbo { get; init; }
@@ -186,7 +207,8 @@ public sealed record VrProfile
     /// <summary>[Model] ShadowInstancing, ShadowBatching and BigModelPages together: identical shadow casters in a
     /// cascade are drawn with one instanced draw, using instanced variants of DCS's own shadow vertex shader compiled in
     /// the background after DCS starts (about 2.5 min, nothing written to the DCS install). Verified texel-identical;
-    /// turns itself off on any fault. Measured +2.8 % FPS. Also writes ShadowTextureSkip: shadow draws skip the texture sets
+    /// turns itself off on any fault. Measured +2.8 % FPS. Also writes ShadowPlanAsync: the grouping is planned off the
+    /// render thread (+1.9 % FPS, texel-identical). Also writes ShadowTextureSkip: shadow draws skip the texture sets
     /// their compiled shaders never read (masks from the same compile; depth-identical).</summary>
     public bool EngineShadowInstancing { get; init; } = true;
     /// <summary>[Model] AllocSlabs: per-thread slabs for the model data allocator (NGModel StructBufferManager), so
@@ -205,6 +227,14 @@ public sealed record VrProfile
     /// <summary>[Effects] SkipSameConstantBuffer: the effect system's SetConstantBuffer is skipped when that buffer is
     /// already set. With <see cref="EnginePlainCounter"/>: measured +3.6 % FPS.</summary>
     public bool EngineEffectBufferSkip { get; init; } = true;
+    /// <summary>[D3D] SplitFilter: DCS's renderer sets D3D11 state (shaders, buffers, textures, samplers) it already has
+    /// set; the repeat is skipped at DCS's own call sites. Verified exact live (362 frames, 0 mismatches); measured
+    /// about CPU −1.2 %, +0.5 to 1 % FPS. Turns itself off after a DCS update.</summary>
+    public bool EngineStateFilter { get; init; } = true;
+    /// <summary>[Model] ShadowRecorder: the shadow cascades' draws are recorded on 8 worker threads (D3D11 deferred
+    /// contexts) instead of DCS's render thread; cascade 1 stays as DCS draws it. Verified texel-identical live;
+    /// measured +3 to +5 % FPS, p95 −4 to −7 %, at 4-7 % more total CPU and about 30 MB of memory.</summary>
+    public bool EngineShadowRecorder { get; init; } = true;
     /// <summary>[Model] PlainTriangleCounter: a statistics-only triangle counter updated without a locked instruction.</summary>
     public bool EnginePlainCounter { get; init; } = true;
     /// <summary>[Timing] CacheUs: how often the cached time is refreshed, in microseconds.</summary>
@@ -222,16 +252,27 @@ public sealed record VrProfile
     /// <summary>[General] Diagnostics: measurement hooks always installed instead of only while the test suite runs.</summary>
     public bool EngineDiagnosticHooks { get; init; }
 
+    /// <summary>While DCS runs, the boost helper stops a desktop Tobii eye tracker's services (Tobii Experience and the
+    /// Eye Tracker 5/4C runtime), which otherwise hold the Pimax headset's Tobii tracker, and starts them again when DCS
+    /// exits (<see cref="TobiiDesktop"/>). Needs administrator rights (UAC at launch).</summary>
+    public bool PauseTobiiDesktop { get; init; }
+
     /// <summary>The prefetch fix is deployed (bin\dxgi2.dll) and enabled through the launch environment.</summary>
     public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>
-    public bool UsesBoostHelper => CpuBoost || FreeVram || LowerMonitor;
+    public bool UsesBoostHelper => CpuBoost || FreeVram || LowerMonitor || PauseTobiiDesktop;
+    /// <summary>The boost helper starts elevated: CPU Boost's administrator option, or pausing the desktop Tobii services.</summary>
+    public bool BoostHelperElevated => (CpuBoost && BoostElevated) || PauseTobiiDesktop;
     /// <summary>Foveated Super Resolution actually runs: only in stereo, without Quad Views.</summary>
     public bool UsesFoveatedDlss => FoveatedDlss && QuadViews == QuadProvider.None;
     public bool UsesCheeky => UsesFoveatedDlss || NeuralRendering;
     public bool UsesQuadFocus => UsesCheeky && QuadViews == QuadProvider.QuadViewsFoveated && QuadFocusAdapter;
     /// <summary>Central DLSS 5 area actually written to Cheeky: only with the focus adapter and DLSS 5 on.</summary>
     public bool UsesCentralNeuralArea => UsesQuadFocus && NeuralRendering && NeuralFocusArea < 100;
+    public bool UsesNeuralEdgeFade => UsesQuadFocus && NeuralRendering && NeuralFocusArea >= 100 && QuadNeuralEdgeFade && QuadEdgeBlend > 0;
+    /// <summary>Cheeky NrTransitionWidth for <see cref="UsesNeuralEdgeFade"/>: the Quad Views fade band (2 x the edge
+    /// blending, in focus radii), at most Cheeky's 0.3.</summary>
+    public double NeuralEdgeFeather => Math.Min(0.3, 2 * QuadEdgeBlend);
     public override string ToString() => Name;
 }
 

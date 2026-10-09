@@ -125,10 +125,11 @@
 //   texture-read entries (and its queued snapshots), so a new shader at a
 //   reused address is compiled and mapped as itself.
 //
-// Shadow batching (shadow_batch.h) on top: the leader's call goes through
-// the original ShadowMapRenderable vt[1], which tail-jumps to ModelMaterialMT
-// slot 5, i.e. to this copy. The copy makes the original's calls in the
-// original order (offline differential test), so the leader's binds,
+// Shadow batching (shadow_batch.h) on top: the leader calls slot 5 the way
+// ShadowMapRenderable vt[1] does (a tail jump with the material, item and
+// mesh), through DrawPso below with the group base as posStructOffset, i.e.
+// this copy. The copy makes the original's calls in the original order
+// (offline differential test), so the leader's binds,
 // streaming requests and DX11Renderer::draw (with the batch's instance count
 // from the renderer vtable copy) are what stock slot 5 would do, minus the
 // SetResource of variables no shadow pass reads. The instanced VS shadow_batch
@@ -367,6 +368,19 @@ constexpr uint32_t kInnerDummy = 0xb6db0;    // .?AVDX11TextureInternalDummy@Ren
 constexpr uint32_t kTechVtbl = 0xb9608;      // .?AUSTechnique@D3DX11Effects@@
 constexpr uint32_t kPassVtbl = 0xb96b0;      // .?AUSPassBlock@D3DX11Effects@@
 
+// Where this build has them: the recorded RVAs above, or where reloc.h
+// re-found them in another build (0 = not found). Set by ResolveAddrs; until
+// then the recorded RVAs (the tests' fake modules use those).
+struct Addrs {
+  uint32_t model = kModelVtbl, slot5 = kSlot5, submit = kSubmit, globals = kGlobals;  // NGModel.dll
+  uint32_t iatGetTexture = kIatGetTexture, iatValid = kIatValid;
+  uint32_t shader = kShaderVtbl, setTexture = kSetTexture, getDesc = kGetDesc, compat = kCompat, getSrv = kGetSrv;
+  uint32_t tex = kTexVtbl, innerFile = kInnerFile, innerArray = kInnerArray, innerDummy = kInnerDummy;
+  uint32_t tech = kTechVtbl, pass = kPassVtbl;
+  uint32_t shaderDtor = 0, texSlot18 = 0, texSlot11 = 0, innerSlot4 = 0, dummySlot4 = 0, ret0 = 0;  // checks only
+};
+Addrs g_at;
+
 using Slot5Fn = uint64_t(__fastcall*)(void* mat, void* item, void* a3, void* a4);
 using SetTexFn = uint64_t(__fastcall*)(void* shader, int64_t h, void* tex, void* aux, const uint64_t* size);
 using SetSbFn = uint64_t(__fastcall*)(void* shader, void* h, void* value);
@@ -510,7 +524,7 @@ const char* CheckLiveTechnique(uint8_t* shader, uint64_t tech) {
   const uint64_t techCount = (techEnd - techBegin) / 0x50;
   if (tech < 1 || tech > techCount) return "technique handle out of range";
   void* t = *reinterpret_cast<void**>(techBegin + (tech - 1) * 0x50 + 0x20);
-  if (!t || *static_cast<void**>(t) != g_dx + kTechVtbl) return "technique is not an FX technique";
+  if (!t || *static_cast<void**>(t) != g_dx + g_at.tech) return "technique is not an FX technique";
   struct {
     const char* name;
     uint32_t passes, annotations;
@@ -519,7 +533,7 @@ const char* CheckLiveTechnique(uint8_t* shader, uint64_t tech) {
   if (td.passes == 0 || td.passes > 16) return "unexpected pass count";
   for (uint32_t p = 0; p < td.passes; ++p) {
     void* pass = VSlot<void*(__fastcall*)(void*, uint32_t)>(t, 7)(t, p);
-    if (!pass || *static_cast<void**>(pass) != g_dx + kPassVtbl) return "pass is not an FX pass block";
+    if (!pass || *static_cast<void**>(pass) != g_dx + g_at.pass) return "pass is not an FX pass block";
     if (!VSlot<bool(__fastcall*)(void*)>(pass, 3)(pass)) return "pass is not valid";
     // Pass assignments left after load: numeric ones only.
     const uint32_t assignments = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pass) + 0x10);
@@ -687,21 +701,48 @@ void SkipSet(uint8_t* shader, int64_t h, void* tex, void* aux, const uint64_t* s
   }
 }
 
+// Shadow batching (shadow_batch.h) groups textured casters by the texture
+// sets the shadow passes read only. A skipped group member therefore still
+// makes, for each texture set the mask skips, exactly what the slot-5 copy
+// would have made for it (SkipSet: the streaming request and any replay).
+// Its read sets equal its leader's by the group key, and the leader binds them.
+// Returns the sets replayed. Render thread.
+uint32_t ReplayMemberSkippedSets(uint8_t* mat, uint8_t* item, const MaskEntry* e) {
+  if (!e || e->state <= 0) return 0;
+  uint8_t* shader = *reinterpret_cast<uint8_t**>(mat + 0x30);
+  uint8_t* props = *reinterpret_cast<uint8_t**>(mat + 0x28);
+  if (!shader || !props) return 0;
+  auto** arr = *reinterpret_cast<uint8_t***>(item + 0x18);
+  if (!arr || !*arr) return 0;
+  Counters& c = *MyCounters();
+  uint64_t size = ~0ull;  // Vec2i(-1, -1), as slot 5
+  uint8_t* entry = *arr + static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 24;
+  uint32_t n = 0;
+  for (uint64_t i = 0; i < *reinterpret_cast<uint32_t*>(mat + 0x2d8); ++i, entry += 24) {
+    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + i * 8);
+    if (h == -1 || !Skippable(*e, h)) continue;
+    SkipSet(shader, h, *reinterpret_cast<void**>(entry + 8), *reinterpret_cast<void**>(entry), &size, c);
+    ++n;
+  }
+  return n;
+}
+
 // Exact copy of ModelMaterialMT slot 5 (0x17750) with the texture loop
 // filtered by the mask. noMask: the shader has no usable mask (e skips
-// nothing); its sets are counted as keptNoMask.
+// nothing); its sets are counted as keptNoMask. pso != nullptr: the value
+// slot 5 would read from [item+0xd4] (shadow batching's leaders, DrawPso).
 uint64_t Draw(uint8_t* mat, uint8_t* item, void* a3, uint8_t* shader, const MaskEntry& e, Counters& c,
-              bool noMask = false) {
-  *reinterpret_cast<uint32_t*>(mat + 0x18c) = *reinterpret_cast<uint32_t*>(item + 0xd4);
-  uint8_t* globals = *reinterpret_cast<uint8_t**>(g_ng + kGlobals);
+              bool noMask = false, const uint32_t* pso = nullptr) {
+  *reinterpret_cast<uint32_t*>(mat + 0x18c) = pso ? *pso : *reinterpret_cast<uint32_t*>(item + 0xd4);
+  uint8_t* globals = *reinterpret_cast<uint8_t**>(g_ng + g_at.globals);
   uint8_t* sb = *reinterpret_cast<uint8_t**>(globals + 0x78 + 8) + 0x20 +
                 static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(item + 0xd0)) * 0x30;
   void* sh = *reinterpret_cast<void**>(mat + 0x30);
   VSlot<SetSbFn>(sh, 27)(sh, *reinterpret_cast<void**>(mat + 0x68), *reinterpret_cast<void**>(sb));
   uint8_t* props = *reinterpret_cast<uint8_t**>(mat + 0x28);
   const uint8_t transparent = props[0x33];
-  auto getTexture = *reinterpret_cast<GetTextureFn*>(g_ng + kIatGetTexture);
-  auto valid = *reinterpret_cast<ValidFn*>(g_ng + kIatValid);
+  auto getTexture = *reinterpret_cast<GetTextureFn*>(g_ng + g_at.iatGetTexture);
+  auto valid = *reinterpret_cast<ValidFn*>(g_ng + g_at.iatValid);
   bool alpha = valid(getTexture(props, 0xf));
   if (!alpha) alpha = valid(getTexture(props, 0x12));
   props = *reinterpret_cast<uint8_t**>(mat + 0x28);
@@ -727,15 +768,28 @@ uint64_t Draw(uint8_t* mat, uint8_t* item, void* a3, uint8_t* shader, const Mask
   return g_submit(mat, tech, 0, a3);
 }
 
-uint64_t __fastcall Hook(void* matp, void* itemp, void* a3, void* a4) {
-  if (!g_on.load(std::memory_order_relaxed)) return g_orig(matp, itemp, a3, a4);
+// DCS's own slot 5, or with pso set the copy with every set kept, which
+// makes the same calls (offline differential test) with posStructOffset =
+// *pso. Its texture sets are not counted (DCS's slot 5 is not either).
+uint64_t OrigOrCopy(void* matp, void* itemp, void* a3, void* a4, const uint32_t* pso) {
+  if (!pso) return g_orig(matp, itemp, a3, a4);
+  static const MaskEntry kKeepAll;
+  thread_local Counters uncounted;
+  uint8_t* mat = static_cast<uint8_t*>(matp);
+  return Draw(mat, static_cast<uint8_t*>(itemp), a3, *reinterpret_cast<uint8_t**>(mat + 0x30), kKeepAll, uncounted,
+              true, pso);
+}
+
+// The hook's body; pso: see Draw.
+uint64_t HookPso(void* matp, void* itemp, void* a3, void* a4, const uint32_t* pso) {
+  if (!g_on.load(std::memory_order_relaxed)) return OrigOrCopy(matp, itemp, a3, a4, pso);
   uint8_t* mat = static_cast<uint8_t*>(matp);
   uint8_t* shader = *reinterpret_cast<uint8_t**>(mat + 0x30);
   Counters& c = *MyCounters();
   ++c.casters;
   if (!shader || *reinterpret_cast<void**>(shader) != g_shaderVtblPtr) {
     ++c.fallback;
-    return g_orig(matp, itemp, a3, a4);
+    return OrigOrCopy(matp, itemp, a3, a4, pso);
   }
   bool pending = false;
   const MaskEntry* e =
@@ -745,9 +799,35 @@ uint64_t __fastcall Hook(void* matp, void* itemp, void* a3, void* a4) {
     // state-0 entry), so the counters see these sets too.
     static const MaskEntry kKeepAll;
     ++(pending ? c.pending : c.unmapped);
-    return Draw(mat, static_cast<uint8_t*>(itemp), a3, shader, kKeepAll, c, true);
+    return Draw(mat, static_cast<uint8_t*>(itemp), a3, shader, kKeepAll, c, true, pso);
   }
-  return Draw(mat, static_cast<uint8_t*>(itemp), a3, shader, *e, c);
+  return Draw(mat, static_cast<uint8_t*>(itemp), a3, shader, *e, c, false, pso);
+}
+
+uint64_t __fastcall Hook(void* matp, void* itemp, void* a3, void* a4) { return HookPso(matp, itemp, a3, a4, nullptr); }
+
+// Slot 5 for shadow batching's leaders (shadow_batch.h LeaderRaw) without
+// touching [item+0xd4]: what the slot would run now, with posStructOffset =
+// pso. Slot5Mode (just before the call) tells what the slot holds: this hook
+// (directly or behind the shadow caster counter, binder_count.h), whose path
+// DrawPso takes with pso; DCS's slot 5, which the copy with every set kept
+// reproduces; or anything else (kPsoNone: the caller must not use DrawPso).
+// SMR vt[1] passes (material, item, mesh) [V NGModel 0x443e0]; a4 is not
+// read by slot 5 [V 0x17750]. The counter's own per-call count misses
+// leaders (measurement only).
+enum : int { kPsoNone = -1, kPsoHook = 0, kPsoCopy = 1 };
+int Slot5Mode() {
+  if (g_state.load() != 1 || !g_slot) return kPsoNone;
+  void* cur = *g_slot;
+  if (cur == reinterpret_cast<void*>(&Hook)) return kPsoHook;
+  if (cur == reinterpret_cast<void*>(&shadowcount::HookModel))
+    return shadowcount::g_modelNext.load() == &Hook ? kPsoHook : kPsoCopy;
+  if (cur == reinterpret_cast<void*>(g_orig)) return kPsoCopy;
+  return kPsoNone;
+}
+
+uint64_t DrawPso(void* mat, void* item, void* mesh, uint32_t pso, int mode) {
+  return mode == kPsoHook ? HookPso(mat, item, mesh, nullptr, &pso) : OrigOrCopy(mat, item, mesh, nullptr, &pso);
 }
 
 void* __fastcall HookDtor(void* self, uint32_t flags) {
@@ -763,40 +843,78 @@ void* __fastcall HookDtor(void* self, uint32_t flags) {
 // Install / attach
 // ---------------------------------------------------------------------------
 
-// Returns nullptr when NGModel and dx11backend are the analysed build, else
-// the log line saying what does not match.
+// False when a location is not found in this build (reloc.h logged which).
+bool ResolveAddrs(Addrs& a) {
+  a.model = reloc::Rva(hooksig::NG_ModelMaterialMT_vtbl, kModelVtbl);
+  a.slot5 = reloc::Rva(hooksig::NG_ModelMaterialMT_drawShadow, kSlot5);
+  a.submit = reloc::Rva(hooksig::NG_ModelMaterialMT_submit, kSubmit);
+  a.globals = reloc::Rva(hooksig::NG_model_globals, kGlobals);
+  a.iatGetTexture = reloc::Rva(hooksig::NG_iat_PropertiesSet_getTexture, kIatGetTexture);
+  a.iatValid = reloc::Rva(hooksig::NG_iat_Texture2dProperties_valid, kIatValid);
+  a.shader = reloc::Rva(hooksig::DX_DX11Shader_vtbl, kShaderVtbl);
+  a.setTexture = reloc::Rva(hooksig::DX_DX11Shader_setTexture, kSetTexture);
+  a.shaderDtor = reloc::Rva(hooksig::DX_DX11Shader_dtor, 0x1d3c0);
+  a.getDesc = reloc::Rva(hooksig::DX_DX11Texture_getDesc, kGetDesc);
+  a.compat = reloc::Rva(hooksig::DX_DX11Texture_compatible, kCompat);
+  a.getSrv = reloc::Rva(hooksig::DX_DX11Texture_getSRV, kGetSrv);
+  a.tex = reloc::Rva(hooksig::DX_DX11Texture_vtbl, kTexVtbl);
+  a.texSlot18 = reloc::Rva(hooksig::DX_DX11Texture_slot18, 0x120a0);
+  a.texSlot11 = reloc::Rva(hooksig::DX_DX11Texture_slot11, 0x11190);
+  a.innerFile = reloc::Rva(hooksig::DX_DX11TextureFromFileInternalImpl_vtbl, kInnerFile);
+  a.innerArray = reloc::Rva(hooksig::DX_DX11TextureArrayFromFileInternalImpl_vtbl, kInnerArray);
+  a.innerDummy = reloc::Rva(hooksig::DX_DX11TextureInternalDummy_vtbl, kInnerDummy);
+  a.innerSlot4 = reloc::Rva(hooksig::DX_DX11TextureFromFileInternalImpl_slot4, 0x331f0);
+  a.dummySlot4 = reloc::Rva(hooksig::DX_DX11TextureInternalDummy_slot4, 0x5250);
+  a.ret0 = reloc::Rva(hooksig::DX_ret0_stub, 0x5010);
+  a.tech = reloc::Rva(hooksig::DX_STechnique_vtbl, kTechVtbl);
+  a.pass = reloc::Rva(hooksig::DX_SPassBlock_vtbl, kPassVtbl);
+  static_assert(sizeof(Addrs) == 23 * sizeof(uint32_t), "Addrs holds RVAs only");
+  const uint32_t* v = &a.model;
+  for (size_t i = 0; i < sizeof(Addrs) / sizeof(uint32_t); ++i)
+    if (!v[i]) return false;
+  return true;
+}
+
+// Returns nullptr when NGModel and dx11backend are the analysed build (or
+// another build with the same code, see reloc.h), else the log line saying
+// what does not match. Sets g_at.
 const char* VerifyBuild(uint8_t* ng, uint8_t* dx) {
-  auto** model = reinterpret_cast<void**>(ng + kModelVtbl);
-  auto** shaderVtbl = reinterpret_cast<void**>(dx + kShaderVtbl);
-  auto** texVtbl = reinterpret_cast<void**>(dx + kTexVtbl);
+  Addrs& a = g_at;
+  if (!ResolveAddrs(a)) return "shadow texture skip: a NGModel/dx11backend location is not in this build; skipped";
+  auto** model = reinterpret_cast<void**>(ng + a.model);
+  auto** shaderVtbl = reinterpret_cast<void**>(dx + a.shader);
+  auto** texVtbl = reinterpret_cast<void**>(dx + a.tex);
   if (!allocslab::RttiIs(ng, model, ".?AVModelMaterialMT@model@@") ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&model[5])) != ng + kSlot5 ||
-      !CodeIs(ng, kSlot5, kSlot5End, kSlot5Hash) || !CodeIs(ng, kSubmit, kSubmitEnd, kSubmitHash))
+      reinterpret_cast<uint8_t*>(SlotOriginal(&model[5])) != ng + a.slot5 ||
+      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_drawShadow, ng, kSlot5, kSlot5End, kSlot5Hash) ||
+      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_submit, ng, kSubmit, kSubmitEnd, kSubmitHash))
     return "shadow texture skip: NGModel ModelMaterialMT does not match this build; skipped";
   if (!allocslab::RttiIs(dx, shaderVtbl, ".?AVDX11Shader@RenderAPI@@") ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&shaderVtbl[26])) != dx + kSetTexture ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&shaderVtbl[0])) != dx + 0x1d3c0 ||
-      !CodeIs(dx, kSetTexture, kSetTextureEnd, kSetTextureHash) ||
-      !CodeIs(dx, kGetDesc, kGetDescEnd, kGetDescHash) || !CodeIs(dx, kCompat, kCompatEnd, kCompatHash) ||
-      !CodeIs(dx, kGetSrv, kGetSrvEnd, kGetSrvHash) ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&shaderVtbl[26])) != dx + a.setTexture ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&shaderVtbl[0])) != dx + a.shaderDtor ||
+      !reloc::CodeIs(hooksig::DX_DX11Shader_setTexture, dx, kSetTexture, kSetTextureEnd, kSetTextureHash) ||
+      !reloc::CodeIs(hooksig::DX_DX11Texture_getDesc, dx, kGetDesc, kGetDescEnd, kGetDescHash) ||
+      !reloc::CodeIs(hooksig::DX_DX11Texture_compatible, dx, kCompat, kCompatEnd, kCompatHash) ||
+      !reloc::CodeIs(hooksig::DX_DX11Texture_getSRV, dx, kGetSrv, kGetSrvEnd, kGetSrvHash) ||
       !allocslab::RttiIs(dx, texVtbl, ".?AVDX11Texture@RenderAPI@@") ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&texVtbl[18])) != dx + 0x120a0 ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&texVtbl[11])) != dx + 0x11190 ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kInnerFile), ".?AVDX11TextureFromFileInternalImpl@RenderAPI@@") ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kInnerArray),
+      reinterpret_cast<uint8_t*>(SlotOriginal(&texVtbl[18])) != dx + a.texSlot18 ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&texVtbl[11])) != dx + a.texSlot11 ||
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.innerFile), ".?AVDX11TextureFromFileInternalImpl@RenderAPI@@") ||
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.innerArray),
                          ".?AVDX11TextureArrayFromFileInternalImpl@RenderAPI@@") ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kInnerDummy), ".?AVDX11TextureInternalDummy@RenderAPI@@") ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kTechVtbl), ".?AUSTechnique@D3DX11Effects@@") ||
-      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + kPassVtbl), ".?AUSPassBlock@D3DX11Effects@@"))
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.innerDummy), ".?AVDX11TextureInternalDummy@RenderAPI@@") ||
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.tech), ".?AUSTechnique@D3DX11Effects@@") ||
+      !allocslab::RttiIs(dx, reinterpret_cast<void**>(dx + a.pass), ".?AUSPassBlock@D3DX11Effects@@"))
     return "shadow texture skip: dx11backend DX11Shader/DX11Texture/effects code does not match this build; skipped";
   // Inner texture classes: vt[8] must be `ret 0` and vt[4] the known getters.
   auto innerOk = [&](uint32_t vt, uint32_t slot4) {
     auto** v = reinterpret_cast<void**>(dx + vt);
-    return reinterpret_cast<uint8_t*>(v[8]) == dx + 0x5010 && reinterpret_cast<uint8_t*>(v[4]) == dx + slot4;
+    return reinterpret_cast<uint8_t*>(v[8]) == dx + a.ret0 && reinterpret_cast<uint8_t*>(v[4]) == dx + slot4;
   };
   uint8_t ret0[3] = {};
-  if (!innerOk(kInnerFile, 0x331f0) || !innerOk(kInnerArray, 0x331f0) || !innerOk(kInnerDummy, 0x5250) ||
-      !allocslab::ReadBytes(dx + 0x5010, ret0, 3) || ret0[0] != 0xc2 || ret0[1] != 0 || ret0[2] != 0)
+  if (!innerOk(a.innerFile, a.innerSlot4) || !innerOk(a.innerArray, a.innerSlot4) ||
+      !innerOk(a.innerDummy, a.dummySlot4) || !allocslab::ReadBytes(dx + a.ret0, ret0, 3) || ret0[0] != 0xc2 ||
+      ret0[1] != 0 || ret0[2] != 0)
     return "shadow texture skip: dx11backend texture classes do not match this build; skipped";
   return nullptr;
 }
@@ -817,20 +935,20 @@ bool Install() {
     g_state = -1;
     return false;
   }
-  auto** model = reinterpret_cast<void**>(ng + kModelVtbl);
-  auto** shaderVtbl = reinterpret_cast<void**>(dx + kShaderVtbl);
-  auto** texVtbl = reinterpret_cast<void**>(dx + kTexVtbl);
+  auto** model = reinterpret_cast<void**>(ng + g_at.model);
+  auto** shaderVtbl = reinterpret_cast<void**>(dx + g_at.shader);
+  auto** texVtbl = reinterpret_cast<void**>(dx + g_at.tex);
   g_ng = ng;
   g_dx = dx;
-  g_submit = reinterpret_cast<SubmitFn>(ng + kSubmit);
-  g_getDesc = reinterpret_cast<GetDescFn>(dx + kGetDesc);
-  g_compat = reinterpret_cast<CompatFn>(dx + kCompat);
-  g_getSrv = reinterpret_cast<GetSrvFn>(dx + kGetSrv);
+  g_submit = reinterpret_cast<SubmitFn>(ng + g_at.submit);
+  g_getDesc = reinterpret_cast<GetDescFn>(dx + g_at.getDesc);
+  g_compat = reinterpret_cast<CompatFn>(dx + g_at.compat);
+  g_getSrv = reinterpret_cast<GetSrvFn>(dx + g_at.getSrv);
   g_shaderVtblPtr = shaderVtbl;
   g_texVtblPtr = texVtbl;
-  g_innerFile = dx + kInnerFile;
-  g_innerArray = dx + kInnerArray;
-  g_innerDummy = dx + kInnerDummy;
+  g_innerFile = dx + g_at.innerFile;
+  g_innerArray = dx + g_at.innerArray;
+  g_innerDummy = dx + g_at.innerDummy;
   g_cache = new MaskCache;
   g_orig = reinterpret_cast<Slot5Fn>(SlotOriginal(&model[5]));
   g_origDtor = reinterpret_cast<DtorFn>(SlotOriginal(&shaderVtbl[0]));

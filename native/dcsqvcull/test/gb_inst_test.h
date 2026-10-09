@@ -164,7 +164,8 @@ void Synthetic(const Compiler& cc) {
       "cbuffer def_uniforms { uint4 lightCount; float4 FlatShadowPlane; float4x4 prevFrameTransform; float4 flirCoeff;\n"
       "  float4 pad[8]; float3 pad2; uint posStructOffset; float4 tail[3]; };\n"
       "float4 vs(float4 p : POSITION) : SV_Position { return p * pad[0] + posStructOffset; }\n"
-      "float4 psGood() : SV_Target { return flirCoeff + tail[2]; }\n"
+      "Texture2D texRead; Texture2D texUnread;\n"
+      "float4 psGood() : SV_Target { return flirCoeff + tail[2] + texRead.Load(int3(0, 0, 0)); }\n"
       "float4 psPrev() : SV_Target { return prevFrameTransform[1]; }\n"
       "float4 psPso() : SV_Target { return posStructOffset; }\n"
       "VertexShader v = CompileShader(vs_5_0, vs());\n"
@@ -199,6 +200,12 @@ void Synthetic(const Compiler& cc) {
   Check(gateOk,
         "gbuffer inst: reflection gate finds prevFrameTransform and posStructOffset reads per stage (D3D_SVF_USED) "
         "and the used CB dwords");
+  // Per-pass read sets (R14 lead 3 counter): every RDEF binding of the pass, any stage.
+  for (int i = 0; t && t->passes.size() == 3 && i < 3; ++i) PassReads(t->passes[i], g[i]);
+  const std::vector<std::string> p0 = {"def_uniforms", "texRead"}, p1 = {"def_uniforms"};
+  printf("     pass reads synthetic: P0 {%s} P1 {%s}\n", JoinNames(g[0].reads).c_str(), JoinNames(g[1].reads).c_str());
+  Check(t && g[0].readsOk && g[0].reads == p0 && g[1].readsOk && g[1].reads == p1 && g[2].reads == p1,
+        "gbuffer inst: per-pass read sets list the resources each pass binds (texRead in P0 only, texUnread nowhere)");
   if (code) code->Release();
   if (errs) errs->Release();
 }
@@ -585,6 +592,91 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
   Check(got && (m[0] >> 63 & 1) && (m[0] >> (0x9c / 4) & 1) && !(m[0] & (0xffffull << 8)),
         "gbuffer inst: CbUsedDwords gives the CB dwords read by the pass (posStructOffset, specMapValue; not the "
         "matrix)");
+  // R14 lead 3 counter: the per-pass read set query, then the per-draw count.
+  {
+    const int savedState = g_state.load();
+    const bool savedSelOk = g_selOk;
+    void* const savedShaderVtbl = g_shaderVtbl;
+    void* const savedModelVtbl = g_modelVtbl;
+    g_state = 1;
+    g_selOk = false;
+    g_shaderVtbl = im.dx + kShaderVtbl;
+    g_modelVtbl = im.ng + kModelMatVtbl;
+    std::vector<std::string> bound, vars;
+    std::string rwhy, rkey;
+    const int st = GbPassReadTextures(f->sh, 1, 0, &bound, &vars, &rwhy, &rkey);
+    Check(st == shadowtex::kReadsReady && !r.techs.empty() && !r.techs[0].gates.empty() &&
+              bound == r.techs[0].gates[0].reads && !bound.empty() && vars == r.fxVars && !vars.empty() &&
+              rkey == k.key && GbPassReadTextures(f->sh, 1, 7, nullptr, nullptr, nullptr, nullptr) == shadowtex::kReadsPending,
+          "gbuffer tex: GbPassReadTextures returns (a)'s bindings of one (shader, technique, pass) and the variables");
+    // Live parameter records: every variable of (a), in order. Handles: one
+    // read by normal_cf P0, one not, one -1.
+    std::vector<uint8_t> recs(0x50 * (vars.size() ? vars.size() : 1));
+    int readIdx = -1, unreadIdx = -1;
+    for (size_t i = 0; i < vars.size(); ++i) {
+      *reinterpret_cast<const char**>(recs.data() + i * 0x50 + 0x30) = vars[i].c_str();
+      bool read = false;
+      for (const std::string& b : bound) read |= shadowtex::NameRefers(vars[i].c_str(), b.c_str());
+      if (read && readIdx < 0) readIdx = static_cast<int>(i);
+      if (!read && unreadIdx < 0) unreadIdx = static_cast<int>(i);
+    }
+    *reinterpret_cast<uint8_t**>(f->sh + 0xc8) = recs.data();
+    *reinterpret_cast<uint8_t**>(f->sh + 0xd0) = recs.data() + 0x50 * vars.size();
+    *reinterpret_cast<int64_t*>(f->mat + 0x240) = readIdx;
+    *reinterpret_cast<int64_t*>(f->mat + 0x248) = unreadIdx;
+    *reinterpret_cast<int64_t*>(f->mat + 0x250) = -1;
+    *reinterpret_cast<uint32_t*>(f->mat + 0x2d8) = 3;
+    f->Pass(1);
+    TexCountClear();
+    TexCountNote(f->r);
+    TexCountNote(f->r);
+    const bool counted = readIdx >= 0 && unreadIdx >= 0 && g_tc.draws == 2 && g_tc.sets == 4 && g_tc.unread == 2 &&
+                         g_tc.unknownSets == 0 && g_tcUnreadByName.size() == 1 &&
+                         *g_tcUnreadByName.begin()->first == vars[unreadIdx] && g_tcUnreadByName.begin()->second == 2 &&
+                         g_tcMasks.size() == 1;
+    printf("     gb tex: read %s, unread %s; draws %llu, sets %llu, unread %llu, unknown %llu\n",
+           readIdx >= 0 ? vars[readIdx].c_str() : "-", unreadIdx >= 0 ? vars[unreadIdx].c_str() : "-",
+           static_cast<unsigned long long>(g_tc.draws), static_cast<unsigned long long>(g_tc.sets),
+           static_cast<unsigned long long>(g_tc.unread), static_cast<unsigned long long>(g_tc.unknownSets));
+    Check(counted, "gbuffer tex: a G-buffer draw counts its sets; only the variable P0 does not read is unread, by name");
+    // Not counted: cockpit, pass 2, transparent.
+    f->r[0x64] = 1;
+    TexCountNote(f->r);
+    f->r[0x64] = 0;
+    f->Pass(2);
+    TexCountNote(f->r);
+    f->Pass(1);
+    f->props[0x33] = 1;
+    TexCountNote(f->r);
+    f->props[0x33] = 0;
+    Check(g_tc.draws == 2 && g_tc.cockpit == 1, "gbuffer tex: cockpit, pass-2 and transparent draws are not counted");
+    // A shader without a published entry: its sets are unknown.
+    auto* f2 = new Fake;
+    f2->Init(im, k);
+    *reinterpret_cast<int64_t*>(f2->mat + 0x240) = 0;
+    *reinterpret_cast<uint32_t*>(f2->mat + 0x2d8) = 1;
+    f2->Pass(1);
+    TexCountNote(f2->r);
+    // A live record that is not a variable of (a): the mask is unknown.
+    std::vector<uint8_t> odd = recs;
+    static const char kOdd[] = "qvNotInTheEffect";
+    *reinterpret_cast<const char**>(odd.data() + 0x30) = kOdd;
+    *reinterpret_cast<uint8_t**>(f->sh + 0xc8) = odd.data();
+    *reinterpret_cast<uint8_t**>(f->sh + 0xd0) = odd.data() + 0x50 * vars.size();
+    TexCountNote(f->r);
+    Check(g_tc.draws == 4 && g_tc.sets == 7 && g_tc.unread == 2 && g_tc.unknownSets == 3 && g_tc.unknownDraws == 2 &&
+              g_tcUnknownWhy.size() == 2 && g_tcOldMasks.size() == 1,
+          "gbuffer tex: sets of an unpublished key, or of records that are not variables of (a), are unknown");
+    TexCountClear();
+    *reinterpret_cast<uint8_t**>(f->sh + 0xc8) = nullptr;
+    *reinterpret_cast<uint8_t**>(f->sh + 0xd0) = nullptr;
+    *reinterpret_cast<uint32_t*>(f->mat + 0x2d8) = 0;
+    delete f2;
+    g_state = savedState;
+    g_selOk = savedSelOk;
+    g_shaderVtbl = savedShaderVtbl;
+    g_modelVtbl = savedModelVtbl;
+  }
   LogResult(r, 1);
   Check(r.line.find("UNUSED") != std::string::npos && r.line.find("dataflow") != std::string::npos,
         "gbuffer inst: one log line per key with checks and gate");

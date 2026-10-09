@@ -14,8 +14,9 @@ namespace DcsVr.Core;
 /// <param name="Skipped">A matching process is DCS, an ancestor of DCS or a protected process and is never closed.</param>
 public sealed record FreeVramApp(string Name, int Processes, long? DedicatedBytes, bool NeedsAdministrator, bool Skipped);
 
-/// <summary>A process Free VRAM closed, recorded before the close request so it can be started again.</summary>
-public sealed record ClosedProcess(int Pid, int ParentPid, string Name, string? ImagePath, string? CommandLine);
+/// <summary>A process Free VRAM closed, recorded before the close request so it can be started again. HadWindow: it showed
+/// a visible top-level window (a browser left running in the background has none).</summary>
+public sealed record ClosedProcess(int Pid, int ParentPid, string Name, string? ImagePath, string? CommandLine, bool HadWindow = true);
 
 /// <summary>A program to start again after the flight: its executable and the arguments it was started with.</summary>
 public sealed record ReopenTarget(string Name, string ImagePath, string Arguments);
@@ -51,7 +52,9 @@ public static partial class FreeVram
     /// <summary>What to start again after the flight, from the processes that were closed. Only a program's first
     /// process is started: a closed process whose parent was also closed is a helper of that program, and a Chromium or
     /// CEF helper (<c>--type=</c>) is never started on its own. A program is started once per executable and arguments,
-    /// never when that executable is already running again (its own service restarted it), and never without a path.</summary>
+    /// never when that executable is already running again (its own service restarted it), and never without a path.
+    /// A Chromium browser that had no visible window (Edge or Chrome kept in the background) starts again without one
+    /// (<c>--no-startup-window</c>), instead of opening a browser window the user had closed.</summary>
     public static IReadOnlyList<ReopenTarget> ReopenTargets(IReadOnlyList<ClosedProcess> closed, IReadOnlyCollection<string> runningImages)
     {
         var closedPids = closed.Select(c => c.Pid).ToHashSet();
@@ -63,10 +66,15 @@ public static partial class FreeVram
             if (string.IsNullOrWhiteSpace(process.ImagePath) || closedPids.Contains(process.ParentPid) && process.ParentPid != process.Pid) continue;
             var arguments = Arguments(process.CommandLine, process.ImagePath);
             if (IsHelperProcess(arguments) || running.Contains(process.ImagePath)) continue;
+            if (!process.HadWindow && !arguments.Contains(NoStartupWindow, StringComparison.OrdinalIgnoreCase)
+                && closed.Any(c => c.ParentPid == process.Pid && c.Pid != process.Pid && IsHelperProcess(Arguments(c.CommandLine, c.ImagePath ?? ""))))
+                arguments = (arguments + " " + NoStartupWindow).Trim();
             if (seen.Add(process.ImagePath + "\0" + arguments)) result.Add(new(process.Name, process.ImagePath, arguments));
         }
         return result;
     }
+
+    private const string NoStartupWindow = "--no-startup-window";
 
     /// <summary>A Chromium/CEF/Electron child process: started by its browser process, never on its own.</summary>
     public static bool IsHelperProcess(string arguments) => HelperType().IsMatch(arguments);

@@ -49,7 +49,7 @@ if($gui.ExitCode -ne 0){throw 'Installed GUI offscreen smoke failed.'}
 $gui.Dispose()
 foreach($index in 0..47){if(-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "gui-$index.png"))){throw 'Missing offscreen GUI view.'}}
 $guiChecks=Get-Content -LiteralPath (Join-Path $fixtureRoot 'gui-checks.json') -Raw | ConvertFrom-Json
-if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){270}else{256})){throw 'Installed WebView2 control and bridge verification failed.'}
+if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){273}else{259})){throw 'Installed WebView2 control and bridge verification failed.'}
 # Exercise the actual packaged service against isolated game/runtime fixtures.
 # Optional real user-supplied NR deployment is tested only in these game fixtures.
 $presets = & $installedCli presets | ConvertFrom-Json
@@ -122,7 +122,7 @@ foreach($case in $cases){
     if((& $installedCli status --state $stateRoot | ConvertFrom-Json).count -ne $status.count){throw 'Applying again changed the recorded originals.'}
     & $installedCli restore --state $stateRoot
     if($LASTEXITCODE -ne 0){throw 'Packaged combined restoration failed.'}
-    if((& $installedCli status --state $stateRoot | ConvertFrom-Json).count -ne 0){throw 'Restore originals left recorded files.'}
+    if((& $installedCli status --state $stateRoot | ConvertFrom-Json).count -ne 0){throw 'Back to stock DCS left recorded files.'}
     if((Get-FileHash -LiteralPath $options).Hash -ne $beforeOptions){throw 'Fixture DCS options did not restore.'}
     if(@(Get-ChildItem -LiteralPath (Join-Path $gameRoot 'bin') -Recurse -File).Count -ne 1){throw 'Fixture game mods were not removed.'}
     # The focus adapter only deploys with DLSS 5 (Foveated SR alone is stereo-only), so the tamper check needs the neural case.
@@ -145,6 +145,6 @@ $notes=Join-Path $installRoot 'user-notes.txt'
 if($LASTEXITCODE -ne 0){throw 'Application uninstall fixture failed.'}
 if(Test-Path -LiteralPath (Join-Path $installRoot 'DcsVrControl.exe')){throw 'Owned application executable was not removed.'}
 if([IO.File]::ReadAllText($notes) -ne 'Retain this unowned file.'){throw 'User file was changed.'}
-$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=48;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, restore originals','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
+$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=48;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
 $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureRoot 'result.json') -Encoding utf8
 Write-Output "PASS release fixture: $fixtureRoot"

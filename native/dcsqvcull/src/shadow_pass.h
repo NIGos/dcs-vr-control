@@ -113,8 +113,11 @@ void Install() {
   HMODULE gc = GetModuleHandleW(L"GraphicsCore.dll");
   if (!gc) return;
   auto base = reinterpret_cast<uint8_t*>(gc);
-  auto vtbl = reinterpret_cast<void**>(base + kVtableRva);
-  if (SlotOriginal(&vtbl[kExecSlot]) != base + kThunkRva) {
+  // Recorded RVAs, or where reloc.h re-found them in another build (0: not found).
+  const uint32_t vtRva = reloc::Rva(hooksig::GC_CascadeShadowPass_vtbl, kVtableRva);
+  const uint32_t thunkRva = reloc::Rva(hooksig::GC_CascadeShadowPass_execute, kThunkRva);
+  auto vtbl = reinterpret_cast<void**>(base + vtRva);
+  if (!vtRva || !thunkRva || SlotOriginal(&vtbl[kExecSlot]) != base + thunkRva) {
     Log("shadow pass: vtable does not match this GraphicsCore.dll build; skipped");
     return;
   }

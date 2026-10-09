@@ -2,7 +2,7 @@
 
 **Version 0.4.2-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
-> **Early beta.** DCS VR Control has been flown on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Restore originals**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
+> **Early beta.** DCS VR Control has been flown on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
 ![Overview with the last flight](screenshots/overview-last-flight.png)
 
@@ -17,7 +17,7 @@
 - [In flight: hotkeys and the diagnostic panel](#in-flight-hotkeys-and-the-diagnostic-panel)
 - [After the flight: the Last flight card](#after-the-flight-the-last-flight-card)
 - [Checks](#checks)
-- [Restore originals (Recovery)](#restore-originals-recovery)
+- [Back to stock DCS](#back-to-stock-dcs)
 - [Troubleshooting and FAQ](#troubleshooting-and-faq)
 - [Reporting a problem](#reporting-a-problem)
 - [Support](#support)
@@ -33,7 +33,7 @@ DCS VR Control prepares and starts DCS World in VR with a set of performance and
 | **Frame generation** | OFXR optical-flow frame generation: DCS renders half (or a third) of the headset refresh rate and generated frames fill the rest. |
 | **CPU Boost** | Gives DCS priority and its best CPU cores while it runs, keeps VR services and background apps off those cores, and an optional fix for a DCS terrain loop that wastes CPU. Plus three VRAM helpers. |
 
-You tick the features you want in the right panel, adjust them on their pages if you like, and press **Launch DCS**. The app writes the needed files into DCS (backing up the originals the first time), starts DCS with the right VR settings, and puts everything back when you press **Restore originals**.
+You tick the features you want in the right panel, adjust them on their pages if you like, and press **Launch DCS**. The app writes the needed files into DCS (backing up the originals the first time), starts DCS with the right VR settings, and puts everything back when you press **Back to stock DCS**.
 
 What it does **not** do: it does not change Windows settings, your GPU driver settings, your global OpenXR runtime or your DCS graphics settings (apart from a few listed `options.lua` values such as the frame limit, which it restores). It does not add NVIDIA DLSS Frame Generation to DCS; frame generation here is OFXR's optical flow.
 
@@ -86,7 +86,7 @@ Closing the wizard before **Launch DCS** writes nothing.
 - **Headset route** — **Pimax** (Pimax Play) or **Sboys** (SteamVR). The line below shows which one is running; the app warns you if your profile uses the other one.
 - **Features** — one row per feature: tick it on or off, read its current settings at a glance, click the row to open its page.
 - **Import / Save** — load or save a profile file.
-- **Launch DCS** — the one button you need. Under it: **Review files** (what Launch will write, read-only), **Apply without launching** and **Restore originals**.
+- **Launch DCS** — the one button you need. Under it: **Review files** (what Launch will write, read-only), **Apply without launching** and **Back to stock DCS**.
 
 Everything you change is kept as a draft across app restarts. **Reset to applied** (shown when the draft differs) brings back what is currently installed.
 
@@ -105,6 +105,7 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
   - If you change the values in Pimax Play, you don't need to do anything else: the next **Launch DCS** updates the focus area ("Pimax Play changed: focus updated to …").
   - With **This profile**, you set the values in the app, in the same Quick units as Pimax Play.
 - **Focus sharpening**, **edge blending**, **turbo mode** — fine-tuning. The focus area is round; edge blending is how wide its edge fades into the periphery (wider is softer, a little less fully sharp area). Turbo is off by default: in flight it caused a visible "old frames" effect when turning the head.
+- **Focus ahead of fast eye movements** and **Steady focus while looking** (both on, eye tracked only). With frame generation the focus area follows your eyes only on the frames DCS renders and reaches the headset 55–88 ms later, so after a quick glance your eye can land outside the sharp area for a frame or two. The first option makes the focus area reach ahead along a fast eye movement while it lasts, by about that latency (25 ms without frame generation, 55 ms in 2×, 85 ms in Auto and 3×). The second keeps the focus still while your eyes rest (movements under half a degree), so eye-tracker noise does not make its edge shimmer. Neither costs GPU time: the focus keeps its pixel count and is only briefly less dense while the eyes move. The Quad Views log has a `DCSVR gaze` line every 30 s with the saccades seen and how often each option acted.
 - **How bundled Quad Views reproduces this** (folded) shows the conversion and, once DCS has run, the focus size in pixels per eye.
 
 **Cost/benefit, measured on the test PC (Crystal Super, RTX 5090):** with Pimax Play's own Quad View values, bundled Quad Views ran at about **78 FPS** with working eye tracking, against about 37 FPS with the much larger old defaults. At the same Pimax percentages, bundled Quad Views draws a smaller focus than Pimax's own runtime does, so it is roughly three times cheaper. The bundled provider is limited to 90% of the view per axis.
@@ -162,9 +163,10 @@ CPU Boost is off by default. When on, a small helper starts with DCS and **undoe
 
 #### Flight helpers (VRAM)
 
-Three more options on the CPU Boost page, all off by default and usable without CPU Boost:
+Four more options on the CPU Boost page, all off by default and usable without CPU Boost:
 
 - **Free VRAM before flight** — closes the listed programs when DCS starts so their video memory goes to DCS (default list: NVIDIA Overlay, Edge, ChatGPT, Hue Sync, Razer Cortex/Synapse, Wallpaper Engine; Discord and OBS are deliberately not listed). Programs get a normal close request; they are ended after 5 s only if you allow it. **Reopen after the flight** starts them again when DCS exits. What Boost will do shows each program's VRAM now (approximate). Measured on the test PC: NVIDIA Overlay held about 1.4 GB.
+- **Pause the desktop Tobii eye tracker** — for a Tobii Eye Tracker 5 or 4C next to a Pimax Crystal. Its software (Tobii Experience) also takes hold of the headset's Tobii eye tracker, and Pimax eye tracking (and so the moving focus area of Quad Views) stops working. With this on, the desktop tracker's services (Tobii Experience and the Eye Tracker 5/4C runtime) are stopped while DCS runs and started again when DCS exits; the headset's own eye-tracking services are never touched. It needs administrator rights, so Windows asks (UAC) when DCS starts. What Boost will do lists the services it would pause.
 - **Small DCS window in VR** — sets the DCS desktop window to 1280×720 windowed (restored with the originals). The headset image is unchanged; the smaller desktop buffers save some VRAM and GPU time.
 - **Lower the monitor while flying** — switches your main monitor to a smaller mode (1920×1080 at 60 Hz suggested) for the flight only; the previous mode comes back when DCS exits, even after a crash (at the next start). Windows never saves the flight mode. HDR is left alone.
 
@@ -177,11 +179,13 @@ Three more options on the CPU Boost page, all off by default and usable without 
 - **Culling partition by real cost** (on) — the visible-object search is split into tasks by what each object actually costs to check, measured as DCS runs, so the tasks end together. Measured: **+2.75 % FPS**, p95 −4 %.
 - **Frame memory per thread** (on) — short-lived per-frame memory comes from one shared heap the model threads queue for; each thread gets its own blocks. Measured: **+1.5 % FPS**, culling 9 % faster.
 - **Task queue clock cache (camera motion)** (on, needs the streaming timer cache) — the frame-start drain of DCS's task queue reads the cached clock. It helps while the camera moves fast (render-thread drain 2.9 → 1.6 ms per frame in a fast flight) and changes nothing when static.
-- **Shadow caster instancing (exact)** (on) — identical objects casting shadows are drawn with one instanced draw per shadow cascade. The module compiles instanced versions of DCS's own shadow shader in the background, about 2.5 minutes after DCS starts (nothing is written to the DCS install); until then shadows are drawn as before. Shadow draws also skip the textures those shaders never read. Verified texel-identical; it turns itself off on any fault. Measured: **+2.8 % FPS**, and 2–4.5 % shorter frames while the head moves (p95 30.0 → 25.7 ms in slow head motion).
+- **Shadow caster instancing (exact)** (on) — identical objects casting shadows are drawn with one instanced draw per shadow cascade. The module compiles instanced versions of DCS's own shadow shader in the background, about 2.5 minutes after DCS starts (nothing is written to the DCS install); until then shadows are drawn as before. Shadow draws also skip the textures those shaders never read, and the grouping is planned off the render thread. Verified texel-identical; it turns itself off on any fault. Measured: **+2.8 % FPS**, **+1.9 %** more from planning in the background, and 2–4.5 % shorter frames while the head moves (p95 30.0 → 25.7 ms in slow head motion).
 - **Model data allocator (parallel)** (on) — the threads that prepare aircraft and object models share one allocator and wait for each other; the module gives each thread its own blocks. Measured: **+6 % FPS**, p95 −9 %.
 - **Texture streaming dedupe** (on) — repeated streaming requests for the same texture and size within a millisecond are skipped. Measured: **+2 % FPS**.
 - **Effect constant-buffer skip** and **Statistics counter without lock** (on) — a constant buffer set again although it is already set is skipped, and a statistics-only triangle counter no longer makes the model threads wait on each other. Measured together: **+3.6 % FPS**.
-- All together about **+23 % FPS**, p95 −18 %, 17 % less CPU and 39 % less culling time (static camera, a heavy external view), measured with the module's automatic A/B test (the in-flight switch off and on) on a CPU-bound VR airfield (Ryzen 7 9800X3D, RTX 5090, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first and stays off, with a warning on the page, if it does not recognise it.
+- **Multi-threaded shadows** (on) — DCS draws the shadow cascades on its render thread, one object at a time. The module records those draws on 8 worker threads and DCS replays them; the nearest cascade but one stays as DCS draws it. Verified texel-identical live. Measured: **+3 to +5 % FPS**, p95 −4 to −7 %; total CPU use rises 4 to 7 % because the work moves to other cores, and it uses about 30 MB more memory. It turns itself off, with a warning on the page, if DCS's code is not what it expects.
+- **Redundant state filter** (on) — DCS's renderer sets graphics state (shaders, buffers, textures, samplers) that is already set, about 228,000 times a frame on an airfield; the repeat is skipped where DCS makes the call. Verified identical live (362 frames, no mismatch). Measured: about **+0.5 to +1 % FPS** and **1.2 % less CPU**. It turns itself off after a DCS update until it is checked against the new build.
+- All together about **+30 % FPS** (+29.8 to +30.0 %, ±1.5 to 2.1; 39.5 → 51.4 FPS), frame time −23 %, p95 −20 to −23 %, 11 % less CPU (multi-threaded shadows move work to otherwise idle cores) and 30 % less culling time, measured with the module's automatic A/B test (the in-flight switch off and on, 24 alternating blocks, twice) at a busy VR airfield (Ryzen 7 9800X3D, RTX 5090, Pimax Crystal Super, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first; after a DCS update it looks for the code it patches by signature and checks the bytes it expects, and stays off, with a warning on the page, if it does not find them.
 - **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps** turns the sounds off). Applying a profile starts with them on again.
 - **Developer mode** (off; keep it off for normal flying and for testing a release) is for working on the module: when on, the page says so in Status in DCS, and DCS hot-reloads a payload DLL built elsewhere and takes every engine setting from a separate settings file (a `run_suite.flag` next to it starts the test suite). Logs and reports still go to `Saved Games\DCS\Scripts\DcsQvCull`.
 
@@ -189,7 +193,7 @@ Three more options on the CPU Boost page, all off by default and usable without 
 
 **Test suite:** in flight, in VR, with the headset on and awake, press **Run test suite** (or Ctrl+Alt+F11 in DCS). It measures each optimization off and on in alternating 5-second blocks for about 7 minutes and writes a report (**Open last report**). Keep your head still in a busy scene; blocks while the headset sleeps are thrown away. The module's developer keys are off; Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down stay reserved for it.
 
-Tested on DCS 2.9.30 in single player. Restore originals (or turning the option off and launching) removes the hook, the module and everything it wrote.
+Tested on DCS 2.9.30 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
 
 ## Launch DCS
 
@@ -206,7 +210,7 @@ Good to know:
 - **Always start DCS with Launch DCS.** A Steam or desktop shortcut does not pass the profile's VR settings to DCS.
 - **Steam edition: keep Steam running.** The app passes Steam's launch identifiers so DCS does not restart itself through Steam (which would lose the profile).
 - **Don't run DCS or the app as administrator.** The VR loader ignores private settings in elevated processes; the app refuses to launch in that case.
-- If another mod already has a `dxgi.dll` / `dxgi2.dll` in DCS's `bin` (ReShade, an overlay), it is backed up and replaced, and the status line says so. **Restore originals** brings it back.
+- If another mod already has a `dxgi.dll` / `dxgi2.dll` in DCS's `bin` (ReShade, an overlay), it is backed up and replaced, and the status line says so. **Back to stock DCS** brings it back.
 
 ### The DCS launcher option
 
@@ -256,11 +260,11 @@ The **Checks** page lists every finding once:
 
 **Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Export report** saves a diagnostic report (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
 
-## Restore originals (Recovery)
+## Back to stock DCS
 
-![Recovery with the original files](screenshots/recovery-original-files.png)
+![Stock DCS page with the original files](screenshots/recovery-original-files.png)
 
-The **Recovery** page has one card, *Original files*, with one button: **Restore originals**. It puts every file DCS VR Control ever changed back to what was there before:
+The **Stock DCS** page (last in the menu) has one card, *Original files*, with one button: **Back to stock DCS**. It puts every file DCS VR Control ever changed back to what was there before:
 
 - backups are written back,
 - files that did not exist before are removed,
@@ -275,7 +279,7 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 1. Make sure you started DCS with **Launch DCS** from the app, not from Steam or a shortcut.
 2. Open **Checks → Check this PC** and fix anything under *Must fix*. Look for **Other OpenXR layers** under *Check yourself*: other OpenXR tools (overlays, older Quad Views or eye-tracking layers) load above the profile's layers and can break it. Disable them for the test.
 3. Narrow it down: untick **Frame generation**, launch; then add features back one at a time (Quad Views → Frame generation → DLSS 5).
-4. If it still fails, **Restore originals** and [report it](#reporting-a-problem) with the logs.
+4. If it still fails, **Back to stock DCS** and [report it](#reporting-a-problem) with the logs.
 
 ### DCS doesn't start
 
@@ -302,19 +306,19 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 
 ### Multiplayer and Integrity Check
 
-**Not tested yet.** The prefetch fix and the DCS engine optimizations have only been tested in single-player, and the app adds files to DCS's `bin` folder (`dxgi.dll`, `dxgi2.dll`, Cheeky's files) and, with DCS Engine on, a hook in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Restore originals** before joining it, and please [report](#reporting-a-problem) what happened.
+**Not tested yet.** The prefetch fix and the DCS engine optimizations have only been tested in single-player, and the app adds files to DCS's `bin` folder (`dxgi.dll`, `dxgi2.dll`, Cheeky's files) and, with DCS Engine on, a hook in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
 
 ### How do I uninstall?
 
-1. Open the app and press **Restore originals** (Recovery) with DCS closed.
+1. Open the app and press **Back to stock DCS** (Stock DCS page) with DCS closed.
 2. Run `Uninstall.cmd` from the extracted release folder. It removes the application files after checking them; your profiles and backups stay.
-3. If you want everything gone, delete `%LOCALAPPDATA%\DcsVrControl` afterwards (only after Restore originals — it holds the backups).
+3. If you want everything gone, delete `%LOCALAPPDATA%\DcsVrControl` afterwards (only after Back to stock DCS — it holds the backups).
 
 The Sboys driver, if you installed it, is managed by its own tool.
 
 ### Does it change my DCS graphics settings?
 
-Only the `options.lua` values a feature needs — the frame limit, desktop VSync, the DCS launcher setting, the small window if you enable it — and only when they differ. **Review files** lists every change before you launch, and **Restore originals** puts them back. Everything else (DLSS quality, resolution, textures, shadows …) stays yours to set in DCS.
+Only the `options.lua` values a feature needs — the frame limit, desktop VSync, the DCS launcher setting, the small window if you enable it — and only when they differ. **Review files** lists every change before you launch, and **Back to stock DCS** puts them back. Everything else (DLSS quality, resolution, textures, shadows …) stays yours to set in DCS.
 
 ## Reporting a problem
 

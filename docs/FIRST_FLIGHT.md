@@ -7,7 +7,7 @@ Run **Guided setup** first. [SETUP.md](SETUP.md) covers prerequisites, the Pimax
 Start with the original Pimax runtime and your existing working headset setup. Confirm refresh rate, gaze calibration, and tracking. Choose a small repeatable mission with readable cockpit displays. Record the runtime, headset resolution, DCS settings, and CPU/GPU frame times.
 
 1. Capture the baseline with framegen and neural rendering off.
-2. Switching profiles needs no restore: Launch DCS writes the new profile over the applied one. Use Restore originals only to return DCS to its original files.
+2. Switching profiles needs no restore: Launch DCS writes the new profile over the applied one. Use Back to stock DCS only to return DCS to its original files.
 3. Test OFXR in stereo first, with native DLSS SR. Keep other interpolation mechanisms off for this initial comparison.
 4. Verify that synthetic frames reach both eyes. OFXR's submission FPS counter is insufficient evidence by itself. The DCS main menu submits no projection layers, so framegen and DLSS only engage in a 3D mission; check `generation_prepare` results in the OFXR flight log and `Available Layers: (3)` in dcs.log.
 5. Inspect fast head turns, HUD and MFD text, small distant contacts, clouds, and low-altitude scenery. Compare pacing and latency with the baseline.
@@ -20,6 +20,6 @@ Start with the original Pimax runtime and your existing working headset setup. C
 
 The full combined profile uses software Quad Views on both runtime routes. Disable competing Quad Views providers and follow the selected provider's Pimax setup requirements; the app reports detected layer conflicts during preview. Do not select native Pimax Quad Views for this Cheeky adapter. The Pimax driver/runtime itself remains the original one on that route.
 
-Use **Launch DCS with applied profile** for every manager-managed test. Keep the application and backup state directory available. Close DCS and use Restore originals before using a normal shortcut or repairing/updating game files.
+Use **Launch DCS with applied profile** for every manager-managed test. Keep the application and backup state directory available. Close DCS and use Back to stock DCS before using a normal shortcut or repairing/updating game files.
 
 Record three runs per configuration and compare median/p95 frame times. A higher FPS counter is useful only if both eyes show stable images with acceptable latency and readability. Run the best candidate for at least 30 minutes and test mission reload and recentering before considering it a usable preset.

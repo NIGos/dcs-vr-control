@@ -664,6 +664,10 @@ uint32_t PlanCore(void* const* begin, size_t n) {
     if (rc.reason == kOk && Slot(g_nullBind, 4096, rc.shader, false)) rc.reason = kNullBind;
     PtrSlot* os = Slot(g_byObj, kTable, rc.obj, true);
     if (!os) return 0;
+    // os->a = the latest position where a draw of this object executes so far
+    // (its own index, or its group leader's index when it is a member);
+    // os->b = that draw's group. Keeping every new draw of the object at or
+    // after it keeps each object's own draws in their original order.
     if (rc.reason != kOk) {
       os->a = static_cast<int32_t>(i);
       os->b = -1;
@@ -692,8 +696,8 @@ uint32_t PlanCore(void* const* begin, size_t n) {
       if (gr.epoch != epoch) {
         g_splitBarrier++;
         g = -1;
-      } else if (os->a > gr.first && os->b != g) {
-        g_splitObject++;
+      } else if (os->a > gr.first || (os->a == gr.first && os->b != g)) {
+        g_splitObject++;  // an earlier draw of this object executes after (or apart from) this group's draw
         g = -1;
       }
     }
@@ -708,8 +712,11 @@ uint32_t PlanCore(void* const* begin, size_t n) {
       ks->a = g;
     }
     rc.group = g;
-    os->a = static_cast<int32_t>(i);
-    os->b = g;
+    const int32_t exec = g_grp[g].first;  // where this draw executes (itself when it leads)
+    if (exec >= os->a) {
+      os->a = exec;
+      os->b = g;
+    }
   }
   // Roles and offsets.
   uint32_t cursor = 0, leaders = 0, skipped = 0, groups = 0;

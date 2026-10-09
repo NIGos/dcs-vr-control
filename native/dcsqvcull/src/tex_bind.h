@@ -152,9 +152,11 @@ bool Install(double tscHz) {
   if (g_orig) return true;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
   if (!base) return false;
-  auto** vtbl = reinterpret_cast<void**>(base + kVtableRva);
-  if (!allocslab::RttiIs(base, vtbl, ".?AVDX11Texture@RenderAPI@@") ||
-      SlotOriginal(&vtbl[kSlot]) != base + 0x49e90) {
+  const uint32_t vtRva = reloc::Rva(hooksig::DX_DX11Texture_vtbl, kVtableRva);  // 0: not in this build
+  auto** vtbl = reinterpret_cast<void**>(base + vtRva);
+  const uint32_t fnRva = reloc::Rva(hooksig::DX_DX11Texture_requestMip, 0x49e90);
+  if (!vtRva || !fnRva || !allocslab::RttiIs(base, vtbl, ".?AVDX11Texture@RenderAPI@@") ||
+      SlotOriginal(&vtbl[kSlot]) != base + fnRva) {
     Log("texture binds: DX11Texture vtable does not match this dx11backend.dll build; skipped");
     return false;
   }
@@ -244,9 +246,11 @@ bool Install() {
   if (g_orig) return true;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
   if (!base) return false;
-  auto** vtbl = reinterpret_cast<void**>(base + kVtableRva);
-  if (!allocslab::RttiIs(base, vtbl, ".?AUSConstantBuffer@D3DX11Effects@@") ||
-      SlotOriginal(&vtbl[kSlot]) != base + 0x67970) {
+  const uint32_t vtRva = reloc::Rva(hooksig::DX_SConstantBuffer_vtbl, kVtableRva);  // 0: not in this build
+  auto** vtbl = reinterpret_cast<void**>(base + vtRva);
+  const uint32_t fnRva = reloc::Rva(hooksig::DX_SConstantBuffer_SetConstantBuffer, 0x67970);
+  if (!vtRva || !fnRva || !allocslab::RttiIs(base, vtbl, ".?AUSConstantBuffer@D3DX11Effects@@") ||
+      SlotOriginal(&vtbl[kSlot]) != base + fnRva) {
     Log("constant buffer skip: FX vtable does not match this dx11backend.dll build; skipped");
     return false;
   }

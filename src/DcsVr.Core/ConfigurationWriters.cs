@@ -30,12 +30,12 @@ public static class ConfigurationWriters
         GazeHoldMs=400
         TransitionWidth=0.04
         NrEnabled={(p.NeuralRendering ? 1 : 0)}
-        NrFoveated={(p.UsesQuadFocus ? (p.UsesCentralNeuralArea ? 1 : 0) : 1)}
+        NrFoveated={(p.UsesQuadFocus ? (p.UsesCentralNeuralArea || p.UsesNeuralEdgeFade ? 1 : 0) : 1)}
         NrUseSrFoveation={(p.UsesQuadFocus ? 0 : 1)}
         NrWidth={Number(p.UsesQuadFocus ? NeuralArea(p) : CheekyRange(p.FoveaWidth))}
         NrHeight={Number(p.UsesQuadFocus ? NeuralArea(p) : CheekyRange(p.FoveaHeight))}
-        NrRoundness=0
-        NrTransitionWidth={Number(VrProfile.NeuralAreaFeather)}
+        NrRoundness={(p.UsesNeuralEdgeFade && p.QuadRoundFocus ? 1 : 0)}
+        NrTransitionWidth={Number(p.UsesNeuralEdgeFade ? p.NeuralEdgeFeather : VrProfile.NeuralAreaFeather)}
         NrProcessingOrder={(p.NeuralBeforeUpscaling ? 1 : 0)}
         NrWorkingScale={Number(p.NeuralWorkingScale)}
         NrIntensity={Number(p.NeuralIntensity)}
@@ -67,6 +67,7 @@ public static class ConfigurationWriters
         Beeps={(p.EngineBeeps ? 1 : 0)}
         LowPowerPacer=0
         LowPowerPacerTimeoutUs=10
+        SigScan=1
 
         [Timing]
         ShaderTimeCache={(p.EngineShaderTimeCache ? 1 : 0)}
@@ -100,6 +101,8 @@ public static class ConfigurationWriters
         [D3D]
         Meter=0
         Filter=0
+        SplitFilter={(p.EngineStateFilter ? 1 : 0)}
+        SplitFilterOps=0x4ff
 
         [Shadow]
         TightCasters=0
@@ -114,9 +117,17 @@ public static class ConfigurationWriters
         BigPageBytes=4194304
         ShadowInstancing={(p.EngineShadowInstancing ? 1 : 0)}
         ShadowBatching={(p.EngineShadowInstancing ? 1 : 0)}
+        ShadowPlanAsync={(p.EngineShadowInstancing ? 1 : 0)}
         ShadowTextureSkip={(p.EngineShadowInstancing ? 1 : 0)}
         GBufferBatching=0
         ParallelUpload=0
+        DirectUpload=0
+        ShadowRecorder={(p.EngineShadowRecorder ? 1 : 0)}
+        ShadowRecorderScope=0x30f
+        ShadowRecorderWaitUs=200
+        ShadowRecorderPriority=0
+        ShadowRecorderSplit=0x3
+        ShadowRecorderInstancing=1
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
@@ -168,6 +179,20 @@ public static class ConfigurationWriters
         GBufferInstVerify=0
         BenchGBufferInst=0
         BenchParallelUpload=0
+        BenchShadowPlanAsync=0
+        DirectUploadCount=0
+        DirectUploadVerify=0
+        BenchDirectUpload=0
+        SplitFilterVerify=0
+        ShadowRecVerify=0
+        ShadowRecVerifySec=5
+        BenchShadowRecorder=0
+        ShadowRecCount=0
+        BenchSplitFilter=0
+        JoinTailCount=0
+        SrvSpanCount=0
+        FxApplyCount=0
+        GBufferTexCount=0
         Terrain=0
         BenchTexDedupe=0
         BenchCbSkip=0
@@ -229,13 +254,21 @@ public static class ConfigurationWriters
         stereo_output_multiplier=1
         sharpen_focus_view={Number(p.QuadSharpening)}
         smoothen_focus_view_edges={Number(p.QuadEdgeBlend)}
-        focus_view_shape={(p.QuadRoundFocus ? 2 : 0)}
+        focus_view_shape={(p.QuadRoundFocus ? 2 : 8)}
+        dcsvr_sharpen_taper={(p.QuadSharpenTaper ? 1 : 0)}
+        dcsvr_periphery_sharpen={Number(p.QuadPeripheryContrast)}
         horizontal_fixed_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_fixed_section={Number(Math.Min(p.FoveaHeight, .9))}
         horizontal_focus_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_focus_section={Number(Math.Min(p.FoveaHeight, .9))}
         force_no_eye_tracking={(p.Gaze == GazeMode.Fixed ? 1 : 0)}
         turbo_mode={(p.QuadTurbo ? 1 : 0)}
+        dcsvr_saccade_widening={(p.QuadSaccadeLead && p.Gaze == GazeMode.EyeTracked ? 1 : 0)}
+        dcsvr_saccade_speed=120
+        dcsvr_saccade_lead_ms={p.QuadSaccadeLeadMs}
+        dcsvr_saccade_max_extend=0.35
+        dcsvr_saccade_hold_ms=40
+        dcsvr_gaze_deadzone={(p.QuadGazeStabilize && p.Gaze == GazeMode.EyeTracked ? "0.5" : "0")}
 
         """;
 

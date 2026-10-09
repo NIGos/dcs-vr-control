@@ -8,7 +8,7 @@ Open **Guided setup** in the right-hand panel:
 
 1. **Choose**: the headset route (Pimax Play or Sboys/SteamVR; the running route is preselected), the pipeline (DLSS 5 + framegen + Quad Views, Quad Views only, framegen only, or original) and, for pipelines with Quad Views, eye-tracked or fixed focus. Your current quality values are kept. Changing routes clears a runtime override that belonged to the previous route.
 2. **Check**: the app checks files, runtime architecture, package hashes, the neural DLL signature/version, Sboys registration, SteamVR add-on blocking and the gaze bridge. Problems are listed first; passed checks and file paths are folded away and open by themselves when a path is the problem. DLSS 5 needs your signed NVIDIA nvngx_dlssnr.dll (tested contract 310.8); the app does not download it. Nothing is written in this step.
-3. **Fly**: start the headset software and press **Launch DCS** here. It is the same button as in the right panel: the checked profile is written over whatever is applied (originals are backed up the first time a file is written), and DCS starts (DCS skips its own launcher window while a profile is applied) so DCS receives its private OpenXR environment. Keep Steam running for the Steam edition, and run neither DCS nor the app as administrator. The headset checks listed there need your eyes; they are never reported as automatic passes. **Restore originals** in Recovery puts the original files back at any time.
+3. **Fly**: start the headset software and press **Launch DCS** here. It is the same button as in the right panel: the checked profile is written over whatever is applied (originals are backed up the first time a file is written), and DCS starts (DCS skips its own launcher window while a profile is applied) so DCS receives its private OpenXR environment. Keep Steam running for the Steam edition, and run neither DCS nor the app as administrator. The headset checks listed there need your eyes; they are never reported as automatic passes. **Back to stock DCS** in Recovery puts the original files back at any time.
 
 Closing the wizard before **Launch DCS** writes nothing and leaves the editable profile and its quality values intact; **Keep as draft without launching** takes the choice into the editor without writing anything.
 
@@ -38,7 +38,7 @@ The manager chooses the OpenXR runtime for its DCS process; it does not activate
 
 ## Readiness and recovery
 
-Checks → **Run preflight** checks the current draft. **Export report** refreshes inventory and includes readiness plus the original files DCS VR Control changed. Recovery → **Restore originals** puts every one of them back in one step (`DcsVr.Cli.exe status` and `DcsVr.Cli.exe restore` do the same from a console). A fresh report is also available without opening the GUI:
+Checks → **Run preflight** checks the current draft. **Export report** refreshes inventory and includes readiness plus the original files DCS VR Control changed. Recovery → **Back to stock DCS** puts every one of them back in one step (`DcsVr.Cli.exe status` and `DcsVr.Cli.exe restore` do the same from a console). A fresh report is also available without opening the GUI:
 
 ```powershell
 ./DcsVr.Cli.exe readiness --profile profile.json --out readiness.json

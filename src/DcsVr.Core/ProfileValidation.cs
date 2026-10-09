@@ -43,6 +43,7 @@ public static class ProfileValidation
         Range("peripheral-scale", profile.PeripheralScale, .15, 1);
         Range("quad-focus-scale", profile.QuadFocusScale, .5, 2);
         Range("quad-sharpening", profile.QuadSharpening, 0, 1);
+        Range("quad-periphery-contrast", profile.QuadPeripheryContrast, 0, 1);
         Range("quad-edge-blend", profile.QuadEdgeBlend, 0, .5);
         Range("neural-scale", profile.NeuralWorkingScale, .1, 1);
         Range("neural-intensity", profile.NeuralIntensity, 0, 1);

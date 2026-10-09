@@ -51,7 +51,7 @@ internal static class WebVerification
 
     /// <summary>The documentation views (docs/screenshots) at 1320 × 920, 100 %: a new profile's default values with every
     /// feature checked on the Pimax route and Pimax Play running, then Launch DCS (offline: DCS is never started) for the
-    /// applied Overview and Recovery, then Restore originals. Written next to <paramref name="output"/> under the names
+    /// applied Overview and Recovery, then Back to stock DCS. Written next to <paramref name="output"/> under the names
     /// the documentation uses.</summary>
     private static async Task DocumentationViews(CoreWebView2 core, CoreWebView2Controller controller, ControlService service, string output, string? neural, Action<string> log)
     {
@@ -249,7 +249,7 @@ internal static class WebVerification
                 await core.ExecuteScriptAsync("document.getElementById('setupClose').click()");
             }
             // Launch DCS after Pimax Play's Quad View values changed: only the focus values are updated in place (same
-            // applied profile, new installed hash recorded), and Restore originals then completes.
+            // applied profile, new installed hash recorded), and Back to stock DCS then completes.
             async Task<string> Await(string script)
             {
                 await core.ExecuteScriptAsync("window.verifyStep='pending';Promise.resolve().then(()=>"+script+").then(()=>window.verifyStep='done',e=>window.verifyStep='error:'+e.message)");

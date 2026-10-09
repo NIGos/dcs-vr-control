@@ -2,7 +2,7 @@
 
 A free Windows app that sets up DCS World for VR on Pimax headsets and launches it in one click.
 
-Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame generation, a CPU boost — and press **Launch DCS**. The app puts the right files and settings in place, starts DCS with them, and can put everything back the way it was with **Restore originals**.
+Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame generation, a CPU boost — and press **Launch DCS**. The app puts the right files and settings in place, starts DCS with them, and can put everything back the way it was with **Back to stock DCS**.
 
 > **Early beta.** It has been flown on one PC so far (Pimax Crystal Super, RTX 5090, Windows 11, DCS 2.9 Steam, single player), so expect rough edges. It was built with an AI coding assistant. Bug reports are very welcome: see [Reporting a problem](docs/USER_GUIDE.md#reporting-a-problem).
 
@@ -10,9 +10,9 @@ Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame
   <img src="docs/screenshots/overview-last-flight.png" alt="Overview: launch status, the four features and a summary of the last flight" width="800">
 </p>
 
-| Quad Views, read from Pimax Play | Frame generation | Restore originals |
+| Quad Views, read from Pimax Play | Frame generation | Back to stock DCS |
 | --- | --- | --- |
-| ![Quad Views](docs/screenshots/quad-views-pimax-play.png) | ![Framegen](docs/screenshots/framegen-auto-2x-3x.png) | ![Recovery](docs/screenshots/recovery-original-files.png) |
+| ![Quad Views](docs/screenshots/quad-views-pimax-play.png) | ![Framegen](docs/screenshots/framegen-auto-2x-3x.png) | ![Back to stock DCS](docs/screenshots/recovery-original-files.png) |
 
 ## What it does
 
@@ -40,7 +40,7 @@ The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, 
 - **Single player only so far.** The app places a `dxgi.dll` loader (and, with the prefetch fix, `dxgi2.dll`) in DCS's `bin` folder. Multiplayer and server integrity checks haven't been tested.
 - **Frame generation adds latency**, more in 3× than in 2×. Head movement stays smooth; the mouse cursor moves at DCS's own frame rate.
 - **Start the app from the Start menu or Explorer**, not as administrator.
-- **Before updating or repairing DCS**, close it and use **Restore originals**.
+- **Before updating or repairing DCS**, close it and use **Back to stock DCS**.
 
 ## Credits and licences
 
@@ -70,7 +70,7 @@ Third-party changes are kept as reproducible patches: `scripts/patch-cheeky.py` 
 
 ### Original files and recovery
 
-The first time the app writes a path it backs up the original (or notes that there was none) under `%LOCALAPPDATA%\DcsVrControl\originals`. Later launches simply overwrite. **Restore originals** puts every path back: backups are written back, new files are removed, and in `options.lua` only the settings the app changed are restored. Only a running DCS blocks it.
+The first time the app writes a path it backs up the original (or notes that there was none) under `%LOCALAPPDATA%\DcsVrControl\originals`. Later launches simply overwrite. **Back to stock DCS** puts every path back: backups are written back, new files are removed, and in `options.lua` only the settings the app changed are restored. Only a running DCS blocks it.
 
 ### Build and test
 

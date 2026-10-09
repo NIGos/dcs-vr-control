@@ -38,6 +38,14 @@ Target g_targets[] = {
     {L"animator.dll", 0x93650, ".?AVCharacterInstanceGraphicsReflection@Animator@@"},
 };
 constexpr int kTargets = sizeof(g_targets) / sizeof(g_targets[0]);
+// reloc.h ids per target: the vtable, its slot 1 and slot 2 targets.
+const hooksig::Id kTargetIds[kTargets][3] = {
+    {hooksig::VIS_GraphSceneObject_vtbl, hooksig::VIS_GraphSceneObject_collectRenderables,
+     hooksig::VIS_GraphSceneObject_partitionWeight},
+    {hooksig::ANIM_CharacterInstanceGraphicsReflection_vtbl,
+     hooksig::ANIM_CharacterInstanceGraphicsReflection_collectRenderables,
+     hooksig::ANIM_CharacterInstanceGraphicsReflection_partitionWeight},
+};
 Fn g_orig = nullptr;  // non-null once installed
 void** g_slot = nullptr;
 std::atomic<bool>& g_on = g_costWeightsOn;
@@ -148,8 +156,13 @@ bool Install() {
     Target& t = g_targets[i];
     auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(t.module));
     if (!base) continue;
-    auto** vtbl = reinterpret_cast<void**>(base + t.vtRva);
-    if (!allocslab::RttiIs(base, vtbl, t.rtti)) {
+    // Recorded RVA, or where reloc.h re-found it in another build (0: not found);
+    // there the slot targets must also be the recorded functions.
+    const uint32_t vtRva = reloc::Rva(kTargetIds[i][0], t.vtRva);
+    auto** vtbl = reinterpret_cast<void**>(base + vtRva);
+    if (!vtRva || !allocslab::RttiIs(base, vtbl, t.rtti) ||
+        !reloc::SlotIs(kTargetIds[i][1], base, SlotOriginal(&vtbl[1])) ||
+        !reloc::SlotIs(kTargetIds[i][2], base, SlotOriginal(&vtbl[2]))) {
       Log("partition weights: %s vtable does not match this build; skipped", t.rtti);
       continue;
     }
