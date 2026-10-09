@@ -11,6 +11,8 @@ const pages = [
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
   ['recovery','Stock DCS','Put DCS back exactly as it was before DCS VR Control: every file and setting it changed, in one step.','Undo every change','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
 ];
+/** Pages of the VR features, hidden in Optimizations only (no VR). */
+const VR_PAGES = ['foveation','dlss','framegen'];
 // The feature checklist in the right panel; each feature has its own page.
 const FEATURES = [
   ['quad','Quad Views','foveated rendering','foveation'],
@@ -20,6 +22,8 @@ const FEATURES = [
 ];
 let state, profile, dcs = '', options = '', page = 'overview', busy = false, plan = null, draftChanged = false;
 let sequence = 0, toastTimer, searchResults = [], lastProvider = 'QuadViewsFoveated', lastFrameGen = 'Nvidia', savedDraftJson = null, draftTimer, flight = null;
+// The VR features as they were when No VR was chosen, restored when a headset route is chosen again.
+let vrFeatures = null;
 const pending = new Map(), fields = [], invalid = new Set();
 const clone = value => JSON.parse(JSON.stringify(value));
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -111,7 +115,8 @@ const stereoCheeky = p => Boolean(p.neuralRendering || p.foveatedDlss) && p.quad
 const CHEEKY_MIN = .2;
 /** Settles combinations that cannot run, so a draft is always deployable as far as the features go. */
 function resolveFeatures(p) {
-  // Foveated Super Resolution is for stereo only (same rule as ProfileValidation.ResolveFeatures).
+  // Optimizations only (another headset or a monitor): none of the VR features (same rule as ProfileValidation.ResolveFeatures).
+  if (p.desktop) { p.quadViews = 'None'; p.neuralRendering = false; p.foveatedDlss = false; p.frameGen = 'Off'; p.pauseTobiiDesktop = false; }  // Foveated Super Resolution is for stereo only (same rule as ProfileValidation.ResolveFeatures).
   if (p.quadViews !== 'None') p.foveatedDlss = false;
   const cheeky = p.neuralRendering || p.foveatedDlss;
   // Pimax native Quad Views exists only in Pimax Play, and it cannot host the focus adapter that DLSS 5 needs.
@@ -130,7 +135,7 @@ function setFeature(p, key, on) {
 }
 /** Profile name and id follow the route and the features, e.g. "Pimax · Quad Views + DLSS 5 + Frame generation + CPU Boost". */
 function deriveIdentity(p) {
-  const route = p.runtime === 'SboysSteamVr' ? 'Sboys' : 'Pimax', parts = [];
+  if (p.desktop) return {id:'desktop-optimizations',name:'Optimizations only'};  const route = p.runtime === 'SboysSteamVr' ? 'Sboys' : 'Pimax', parts = [];
   if (p.quadViews === 'PimaxNative') parts.push(['nativeqv','Pimax Quad Views']); else if (p.quadViews !== 'None') parts.push(['qv','Quad Views']);
   if (p.neuralRendering) parts.push(['dlss5','DLSS 5']); else if (foveatedSr(p)) parts.push(['fdlss','Foveated DLSS']);
   if (p.frameGen !== 'Off') parts.push(['fg','Frame generation']);
@@ -140,7 +145,8 @@ function deriveIdentity(p) {
 /** A copy of a profile with the route, focus movement and features chosen (used by the checklist and guided setup). */
 function withFeatures(source, {route, features, gaze}) {
   const p = clone(source);
-  if (route && route !== p.runtime) { p.runtime = route; p.runtimeManifestPath = null; }
+  if (route === 'Desktop') p.desktop = true;
+  else if (route) { p.desktop = false; if (route !== p.runtime) { p.runtime = route; p.runtimeManifestPath = null; } }
   if (gaze) p.gaze = gaze;
   for (const [key] of FEATURES) setFeature(p, key, Boolean(features[key]));
   return Object.assign(p, deriveIdentity(p));
@@ -199,6 +205,8 @@ function renderFeatures() {
   const on = featureState(profile), notes = featureNotes(profile);
   FEATURES.forEach(([key]) => {
     const item = $('feature-'+key); item.classList.toggle('on',on[key]);
+    // With another headset or a monitor only CPU Boost (with its flight helpers) is a feature here.
+    item.hidden = Boolean(profile.desktop) && key !== 'boost';
     const box = $('featureCheck-'+key); box.checked = on[key]; box.disabled = busy;
     const summary = featureSummary(key,profile); $('featureSummary-'+key).textContent = summary; $('featureSummary-'+key).title = summary;
     $('featureNotes-'+key).innerHTML = notes[key].map(noteHtml).join('');
@@ -474,7 +482,7 @@ function buildFields() {
   c = card('boostControls','CPU Boost','Starts with Launch DCS and is undone when DCS exits. Nothing changes before that.');
   field(c,'cpuBoost','CPU Boost','Applies the options below to the next DCS launch.','toggle');
   field(c,'boostDcsPriority','DCS priority','Above normal suits most setups. High can starve audio, input and headset services when DCS uses every core.','select',[['Normal','Normal'],['AboveNormal','Above normal · recommended'],['High','High']],boost);
-  field(c,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax or SteamVR services off the cores DCS uses for its main and render threads.','toggle',null,boost);
+  field(c,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax or SteamVR services off the cores DCS uses for its main and render threads.','toggle',null,p => boost(p) && !p.desktop);
   field(c,'boostMoveBackgroundApps','Move background apps','Moves the apps below to the slowest cores at below-normal priority while DCS runs.','toggle',null,boost);
   field(c,'boostBackgroundApps','Background apps','Process names, one per line, without .exe.','list',null,p => boost(p) && p.boostMoveBackgroundApps);
   field(c,'boostPrefetch','Prefetch fix','Stops DCS terrain threads from prefetching the same memory over and over. Measured: about 1.7 cores freed, 3–5% more FPS when CPU-bound, no change when GPU-bound. Tested in single player. Observe only counts the calls.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],boost);
@@ -486,9 +494,9 @@ function buildFields() {
   field(c,'freeVramApps','Programs to close','Process names, one per line, without .exe; * and ? are wildcards. Voice chat (Discord) and recording (OBS) are left out on purpose.','list',null,vram);
   field(c,'freeVramReopen','Reopen after the flight','Starts the closed programs again, as your user, when DCS exits.','toggle',null,vram);
   field(c,'freeVramForce','End programs that do not close','After 5 seconds, ends a program that ignored the close request. Unsaved work in it is lost. Off: it keeps running.','toggle',null,vram);
-  field(c,'pauseTobiiDesktop','Pause the desktop Tobii eye tracker','For a Tobii Eye Tracker 5 or 4C next to a Pimax Crystal: its software (Tobii Experience) also grabs the eye tracker of the headset, and Pimax eye tracking stops working. While DCS runs, the services of the desktop tracker are stopped; they start again when DCS exits. The eye tracking of the headset is never touched. Asks for administrator rights (UAC) when DCS starts.','toggle');
-  field(c,'smallDcsWindow','Small DCS window in VR','Sets the DCS window on the monitor to 1280×720, windowed (options.lua; your values return with Back to stock DCS). The headset image is unaffected: DCS and Windows just keep smaller desktop buffers, which saves some VRAM and GPU time.','toggle');
-  field(c,'lowerMonitor','Lower the monitor while flying','Switches the main monitor to the mode below when DCS starts and back when DCS exits. Never saved as a Windows setting: a restart also brings your mode back. HDR is left as it is.','toggle');
+  field(c,'pauseTobiiDesktop','Pause the desktop Tobii eye tracker','For a Tobii Eye Tracker 5 or 4C next to a Pimax Crystal: its software (Tobii Experience) also grabs the eye tracker of the headset, and Pimax eye tracking stops working. While DCS runs, the services of the desktop tracker are stopped; they start again when DCS exits. The eye tracking of the headset is never touched. Asks for administrator rights (UAC) when DCS starts.','toggle',null,p => !p.desktop);
+  field(c,'smallDcsWindow','Small DCS window in VR','Sets the DCS window on the monitor to 1280×720, windowed (options.lua; your values return with Back to stock DCS). The headset image is unaffected: DCS and Windows just keep smaller desktop buffers, which saves some VRAM and GPU time.','toggle',null,p => !p.desktop);
+  field(c,'lowerMonitor','Lower the monitor while flying','Switches the main monitor to the mode below when DCS starts and back when DCS exits. Never saved as a Windows setting: a restart also brings your mode back. HDR is left as it is.','toggle',null,p => !p.desktop);
   field(c,'flightDisplayMode','Monitor mode in flight','Modes your main monitor reports. 1920×1080 at 60 Hz suits most setups.','select',[[displayModeKey(profileDefaults),displayModeLabel(profileDefaults)]],p => p.lowerMonitor,'',null,
     {prop:'flightDisplayMode',get:p => displayModeKey(p),set:(p,v) => { const [w,h,hz] = v.split(/[x@]/).map(Number); p.flightDisplayWidth = w; p.flightDisplayHeight = h; p.flightDisplayRefresh = hz; }});
   // Engine Optimizations page: the DcsQvCull module, installed in Saved Games with the profile.
@@ -718,12 +726,16 @@ function updateControls() {
   renderDashboard();
   const live = state?.activeRoute?.route;
   document.querySelectorAll('#routeSwitch [data-route]').forEach(button => {
-    const selected = button.dataset.route === profile.runtime;
+    const selected = profile.desktop ? button.dataset.route === 'Desktop' : button.dataset.route === profile.runtime;
     button.classList.toggle('selected', selected); button.setAttribute('aria-checked', String(selected));
     button.classList.toggle('live', live === button.dataset.route); button.disabled = busy;
   });
-  $('routeLive').textContent = state?.activeRoute?.summary || '';
-  $('routeLive').classList.toggle('mismatch', Boolean(live) && live !== profile.runtime);
+  $('routeLive').textContent = profile.desktop ? 'Another headset or a monitor: DCS runs as you set it up, with Engine Optimizations, CPU Boost and Free VRAM.' : state?.activeRoute?.summary || '';
+  $('routeLive').classList.toggle('mismatch', !profile.desktop && Boolean(live) && live !== profile.runtime);
+  // The VR feature pages are hidden without a headset; an open one goes back to the overview.
+  VR_PAGES.forEach(id => $('nav-'+id).hidden = Boolean(profile.desktop));
+  $('panelDevice').textContent = profile.desktop ? 'Any headset, or the monitor' : 'Pimax Crystal Super · Micro OLED';
+  if (profile.desktop && VR_PAGES.includes(page)) navigate('overview');
   // The Sboys driver is only needed on the Sboys route.
   $('sboysCard').hidden = profile.runtime !== 'SboysSteamVr';
   renderCadence();
@@ -978,9 +990,20 @@ document.addEventListener('click', e => {
 document.addEventListener('click', e => { if (e.target.closest('#rereadPimax') && !busy) rereadPimax(true); });
 document.addEventListener('click', e => {
   const route = e.target.closest('#routeSwitch [data-route]');
-  if (!route || busy || route.dataset.route === profile.runtime) return;
-  // Switching route keeps every feature and setting; Pimax native Quad Views becomes the bundled provider on Sboys.
-  profile.runtime = route.dataset.route; profile.runtimeManifestPath = null;
+  if (!route || busy) return;
+  const target = route.dataset.route;
+  if (target === 'Desktop') {
+    if (profile.desktop) return;
+    // Optimizations only: the VR features are kept aside and come back with the Pimax or Sboys route.
+    vrFeatures = {quadViews:profile.quadViews,neuralRendering:profile.neuralRendering,foveatedDlss:profile.foveatedDlss,frameGen:profile.frameGen,pauseTobiiDesktop:profile.pauseTobiiDesktop};
+    profile.desktop = true;
+  } else {
+    if (!profile.desktop && target === profile.runtime) return;
+    if (profile.desktop) { profile.desktop = false; if (vrFeatures) Object.assign(profile, vrFeatures); vrFeatures = null; }
+    // Switching route keeps every feature and setting; Pimax native Quad Views becomes the bundled provider on Sboys.
+    if (target !== profile.runtime) { profile.runtime = target; profile.runtimeManifestPath = null; }
+  }
+  resolveFeatures(profile); Object.assign(profile, deriveIdentity(profile));
   change(); boostChanged();
 });
 let detectedProfile = null;

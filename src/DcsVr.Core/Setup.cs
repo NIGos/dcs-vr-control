@@ -49,7 +49,7 @@ public static class Readiness
         void Add(string id, CheckState state, string title, string detail, string? guide = null) => checks.Add(new(id, state, title, detail, guide));
         foreach (var issue in ProfileValidation.Validate(profile, inventory))
             Add(issue.Code, issue.Severity switch { IssueSeverity.Error => CheckState.Error, IssueSeverity.Info => CheckState.Manual, _ => CheckState.Warning }, "Profile compatibility", issue.Message);
-        if (Enum.IsDefined(profile.FpsLimit)) checks.AddRange(FramePacing.Checks(profile, inventory));
+        if (Enum.IsDefined(profile.FpsLimit) && !profile.Desktop) checks.AddRange(FramePacing.Checks(profile, inventory));
         Add("game", File.Exists(inventory.DcsExecutable) && File.Exists(inventory.OptionsPath) ? CheckState.Pass : CheckState.Error,
             "DCS and Saved Games", "Select DCS.exe and the options.lua for the Saved Games profile you will use.", "paths");
         Add("closed", inventory.DcsRunning ? CheckState.Error : CheckState.Pass, "DCS is closed", "Close DCS before applying or restoring files.");
@@ -65,7 +65,7 @@ public static class Readiness
         if (profile.UsesCheeky && inventory.DcsExecutable is { } dcsExe && Path.GetDirectoryName(dcsExe) is { } bin && !LaunchSafety.CanWrite(bin)) writable.Add(bin);
         Add("write-access", writable.Count == 0 ? CheckState.Pass : CheckState.Error, "Write access to game folders",
             writable.Count == 0 ? "The profile can write its files as the current user." : "These folders are not writable as the current user: " + string.Join("; ", writable) + ". Grant your account Modify permission on them (common for installs under Program Files). Do not run the app as administrator: elevated DCS ignores the profile layers.");
-        var running = ActiveRouteProvider();
+        var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
         if (running.Route is { } activeRoute && activeRoute != profile.Runtime)
             Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + (profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the profile route, or close the other runtime, before launching.");
         else if (running.Route is not null) Add("route-mismatch", CheckState.Pass, "Headset route", running.Summary);
@@ -76,10 +76,10 @@ public static class Readiness
         else if (profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown)
             Add("dcs-launcher", CheckState.Warning, "DCS launcher", LaunchSafety.LauncherUnknownMessage);
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
-        if (foreign.Length > 0)
+        if (foreign.Length > 0 && !profile.Desktop)
             Add("implicit-layers", CheckState.Warning, "Other OpenXR layers", "These implicit layers load above the profile layers and can intercept views, gaze or frames: " + string.Join(", ", foreign) + ". Disable them (for example with OpenXR API Layers GUI) for the first tests.");
         var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
-        try
+        if (!profile.Desktop) try
         {
             using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException("Runtime manifest was not detected.")));
             var relative = json.RootElement.GetProperty("runtime").GetProperty("library_path").GetString();
@@ -98,7 +98,7 @@ public static class Readiness
         if (profile.FrameGen == FrameGeneration.Nvidia)
             Add("optical-flow-driver", NativeBinary.IsX64(Path.Combine(Environment.SystemDirectory, "nvofapi64.dll")) ? CheckState.Pass : CheckState.Error,
                 "NVIDIA optical-flow driver", "OFXR requires the NVIDIA optical-flow driver. This is separate from NVIDIA DLSS Frame Generation.", "nvidia");
-        if (profile.Runtime == RuntimeKind.SboysSteamVr)
+        if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
         {
             var driver = inventory.Drivers.FirstOrDefault(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase));
             Add("sboys-registration", driver is { LibraryExists: true, Blocked: false } ? CheckState.Pass : CheckState.Error,
@@ -121,9 +121,13 @@ public static class Readiness
                     gaze is null ? "Dynamic OpenXR gaze needs a bridge such as OpenXR-Eye-Trackers. Its archived Crystal guide does not establish Crystal Super compatibility. Validate its gaze test app; choose Fixed focus explicitly if unavailable." : "Enabled bridge detected. The profile loads it explicitly below Quad Views. Valid eye data and Crystal Super support still need a headset test.", "gaze");
             }
         }
+        if (profile.Desktop)
+            Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, with another headset or on the monitor, using your own VR settings and OpenXR runtime. The app adds only Engine Optimizations, CPU Boost and Free VRAM as selected.");
+        else
         Add("headset", CheckState.Manual, "Headset and tracking", "Connect the Crystal Super Micro OLED. Verify image, IPD, tracking, and resolution in the selected provider before launching DCS.", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
         if (profile.Gaze == GazeMode.EyeTracked && profile.QuadViews != QuadProvider.None)
             Add("gaze-live", CheckState.Manual, "Eye calibration and focus motion", "Enable and calibrate eye tracking in Pimax. Verify focus follows both eyes in the headset; a detected layer does not prove gaze is valid.", "gaze");
+        if (!profile.Desktop)
         Add("pipeline-live", CheckState.Manual, "DCS stereo and image quality", "Test baseline → framegen → foveation → combined. Confirm both eyes, cockpit text, HUD, head motion, latency and focus boundaries.");
         try
         {

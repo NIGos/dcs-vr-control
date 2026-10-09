@@ -29,6 +29,11 @@ public sealed record VrProfile
     public string Id { get; init; } = "pimax-baseline";
     public string Name { get; init; } = "Pimax · original configuration";
     public RuntimeKind Runtime { get; init; } = RuntimeKind.Pimax;
+    /// <summary>Optimizations only, for another headset or a monitor: DCS runs exactly as the user set it up (VR or not,
+    /// with the OpenXR runtime and layers of the PC), and the app adds only the features that are not VR (Engine
+    /// Optimizations, CPU Boost with the prefetch fix, Free VRAM before flight): no runtime, layer or VR option of its
+    /// own. <see cref="ProfileValidation.ResolveFeatures"/> turns the VR features off.</summary>
+    public bool Desktop { get; init; }
     public QuadProvider QuadViews { get; init; } = QuadProvider.PimaxNative;
     public FrameGeneration FrameGen { get; init; }
     /// <summary>Output frames per rendered frame: 2 (one generated frame), 3 (OFXR fork triple_frame_gen: two generated
@@ -260,7 +265,11 @@ public sealed record VrProfile
     /// <summary>The prefetch fix is deployed (bin\dxgi2.dll) and enabled through the launch environment.</summary>
     public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>
-    public bool UsesBoostHelper => CpuBoost || FreeVram || LowerMonitor || PauseTobiiDesktop;
+    public bool UsesBoostHelper => CpuBoost || FreeVram || UsesLowerMonitor || PauseTobiiDesktop;
+    /// <summary>The monitor mode and the small DCS window are for the desktop mirror of a VR flight, never with
+    /// <see cref="Desktop"/>, where they would shrink the game itself.</summary>
+    public bool UsesLowerMonitor => LowerMonitor && !Desktop;
+    public bool UsesSmallDcsWindow => SmallDcsWindow && !Desktop;
     /// <summary>The boost helper starts elevated: CPU Boost's administrator option, or pausing the desktop Tobii services.</summary>
     public bool BoostHelperElevated => (CpuBoost && BoostElevated) || PauseTobiiDesktop;
     /// <summary>Foveated Super Resolution actually runs: only in stereo, without Quad Views.</summary>

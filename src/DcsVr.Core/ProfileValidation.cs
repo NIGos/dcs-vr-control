@@ -18,6 +18,12 @@ public static class ProfileValidation
     /// Views, Cheeky always runs through the focus adapter.</summary>
     public static VrProfile ResolveFeatures(VrProfile profile)
     {
+        // Optimizations only (no headset): none of the VR features. The helpers made for the desktop mirror of a VR
+        // session (small DCS window, lower monitor mode, moving the VR runtime) keep their setting for the next VR
+        // flight but do not run (UsesSmallDcsWindow, UsesLowerMonitor, BoostRuntime).
+        if (profile.Desktop)
+            profile = profile with { QuadViews = QuadProvider.None, NeuralRendering = false, FoveatedDlss = false, FrameGen = FrameGeneration.Off,
+                PauseTobiiDesktop = false };
         if (profile.FoveatedDlss && profile.QuadViews != QuadProvider.None) profile = profile with { FoveatedDlss = false };
         if (profile.QuadViews == QuadProvider.PimaxNative && (profile.Runtime == RuntimeKind.SboysSteamVr || profile.UsesCheeky))
             profile = profile with { QuadViews = QuadProvider.QuadViewsFoveated };

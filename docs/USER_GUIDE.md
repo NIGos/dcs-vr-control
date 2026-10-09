@@ -195,6 +195,15 @@ Four more options on the CPU Boost page, all off by default and usable without C
 
 Tested on DCS 2.9.30 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
 
+### Optimizations only (any other headset, or no VR)
+
+Another headset (Quest, Varjo, Reverb, Bigscreen…) or no headset at all? Pick **Optimizations only** under Pimax and Sboys in the right panel (also in Guided setup). DCS then runs exactly as you set it up, in VR or on the monitor, with your own VR settings, OpenXR runtime and layers (for example your own Quad Views or OpenXR Toolkit). The app adds only what is not VR:
+
+- **Engine Optimizations** (its own page) and **CPU Boost** with the prefetch fix;
+- **Free VRAM before flight**.
+
+Quad Views, DLSS 5 and frame generation are hidden, and so are the helpers made for the Pimax setup (small DCS window, lower monitor mode, desktop Tobii pause). The app does not touch DCS's VR, frame limit or vertical sync options and sets no OpenXR variable. Choosing Pimax or Sboys again brings your VR features back as they were. The engine optimizations were measured with a Pimax Crystal Super; they change DCS's own engine, not the headset path, so they apply the same way with another headset or a monitor, but the gain there has not been measured yet.
+
 ## Launch DCS
 
 Press **Launch DCS** (right panel, Overview or the last step of Guided setup). With DCS closed, it:

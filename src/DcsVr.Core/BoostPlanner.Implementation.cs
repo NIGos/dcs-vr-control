@@ -115,9 +115,11 @@ public static partial class BoostPlanner
             notes.Add($"No CPU core ranking available ({topology.Description}). Only DCS priority is applied; no process is moved between cores.");
 
         // VR runtime services.
-        if (profile.Runtime == RuntimeKind.SboysSteamVr)
+        if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
             notes.Add("SteamVR route: the OpenXR compositor (vrcompositor) and vrserver are left untouched. Confining them has not been shown to be safe and can stall presentation.");
-        if (!profile.BoostMoveVrRuntime)
+        if (profile.Desktop)
+            notes.Add("Optimizations only: no VR runtime runs, so none is moved.");
+        else if (!profile.BoostMoveVrRuntime)
             notes.Add("VR runtime confinement is turned off in this profile.");
         else if (canMove)
             foreach (var pattern in VrRuntimeServices(profile))

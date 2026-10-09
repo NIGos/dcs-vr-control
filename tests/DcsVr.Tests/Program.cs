@@ -669,6 +669,31 @@ Test("options.lua is changed only where the pipeline needs a different value", (
     var changes = planner.Build(stereo, new() { DcsExecutable = exe, OptionsPath = off, PimaxRuntime = runtime }, Path.Combine(root, "minimal-lua/managed2")).Files.Single(f => f.Path == off).LuaChanges!;
     Require(changes.Select(c => c.Path).SequenceEqual(["VR.enable"])); // eye gaze and other options are never touched
 });
+Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the user has them, and adds only the optimizations", () =>
+{
+    var exe = Make("desktop/bin/DCS.exe", "fixture");
+    var options = Make("desktop/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"enable\"] = true,\n\t},\n\t[\"graphics\"] = {\n\t\t[\"maxFPS\"] = 144,\n\t\t[\"width\"] = 2560,\n\t\t[\"height\"] = 1440,\n\t\t[\"fullScreen\"] = true,\n\t},\n}\n");
+    var loaderDir = Path.GetDirectoryName(Make("desktop/components/cheeky-focus/dxgi.dll", "loader"))!; var fix = Make("desktop/components/boost/prefetch_fix.dll", "fix");
+    // No OpenXR runtime on this PC at all.
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options };
+    var vr = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, FrameGen = FrameGeneration.Nvidia, CpuBoost = true, BoostPrefetch = PrefetchFix.Skip,
+        SmallDcsWindow = true, LowerMonitor = true, PauseTobiiDesktop = true, FpsLimit = FpsLimitMode.MatchRefresh, DisableDcsVSync = true };
+    var desktop = ProfileValidation.ResolveFeatures(vr with { Desktop = true });
+    Require(desktop.QuadViews == QuadProvider.None && !desktop.NeuralRendering && desktop.FrameGen == FrameGeneration.Off && !desktop.UsesCheeky && !desktop.PauseTobiiDesktop, "VR features off");
+    Require(desktop.SmallDcsWindow && desktop.LowerMonitor && !desktop.UsesSmallDcsWindow && !desktop.UsesLowerMonitor && desktop.UsesBoostHelper && !desktop.BoostHelperElevated, "VR helpers kept for later but not run");
+    var planner = new DeploymentPlanner(new(null, null, null, QuadFocusDirectory: loaderDir, PrefetchFixDll: fix));
+    var plan = planner.Build(desktop, inventory, Path.Combine(root, "desktop/managed"));
+    // No OpenXR variable at all: the PC's own runtime and layers (another headset, its own Quad Views) stay in charge.
+    Require(plan.LaunchEnvironment.Keys.All(k => !k.StartsWith("XR", StringComparison.OrdinalIgnoreCase) && !k.StartsWith("DISABLE_", StringComparison.OrdinalIgnoreCase)) && plan.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "skip", string.Join(",", plan.LaunchEnvironment.Keys));
+    // options.lua is not touched: VR on or off, frame limit, window and vertical sync stay the user's.
+    Require(plan.Files.All(f => f.Path != options));
+    Require(plan.Files.Any(f => f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase)) && plan.Files.All(f => !f.Path.Contains("quadviews", StringComparison.OrdinalIgnoreCase) && !f.Path.Contains("ofxr", StringComparison.OrdinalIgnoreCase)));
+    // The readiness checks never ask for a runtime or a headset.
+    Require(!ProfileValidation.Validate(desktop, inventory).Any(i => i.Severity == IssueSeverity.Error));
+    // A VR profile on the same PC still needs its runtime.
+    try { planner.Build(ProfileValidation.ResolveFeatures(vr with { NeuralRendering = false }), inventory, Path.Combine(root, "desktop/managed-vr")); Require(false, "VR without a runtime must be refused"); }
+    catch (InvalidDataException e) { Require(e.Message.Contains("OpenXR runtime")); }
+});
 Test("Profile launches skip the DCS launcher, whose restart loses the profile process", () =>
 {
     var exe = Make("nolauncher/bin/DCS.exe", "fixture"); var options = Make("nolauncher/options.lua", "options = {\n\t[\"miscellaneous\"] = {\n\t\t[\"launcher\"] = true,\n\t},\n\t[\"graphics\"] = {\n\t},\n\t[\"VR\"] = {\n\t},\n}\n");

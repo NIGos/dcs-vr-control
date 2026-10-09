@@ -414,7 +414,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         var applied = originals.State == "applied" ? service.ReadAppliedProfile() : null;
         var activeRoute = ActiveRoute();
         var issues = ProfileValidation.Validate(service.ResolveNeuralRuntime(_profile), CurrentInventory).ToList();
-        if (activeRoute.Route is { } running && running != _profile.Runtime)
+        if (!_profile.Desktop && activeRoute.Route is { } running && running != _profile.Runtime)
             issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + (_profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the route or use Detect my setup before applying."));
         if (FoveaFact(_profile) is { } fact) issues.Add(fact);
         var launcherBlocked = LaunchSafety.LauncherRestartBlocked;

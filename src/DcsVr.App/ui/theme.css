@@ -131,6 +131,8 @@ button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!importa
 .control-panel select{width:100%}
 .panel-profile{font:600 13px "Segoe UI",Interface,sans-serif;color:var(--soft);margin:10px 0 0;text-transform:none;letter-spacing:0}
 .route-switch{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+/* Optimizations only (any other headset or the monitor): a full-width choice under the two headset routes. */
+.route-switch button[data-route="Desktop"]{grid-column:1 / -1}
 .route-switch button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:44px;border:1.5px solid #d8d8d8;border-radius:999px;background:transparent;color:var(--text);font:700 14px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase;cursor:pointer;transition:background .14s,color .14s,border-color .14s}
 .route-switch button:hover:not(:disabled){background:#ffffff12}
 .route-switch button.selected{background:#fff;color:#1b1b1b;border-color:#fff}

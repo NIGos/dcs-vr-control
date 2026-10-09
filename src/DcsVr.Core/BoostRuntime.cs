@@ -180,8 +180,8 @@ public sealed class BoostRuntime
 
         try
         {
-            Log($"Boost helper started (PID {Environment.ProcessId}). CPU Boost {(_profile.CpuBoost ? "on" : "off")}, Free VRAM {(_profile.FreeVram ? "on" : "off")}, desktop Tobii pause {(_profile.PauseTobiiDesktop ? "on" : "off")}, elevated {FreeVram.IsElevated()}, monitor mode {(_profile.LowerMonitor ? FlightDisplay.Target(_profile).ToString() : "off")}. DCS hint PID {(_dcsPid?.ToString() ?? "none")}, executable {_dcsExecutable ?? "any"}, log {_dcsLog ?? "auto"}.");
-            if (_profile.LowerMonitor) ApplyDisplay();
+            Log($"Boost helper started (PID {Environment.ProcessId}). CPU Boost {(_profile.CpuBoost ? "on" : "off")}, Free VRAM {(_profile.FreeVram ? "on" : "off")}, desktop Tobii pause {(_profile.PauseTobiiDesktop ? "on" : "off")}, elevated {FreeVram.IsElevated()}, monitor mode {(_profile.UsesLowerMonitor ? FlightDisplay.Target(_profile).ToString() : "off")}. DCS hint PID {(_dcsPid?.ToString() ?? "none")}, executable {_dcsExecutable ?? "any"}, log {_dcsLog ?? "auto"}.");
+            if (_profile.UsesLowerMonitor) ApplyDisplay();
             // Before DCS creates its OpenXR session, so the headset's eye tracker is free when Quad Views asks for gaze.
             ResumeLeftoverTobii();
             if (_profile.PauseTobiiDesktop) PauseTobii();
@@ -322,7 +322,7 @@ public sealed class BoostRuntime
     private void ApplyToOthers(int dcsPid)
     {
         if (!_topology.HasRanking) return;
-        var moveVr = _profile.BoostMoveVrRuntime && _vrMask != 0;
+        var moveVr = _profile.BoostMoveVrRuntime && !_profile.Desktop && _vrMask != 0;
         var moveBackground = _profile.BoostMoveBackgroundApps && _bgMask != 0;
         if (!moveVr && !moveBackground) return;
         var vrPatterns = moveVr ? BoostPlanner.VrRuntimeServices(_profile) : [];

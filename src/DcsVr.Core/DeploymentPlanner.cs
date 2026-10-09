@@ -42,18 +42,23 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var layerNames = new List<string>();
         var dependencies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var runtime = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
-        if (runtime is null || !File.Exists(runtime)) throw new InvalidDataException("OpenXR runtime manifest unavailable.");
-        using (var document = JsonDocument.Parse(File.ReadAllText(runtime)))
+        // Optimizations only: DCS uses whatever runtime the PC has (another headset) or none (a monitor); the app sets
+        // no OpenXR variable at all, so none is required or pinned.
+        if (!profile.Desktop)
         {
-            var library = document.RootElement.GetProperty("runtime").GetProperty("library_path").GetString()
-                ?? throw new InvalidDataException("Runtime manifest is missing its library.");
-            var runtimeLibrary = Path.GetFullPath(library, Path.GetDirectoryName(Path.GetFullPath(runtime))!);
-            if (!File.Exists(runtimeLibrary)) throw new InvalidDataException("The OpenXR runtime library does not exist.");
-            dependencies[runtimeLibrary] = Hashing.FileSha256(runtimeLibrary);
+            var runtime = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
+            if (runtime is null || !File.Exists(runtime)) throw new InvalidDataException("OpenXR runtime manifest unavailable.");
+            using (var document = JsonDocument.Parse(File.ReadAllText(runtime)))
+            {
+                var library = document.RootElement.GetProperty("runtime").GetProperty("library_path").GetString()
+                    ?? throw new InvalidDataException("Runtime manifest is missing its library.");
+                var runtimeLibrary = Path.GetFullPath(library, Path.GetDirectoryName(Path.GetFullPath(runtime))!);
+                if (!File.Exists(runtimeLibrary)) throw new InvalidDataException("The OpenXR runtime library does not exist.");
+                dependencies[runtimeLibrary] = Hashing.FileSha256(runtimeLibrary);
+            }
+            dependencies[Path.GetFullPath(runtime)] = Hashing.FileSha256(runtime);
+            environment["XR_RUNTIME_JSON"] = Path.GetFullPath(runtime);
         }
-        dependencies[Path.GetFullPath(runtime)] = Hashing.FileSha256(runtime);
-        environment["XR_RUNTIME_JSON"] = Path.GetFullPath(runtime);
         environment["DCSVR_QUAD_FOCUS"] = profile.UsesQuadFocus ? "1" : "0";
         environment["DCSVR_NR_HOTKEY"] = profile.NeuralRendering ? NeuralHotkeys.Environment(profile.NeuralToggleKey) : "0:0";
         // The diagnostic panel is drawn by OFXR, so it exists only when framegen puts OFXR in the chain.
@@ -100,14 +105,16 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             catch (InvalidDataException) { same = false; }
             if (!same) optionChanges[path] = value;
         }
-        Require("VR.enable", true);
+        // Optimizations only leaves DCS's VR setting as the user has it (another headset, or the monitor).
+        if (!profile.Desktop) Require("VR.enable", true);
         // DCS asks for quad views only with this option on; stereo Cheeky needs it off, otherwise it is left alone.
         if (profile.QuadViews != QuadProvider.None) Require("VR.openxr_quadView", true);
         else if (profile.UsesCheeky && current.Get("VR", "openxr_quadView") is not null) Require("VR.openxr_quadView", false);
         // Cheeky and DLSS 5 work on DCS's DLSS Super Resolution.
         if (profile.UsesCheeky) Require("graphics.Upscaling", "DLSS");
-        if (FramePacing.RequestedCap(profile) is { } fpsCap) optionChanges["graphics.maxFPS"] = fpsCap;
-        if (profile.DisableDcsVSync) optionChanges["graphics.sync"] = false;
+        // Frame pacing is set for the headset; on a monitor DCS keeps the user's own frame cap and vertical sync.
+        if (!profile.Desktop && FramePacing.RequestedCap(profile) is { } fpsCap) optionChanges["graphics.maxFPS"] = fpsCap;
+        if (!profile.Desktop && profile.DisableDcsVSync) optionChanges["graphics.sync"] = false;
         // The DCS launcher restarts DCS.exe --restarted when Play is pressed, breaking away from any job object; inside a
         // job that forbids breakaway Windows refuses it (error 5, see LaunchSafety.CurrentJob). By default DCS goes
         // straight into the game; KeepDcsLauncher leaves the launcher alone (the restarted DCS inherits the profile
@@ -116,7 +123,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // Small DCS window in VR: the desktop mirror becomes a 1280×720 window. The headset image is rendered at the
         // headset's own resolution either way; DCS and Windows only keep smaller desktop buffers. The aspect follows the
         // window when DCS stores one. Owned keys like every setting above: Back to stock DCS puts the user's values back.
-        if (profile.SmallDcsWindow && current.Get("graphics") is not null)
+        if (profile.UsesSmallDcsWindow && current.Get("graphics") is not null)
         {
             Require("graphics.width", VrProfile.SmallWindowWidth);
             Require("graphics.height", VrProfile.SmallWindowHeight);
@@ -213,7 +220,8 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             layerNames.Add("XR_APILAYER_MBUCCHIA_quad_views_foveated");
             environment["DISABLE_XR_APILAYER_MBUCCHIA_quad_views_foveated"] = "1";
         }
-        else environment["DISABLE_XR_APILAYER_MBUCCHIA_quad_views_foveated"] = "1";
+        // Optimizations only keeps the user's own OpenXR layers (for example their own Quad Views) as they are.
+        else if (!profile.Desktop) environment["DISABLE_XR_APILAYER_MBUCCHIA_quad_views_foveated"] = "1";
 
         if (profile.FrameGen != FrameGeneration.Off)
         {
@@ -229,7 +237,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             AddText(PathPolicy.UnderRoot(layersRoot, "ofxr.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_XRFrameBridge_diagnostic", dll, forkDll is null ? 116 : 401, "DCS VR Control · OFXR Bridge"), "Profile OFXR manifest");
             layerNames.Add("XR_APILAYER_XRFrameBridge_diagnostic");
         }
-        environment["XRFG_DISABLE_OFXR_BRIDGE"] = "1";
+        if (!profile.Desktop) environment["XRFG_DISABLE_OFXR_BRIDGE"] = "1";
 
         // The loader places implicit layers above every explicit one. An implicit gaze bridge would therefore sit
         // above Quad Views and Cheeky, and their eye-gaze calls would never reach it. Disable the implicit
@@ -255,7 +263,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             environment["XR_API_LAYER_PATH"] = layersRoot;
             environment["XR_ENABLE_API_LAYERS"] = string.Join(';', layerNames);
         }
-        else { environment["XR_API_LAYER_PATH"] = ""; environment["XR_ENABLE_API_LAYERS"] = ""; }
+        else if (!profile.Desktop) { environment["XR_API_LAYER_PATH"] = ""; environment["XR_ENABLE_API_LAYERS"] = ""; }
         AddText(PathPolicy.UnderRoot(profileRoot, "profile.json"), JsonData.Serialize(savedProfile ?? profile), "Reproducible profile");
         if (appliedFovea is not null) AddText(PathPolicy.UnderRoot(profileRoot, AppliedFovea.FileName), JsonData.Serialize(appliedFovea), "Focus area values read from Pimax Play");
         AddText(PathPolicy.UnderRoot(profileRoot, "launch.json"), JsonData.Serialize(new LaunchConfiguration(exe, environment, dependencies, File.Exists(autoexec) ? [] : [autoexec])), "Profile launch environment");

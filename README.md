@@ -21,6 +21,7 @@ Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame
 - **Frame generation (OFXR):** Auto picks 2× when DCS can hold 45 FPS and 3× when it can't.
 - **CPU Boost (optional):** gives DCS priority and its fastest cores, and includes a fix for a DCS terrain loop that wastes CPU time.
 - **Engine Optimizations (optional):** a module DCS loads from Saved Games that removes CPU work from its render and model threads without changing the image (about 23 % more FPS when CPU-bound, measured).
+- **Optimizations only (any other headset, or no VR):** choose **Optimizations only** and DCS runs as you set it up (any headset, or the monitor) with only the optimizations: Engine Optimizations, CPU Boost, Free VRAM.
 - **VRAM helpers (optional):** close memory-hungry apps before the flight, use a small DCS window on the monitor, lower the monitor's mode while you fly.
 - **In-headset panel:** FPS, frame-generation mode, DLSS state and, if you want, VRAM use.
 - **Last flight summary** on the Overview after each session.
