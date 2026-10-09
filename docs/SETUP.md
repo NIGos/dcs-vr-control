@@ -14,7 +14,7 @@ Closing the wizard before **Launch DCS** writes nothing and leaves the editable 
 
 ## Pimax Play route
 
-Install Pimax Play from its official distribution and verify the headset works there. The original runtime should be detected as PiOpenXR_64.json. Use Pimax Play OpenXR for Crystal Super; the older third-party PimaxXR runtime does not support this headset. The wizard's combined stage chooses our bundled software Quad Views compositor. Native Pimax quad views and this Cheeky focus adapter cannot be combined. Provider-specific settings must be checked in Pimax before the headset session; the tool does not silently change them.
+Install Pimax Play from its official distribution and verify the headset works there. The original runtime should be detected as PiOpenXR_64.json. Use Pimax Play OpenXR for Crystal Super; the older third-party PimaxXR runtime does not support this headset. The wizard's combined stage chooses our bundled software Quad Views compositor. Leave Quad Views **on** in Pimax Play (with eye tracking): that is the tested setup. The bundled Quad Views takes DCS's quad views over from Pimax's own, so DCS only ever sees the bundled one, and the app reads your Pimax Play Quad View values. Only the provider choice in the app matters: select Bundled, not Pimax native, for DLSS 5. (Pimax native as the provider cannot host the DLSS 5 focus adapter.) Provider-specific settings must be checked in Pimax before the headset session; the tool does not silently change them.
 
 For eye-tracked focus, enable and calibrate eye tracking in Pimax and verify that the focus region actually follows both eyes. Fixed focus is an explicit alternative and retains the configured image-quality values.
 

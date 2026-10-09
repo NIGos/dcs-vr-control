@@ -96,7 +96,7 @@ Everything you change is kept as a draft across app restarts. **Reset to applied
 
 ![Quad Views with Pimax Play's Quick values](screenshots/quad-views-pimax-play.png)
 
-The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one that works with DLSS 5 and frame generation. **Pimax native** Quad Views (Pimax route only) is also offered, but it cannot be combined with DLSS 5.
+The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one that works with DLSS 5 and frame generation. **Pimax native** Quad Views (Pimax route only) is also offered as the provider, but it cannot be combined with DLSS 5. Leave Quad Views **on** in Pimax Play (with eye tracking): that is the tested setup. The bundled Quad Views takes DCS's quad views over from Pimax's own, so DCS only ever sees the bundled one, and the app reads your Pimax Play Quad View values. Only the provider choice in the app matters: select Bundled, not Pimax native, for DLSS 5.
 
 - **Focus movement** — *Eye tracked* (needs working eye tracking in Pimax Play, or a gaze bridge on Sboys) or *Fixed (centred)*.
 - **Focus area source** — *From Pimax Play's settings* (default) or *This profile*.

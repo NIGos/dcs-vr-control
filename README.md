@@ -16,7 +16,7 @@ Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame
 
 ## What it does
 
-- **Quad Views (foveated rendering):** sharp where you look, lighter in the periphery, eye-tracked. It can use the focus area you already set in Pimax Play, shown with the same values Pimax Play shows.
+- **Quad Views (foveated rendering):** sharp where you look, lighter in the periphery, eye-tracked. It can use the focus area you already set in Pimax Play, shown with the same values Pimax Play shows. Keep Quad Views on in Pimax Play: the bundled Quad Views takes over from it for DCS.
 - **DLSS 5 (DLSS-NR neural rendering)** on the focus area only, optionally just its central part to save GPU time, with an in-flight on/off key to compare.
 - **Frame generation (OFXR):** Auto picks 2× when DCS can hold 45 FPS and 3× when it can't.
 - **CPU Boost (optional):** gives DCS priority and its fastest cores, and includes a fix for a DCS terrain loop that wastes CPU time.

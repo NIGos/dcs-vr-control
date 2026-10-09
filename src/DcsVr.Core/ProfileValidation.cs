@@ -71,7 +71,7 @@ public static class ProfileValidation
         if (profile.UsesQuadFocus)
             issues.Add(new("quad-focus", IssueSeverity.Info, "DLSS 5 runs on the two Quad Views focus views through the focus adapter, on DCS's own DLSS; the periphery keeps DCS's own image."));
         if (profile.Runtime == RuntimeKind.Pimax && profile.QuadViews == QuadProvider.QuadViewsFoveated)
-            issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views replaces the Pimax runtime's own Quad Views for DCS." + (PimaxFovea.UsesPimaxPlay(profile)
+            issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views replaces the Pimax runtime's own Quad Views for DCS; keep Quad Views on in Pimax Play (the tested setup)." + (PimaxFovea.UsesPimaxPlay(profile)
                 ? "" : " Its focus area comes from this profile; Pimax Play's Quad View settings do not apply.")));
         if (!Enum.IsDefined(profile.FoveaSource)) Error("fovea-source", "Select Pimax Play or this profile as the focus area source.");
         if (profile.CpuBoost || profile.FreeVram)
