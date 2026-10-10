@@ -5,7 +5,9 @@ param(
     [switch]$InstallPrerequisites
 )
 $ErrorActionPreference = 'Stop'
-$payloadRoot = Split-Path -Parent $PSScriptRoot
+# This script is files\scripts\installer.ps1; the release (with release-manifest.json) is the folder above files\.
+$filesRoot = Split-Path -Parent $PSScriptRoot
+$payloadRoot = Split-Path -Parent $filesRoot
 $command = switch ($Action) { 'Install' {'app-install'} 'Uninstall' {'app-uninstall'} 'Verify' {'app-verify'} }
 $installRoot = [IO.Path]::GetFullPath($Destination).TrimEnd('\','/')
 function Get-WebViewVersion {
@@ -37,7 +39,7 @@ $vcFile = Join-Path $env:SystemRoot 'System32/vcruntime140.dll'
 $vcVersion = if (Test-Path -LiteralPath $vcFile) { [Version](Get-Item -LiteralPath $vcFile).VersionInfo.FileVersion } else { [Version]'0.0' }
 $needsCpp = $missingCpp.Count -gt 0 -or $vcVersion -lt [Version]'14.50'
 if ($Action -eq 'Install') {
-    & (Join-Path $payloadRoot 'DcsVr.Cli.exe') app-verify --source $payloadRoot
+    & (Join-Path $filesRoot 'DcsVr.Cli.exe') app-verify --source $payloadRoot
     if ($LASTEXITCODE -ne 0) { throw 'Package integrity failed. Prerequisite installation was not attempted.' }
 }
 if ($Action -eq 'Install' -and $InstallPrerequisites) {
@@ -45,8 +47,8 @@ if ($Action -eq 'Install' -and $InstallPrerequisites) {
     if ($needsCpp) { Install-MicrosoftPrerequisite 'VisualCpp-x64' 'https://aka.ms/vc14/vc_redist.x64.exe' '/install /passive /norestart' }
 }
 Write-Output $(if (Get-WebViewVersion) { 'WebView2 Runtime detected.' } else { 'WebView2 Runtime missing. Install the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ before opening the GUI.' })
-if ($needsCpp -and -not $InstallPrerequisites) { Write-Output 'Visual C++ x64 runtime 14.50 or newer is required. Run Install.cmd to obtain official prerequisites.' }
-& (Join-Path $payloadRoot 'DcsVr.Cli.exe') $command --source $payloadRoot --destination $installRoot
+if ($needsCpp -and -not $InstallPrerequisites) { Write-Output 'Visual C++ x64 runtime 14.50 or newer is required. Run Install DCS Control.cmd to obtain official prerequisites.' }
+& (Join-Path $filesRoot 'DcsVr.Cli.exe') $command --source $payloadRoot --destination $installRoot
 if ($LASTEXITCODE -ne 0) { throw 'Application deployment failed. Review the error above; recovery backups are retained.' }
 if ($NoShortcut -or $Action -eq 'Verify') { exit 0 }
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'DCS Control.lnk'
@@ -62,7 +64,7 @@ if ($Action -eq 'Install') {
     # one. Only that app's own files go (its uninstaller checks each one); your DCS backups and profiles are kept.
     $earlierRoot = Join-Path $env:LOCALAPPDATA 'Programs/DcsVrControl'
     if ($installRoot -ne [IO.Path]::GetFullPath($earlierRoot).TrimEnd('\','/') -and (Test-Path -LiteralPath (Join-Path $earlierRoot 'installation.json'))) {
-        & (Join-Path $payloadRoot 'DcsVr.Cli.exe') app-uninstall --destination $earlierRoot
+        & (Join-Path $filesRoot 'DcsVr.Cli.exe') app-uninstall --destination $earlierRoot
         if ($LASTEXITCODE -eq 0) { Write-Output "Removed the earlier DCS VR Control installation from $earlierRoot." } else { Write-Output "The earlier DCS VR Control installation in $earlierRoot was left in place; remove it from there if you no longer need it." }
     }
     $earlierShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'DCS VR Control.lnk'

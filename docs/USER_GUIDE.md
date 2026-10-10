@@ -49,24 +49,28 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Requirements
 
-- **Windows 11, 64-bit.** Run as a normal user — not as administrator.
+- **Windows 10 or 11, 64-bit** (tested on Windows 11; Windows 10 is supported by everything the app uses but has not been flown yet). Run as a normal user — not as administrator.
 - **For Engine Optimizations and CPU Boost:** any GPU and headset, or none. The items below are for the VR features.
 - **NVIDIA RTX graphics card** for DLSS 5 and for NVIDIA optical-flow frame generation. (The Framegen page also offers FidelityFX, which works on any GPU, but the tested setup is NVIDIA.) Development and testing: RTX 5090.
 - **Pimax headset** (tested: Crystal Super Micro OLED) with either
   - **Pimax Play** (the original Pimax OpenXR runtime), or
   - **SteamVR with the Sboys driver** (CustomHeadsetOpenVR 1.3.0; for SLAM tracking it needs Pimax EVO).
 - **DCS World 2.9**, Steam edition or standalone.
-- **Microsoft Edge WebView2 Runtime** (already on most Windows 11 PCs) and the **Microsoft Visual C++ x64 runtime 14.50 or newer**. `Install.cmd` checks both and installs them from Microsoft if they are missing.
+- **Microsoft Edge WebView2 Runtime** (already on most Windows 10 and 11 PCs) and the **Microsoft Visual C++ x64 runtime 14.50 or newer**. `Install DCS Control.cmd` checks both and installs them from Microsoft if they are missing.
 - For DLSS 5: your own signed NVIDIA **`nvngx_dlssnr.dll`, version 310.8** (see [DLSS 5](#dlss-5)). It is not included and the app does not download it.
 
 ## Install
 
 Download `DcsControl-0.5.0-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
 
-- **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
-- **Install it:** double-click `Install.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsControl`, adds **DCS Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
+The folder contains only three things: **`DcsControl.exe`** (the app), **`Install DCS Control.cmd`** and a **`files`** folder with everything else (keep it next to `DcsControl.exe`), plus a short `README.txt`. The folder can be anywhere: Desktop, Downloads, another drive. The app keeps its own data (backups, profiles) in `%LOCALAPPDATA%`, so moving the folder loses nothing.
 
-If you had **DCS VR Control** installed (the app's name before 0.5.0), `Install.cmd` replaces it and its Start menu entry; your backups and profiles stay where they are and Back to stock DCS keeps working.
+**How the app finds DCS:** the standalone version from Windows' list of installed programs ("DCS World", also OpenBeta), the Steam version from your Steam libraries, and your settings from `Saved Games\DCS` (or `DCS.openbeta`). If it finds nothing, or you have more than one install, pick `DCS.exe` and `options.lua` on the **Game & headset** page.
+
+- **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
+- **Install it:** double-click `Install DCS Control.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsControl`, adds **DCS Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
+
+If you had **DCS VR Control** installed (the app's name before 0.5.0), `Install DCS Control.cmd` replaces it and its Start menu entry; your backups and profiles stay where they are and Back to stock DCS keeps working.
 
 Installing the app does not touch DCS or your VR software. Nothing is written into DCS until you press **Launch DCS** (or **Apply without launching**).
 
@@ -185,7 +189,9 @@ Four more options on the CPU Boost page, all off by default and usable without C
 
 ### Engine Optimizations (CPU)
 
-**Engine Optimizations** is its own page, off by default. When on, Launch DCS installs a small module (DcsQvCull) that DCS loads itself through a Lua hook in `Saved Games\DCS\Scripts\Hooks`; nothing in the DCS install folder changes. It removes CPU work from DCS's render thread without changing what is drawn:
+![Engine Optimizations page](screenshots/engine-optimizations.png)
+
+**Engine Optimizations** is its own page, off by default, and it is for every pilot, on a monitor or with any headset. Once applied it stays on every time DCS starts, also from Steam or a desktop shortcut, until you turn it off or use Back to stock DCS. When on, Launch DCS installs a small module (DcsQvCull) that DCS loads itself through a Lua hook in `Saved Games\DCS\Scripts\Hooks`; nothing in the DCS install folder changes. It removes CPU work from DCS's render thread without changing what is drawn:
 
 - **Streaming timer cache** (on) — DCS reads a high-resolution clock on every texture bind, tens of thousands of times a frame, only to timestamp texture-streaming use. The module serves it from a value refreshed every millisecond, far finer than streaming needs; nothing you see changes. Measured: **+5 to +6 % FPS**.
 - **Culling partition boost** (on) — DCS splits the search for visible objects into 12 uneven tasks and waits for the slowest. The module splits the same work into 16; the same objects are found. Measured: **+2 % FPS**, p95 frame time −3 %.
@@ -334,7 +340,7 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 ### How do I uninstall?
 
 1. Open the app and press **Back to stock DCS** (Stock DCS page) with DCS closed.
-2. Run `Uninstall.cmd` from the extracted release folder. It removes the application files after checking them; your profiles and backups stay.
+2. Run `files\Uninstall.cmd` from the installed (or extracted) folder. It removes the application files after checking them; your profiles and backups stay.
 3. If you want everything gone, delete `%LOCALAPPDATA%\DcsControl` (or `%LOCALAPPDATA%\DcsVrControl` if you used the app before 0.5.0) afterwards (only after Back to stock DCS — it holds the backups).
 
 The Sboys driver, if you installed it, is managed by its own tool.

@@ -1,6 +1,8 @@
 # 0.5.0 preview
 
-**DCS VR Control is now DCS Control.** It is no longer only for VR: the CPU optimizations are for every pilot, on a monitor or with any headset. The app is `DcsControl.exe`, installed under `%LOCALAPPDATA%\Programs\DcsControl`; `Install.cmd` replaces an earlier DCS VR Control install and its Start menu entry. An existing state folder (`%LOCALAPPDATA%\DcsVrControl`, with the record of original files and the applied profile) keeps being used, so Back to stock DCS keeps working; new installs use `%LOCALAPPDATA%\DcsControl`. The repository moved to github.com/NIGos/dcs-control (the old address redirects).
+**DCS VR Control is now DCS Control.** It is no longer only for VR: the CPU optimizations are for every pilot, on a monitor or with any headset. The app is `DcsControl.exe`, installed under `%LOCALAPPDATA%\Programs\DcsControl`; `Install DCS Control.cmd` replaces an earlier DCS VR Control install and its Start menu entry. An existing state folder (`%LOCALAPPDATA%\DcsVrControl`, with the record of original files and the applied profile) keeps being used, so Back to stock DCS keeps working; new installs use `%LOCALAPPDATA%\DcsControl`. The repository moved to github.com/NIGos/dcs-control (the old address redirects).
+
+**A tidier download**: the release folder now holds only `DcsControl.exe`, `Install DCS Control.cmd`, `README.txt` and a `files` folder with everything else; `DcsControl.exe` is a small launcher that starts the app in `files`. It runs from any folder.
 
 **Engine Optimizations first**: the right panel and the Overview list Engine Optimizations and CPU Boost first, then the VR features. Engine Optimizations is now a feature row of its own, and "How you fly" (Pimax, Sboys, Optimizations only) replaces "Headset route".
 

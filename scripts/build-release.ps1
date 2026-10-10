@@ -19,15 +19,20 @@ if (Test-Path -LiteralPath $releaseRoot) {
     Remove-Item -LiteralPath $resolvedRelease -Recurse -Force
 }
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+$payloadRoot = Join-Path $releaseRoot 'files'
+New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
+# The launcher at the top of the release folder (starts files\DcsControl.exe); the interface render below uses it too.
+$launcher = & (Join-Path $PSScriptRoot 'build-launcher.ps1') | Select-Object -Last 1
+Copy-Item -LiteralPath $launcher -Destination (Join-Path $releaseRoot 'DcsControl.exe') -Force
 foreach ($project in @('src/DcsVr.App','src/DcsVr.Cli')) {
-    $publishOptions = @('-c','Release','-r','win-x64','--self-contained','true','-o',$releaseRoot,'-p:DebugType=None','-p:DebugSymbols=false','--nologo')
+    $publishOptions = @('-c','Release','-r','win-x64','--self-contained','true','-o',$payloadRoot,'-p:DebugType=None','-p:DebugSymbols=false','--nologo')
     if ($NoRestore) { $publishOptions += '--no-restore' }
     & $dotnet publish (Join-Path $workspaceRoot $project) @publishOptions
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
 }
-foreach ($dir in @('packages','components/quadviews','components/cheeky-focus/CheekyFoveatedDLSS','licenses','scripts','profiles','docs')) { New-Item -ItemType Directory -Path (Join-Path $releaseRoot $dir) -Force | Out-Null }
+foreach ($dir in @('packages','components/quadviews','components/cheeky-focus/CheekyFoveatedDLSS','licenses','scripts','profiles','docs')) { New-Item -ItemType Directory -Path (Join-Path $payloadRoot $dir) -Force | Out-Null }
 foreach ($filename in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll')) {
-    $target = Join-Path $releaseRoot "components/cheeky-focus/$filename"
+    $target = Join-Path $payloadRoot "components/cheeky-focus/$filename"
     $source = if ($filename -eq 'dxgi.dll') { Join-Path $workspaceRoot ".cache/packages/cheeky/$filename" } else { Join-Path $workspaceRoot "artifacts/native/cheeky/bin/Release/$filename" }
     Copy-Item -LiteralPath $source -Destination $target -Force
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
@@ -41,55 +46,55 @@ try {
     foreach ($entryName in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll')) {
         $entry = $cheekyZip.Entries | Where-Object { $_.FullName.Replace('\','/') -eq $entryName } | Select-Object -First 1
         if (-not $entry) { throw "Cheeky archive is missing $entryName." }
-        $target = Join-Path $releaseRoot "components/cheeky/$entryName"
+        $target = Join-Path $payloadRoot "components/cheeky/$entryName"
         New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
         (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
     }
 } finally { $cheekyZip.Dispose() }
 foreach ($archive in @('OFXR-Bridge-v0.2.1-V116.zip')) {
-    Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/packages/$archive") -Destination (Join-Path $releaseRoot 'packages') -Force
+    Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/packages/$archive") -Destination (Join-Path $payloadRoot 'packages') -Force
 }
 # OFXR layer built from the djules75 fork 0.2.9.1 (scripts/build-ofxr-djules75.ps1): the DCS-compatible build, used for every framegen profile.
-New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'components/ofxr') -Force | Out-Null
-$deferredOfxr = Join-Path $releaseRoot 'components/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
+New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/ofxr') -Force | Out-Null
+$deferredOfxr = Join-Path $payloadRoot 'components/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll') -Destination $deferredOfxr -Force
 (Get-FileHash -LiteralPath $deferredOfxr -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($deferredOfxr + '.sha256') -Encoding ascii
 # CPU Boost prefetch fix (scripts/build-prefetch-fix.ps1), loaded by DCS as bin\dxgi2.dll when the profile enables it.
 # Rebuilt and tested on every release so a stale DLL can never ship.
 & (Join-Path $PSScriptRoot 'build-prefetch-fix.ps1')
-New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'components/boost') -Force | Out-Null
-$prefetchFix = Join-Path $releaseRoot 'components/boost/prefetch_fix.dll'
+New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/boost') -Force | Out-Null
+$prefetchFix = Join-Path $payloadRoot 'components/boost/prefetch_fix.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/prefetch-fix/prefetch_fix.dll') -Destination $prefetchFix -Force
 (Get-FileHash -LiteralPath $prefetchFix -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($prefetchFix + '.sha256') -Encoding ascii
 # DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
 # them. Rebuilt and tested on every release like the prefetch fix.
 & (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1')
-New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'components/dcsqvcull') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/dcsqvcull') -Force | Out-Null
 foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/native/dcsqvcull/DcsQvCullPayload.dll','native/dcsqvcull/lua/DcsQvCull.lua')) {
-    $target = Join-Path $releaseRoot ('components/dcsqvcull/' + (Split-Path -Leaf $source))
+    $target = Join-Path $payloadRoot ('components/dcsqvcull/' + (Split-Path -Leaf $source))
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
 }
-$cheekyDll = Join-Path $releaseRoot 'components/CheekyOpenXRLayer.dll'
+$cheekyDll = Join-Path $payloadRoot 'components/CheekyOpenXRLayer.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll') -Destination $cheekyDll -Force
 (Get-FileHash -LiteralPath $cheekyDll -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($cheekyDll + '.sha256') -Encoding ascii
 foreach ($filename in @('XR_APILAYER_MBUCCHIA_quad_views_foveated.dll','openxr-api-layer.json','settings.cfg')) {
-    $target = Join-Path $releaseRoot "components/quadviews/$filename"
+    $target = Join-Path $payloadRoot "components/quadviews/$filename"
     Copy-Item -LiteralPath (Join-Path $workspaceRoot "external/quadviews/bin/x64/Release/$filename") -Destination $target -Force
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
 }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installer.ps1') -Destination (Join-Path $releaseRoot 'scripts/installer.ps1') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'README.md') -Destination (Join-Path $releaseRoot 'README.md') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'PLAN_DCS_VR.md') -Destination $releaseRoot -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installer.ps1') -Destination (Join-Path $payloadRoot 'scripts/installer.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'README.md') -Destination (Join-Path $payloadRoot 'README.md') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'PLAN_DCS_VR.md') -Destination $payloadRoot -Force
 # The policy's version and corresponding-source name always match this build (GPL source offer).
 $policy = Get-Content -LiteralPath (Join-Path $workspaceRoot 'distribution-policy.json') -Raw | ConvertFrom-Json
 $policy.version = $version; $policy.correspondingSource = "DcsControl-$version-sources.zip"
-$policy | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'distribution-policy.json') -Encoding utf8
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/SETUP.md') -Destination (Join-Path $releaseRoot 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/FRAME_PACING.md') -Destination (Join-Path $releaseRoot 'docs') -Force
-foreach ($doc in @('docs/INTERFACE.md','docs/VALIDATION.md','docs/FIRST_FLIGHT.md','docs/THIRD_PARTY.md','docs/RELEASE_NOTES.md','docs/APPROACHES.md','docs/QUAD_FOCUS_ADAPTER.md','docs/NEURAL_TUNING.md','docs/PERFORMANCE.md','docs/performance-results.json','docs/APP_ICON.md','docs/USER_GUIDE.md','docs/app-icon-preview.png')) { Copy-Item -LiteralPath (Join-Path $workspaceRoot $doc) -Destination (Join-Path $releaseRoot 'docs') -Force }
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/screenshots') -Destination (Join-Path $releaseRoot 'docs') -Recurse -Force
+$policy | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payloadRoot 'distribution-policy.json') -Encoding utf8
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/SETUP.md') -Destination (Join-Path $payloadRoot 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/FRAME_PACING.md') -Destination (Join-Path $payloadRoot 'docs') -Force
+foreach ($doc in @('docs/INTERFACE.md','docs/VALIDATION.md','docs/FIRST_FLIGHT.md','docs/THIRD_PARTY.md','docs/RELEASE_NOTES.md','docs/APPROACHES.md','docs/QUAD_FOCUS_ADAPTER.md','docs/NEURAL_TUNING.md','docs/PERFORMANCE.md','docs/performance-results.json','docs/APP_ICON.md','docs/USER_GUIDE.md','docs/app-icon-preview.png')) { Copy-Item -LiteralPath (Join-Path $workspaceRoot $doc) -Destination (Join-Path $payloadRoot 'docs') -Force }
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/screenshots') -Destination (Join-Path $payloadRoot 'docs') -Recurse -Force
 $renderStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $releaseRoot 'DcsControl.exe'))
 $renderStart.UseShellExecute = $false; $renderStart.CreateNoWindow = $true
 $renderRoot = Join-Path $workspaceRoot ('artifacts/web-ui/' + [Guid]::NewGuid().ToString('N'))
@@ -105,38 +110,56 @@ if (-not $renderProcess.WaitForExit(120000)) { $renderProcess.Kill(); throw 'Rel
 if ($renderProcess.ExitCode -ne 0) { throw 'Release interface render failed.' }
 $renderProcess.Dispose()
 Remove-Item -LiteralPath $demoRoot -Recurse -Force -ErrorAction SilentlyContinue
-Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -like 'interface-*.png' -or $_.Name -eq 'interface-checks.json' -or $_.Name -eq 'interface-renders.json' } | Copy-Item -Destination (Join-Path $releaseRoot 'docs') -Force
-foreach ($index in 0..42) { if (-not (Test-Path -LiteralPath (Join-Path $releaseRoot "docs/interface-$index.png"))) { throw 'Release interface preview is incomplete.' } }
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'LICENSE') -Destination (Join-Path $releaseRoot 'licenses/Manager-MIT.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/LICENSE.txt') -Destination (Join-Path $releaseRoot 'licenses/WebView2-SDK.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/NOTICE.txt') -Destination (Join-Path $releaseRoot 'licenses/WebView2-NOTICE.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/cheeky/LICENSE') -Destination (Join-Path $releaseRoot 'licenses/Cheeky-GPL-3.0.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/ofxr/LICENSE') -Destination (Join-Path $releaseRoot 'licenses/OFXR-LGPL-3.0.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/LICENSE') -Destination (Join-Path $releaseRoot 'licenses/OFXR-djules75-LGPL-3.0.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/THIRD_PARTY.md') -Destination (Join-Path $releaseRoot 'licenses/OFXR-djules75-THIRD_PARTY.md') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/LICENSE') -Destination (Join-Path $releaseRoot 'licenses/QuadViews-MIT.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/THIRD_PARTY') -Destination (Join-Path $releaseRoot 'licenses/QuadViews-THIRD-PARTY.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/external/OpenXR-MixedReality/NOTICE') -Destination (Join-Path $releaseRoot 'licenses/OpenXR-MixedReality-NOTICE.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/LICENSE') -Destination (Join-Path $releaseRoot 'licenses/WIL-MIT.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/ThirdPartyNotices.txt') -Destination (Join-Path $releaseRoot 'licenses/WIL-ThirdPartyNotices.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/cheeky/licenses') -Destination (Join-Path $releaseRoot 'licenses/Cheeky-dependencies') -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/sboys/LICENCE.md') -Destination (Join-Path $releaseRoot 'licenses/Sboys-GPL-2.0.md') -Force
-& $dotnet (Join-Path $releaseRoot 'DcsVr.Cli.dll') presets | Set-Content -LiteralPath (Join-Path $releaseRoot 'profiles/presets.json') -Encoding utf8
+Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -like 'interface-*.png' -or $_.Name -eq 'interface-checks.json' -or $_.Name -eq 'interface-renders.json' } | Copy-Item -Destination (Join-Path $payloadRoot 'docs') -Force
+# The render list names each image by its file name only: the build folder (and the build machine's user name) never ships.
+$rendersFile = Join-Path $payloadRoot 'docs/interface-renders.json'
+$renders = @(Get-Content -LiteralPath $rendersFile -Raw | ConvertFrom-Json)
+foreach ($render in $renders) { if ($render.PSObject.Properties['path']) { $render.path = Split-Path -Leaf $render.path } }
+ConvertTo-Json -InputObject $renders -Depth 8 | Set-Content -LiteralPath $rendersFile -Encoding utf8
+foreach ($index in 0..42) { if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot "docs/interface-$index.png"))) { throw 'Release interface preview is incomplete.' } }
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Manager-MIT.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/WebView2-SDK.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/NOTICE.txt') -Destination (Join-Path $payloadRoot 'licenses/WebView2-NOTICE.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/cheeky/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-GPL-3.0.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/ofxr/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-LGPL-3.0.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-djules75-LGPL-3.0.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/THIRD_PARTY.md') -Destination (Join-Path $payloadRoot 'licenses/OFXR-djules75-THIRD_PARTY.md') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/QuadViews-MIT.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/THIRD_PARTY') -Destination (Join-Path $payloadRoot 'licenses/QuadViews-THIRD-PARTY.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/external/OpenXR-MixedReality/NOTICE') -Destination (Join-Path $payloadRoot 'licenses/OpenXR-MixedReality-NOTICE.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/WIL-MIT.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/ThirdPartyNotices.txt') -Destination (Join-Path $payloadRoot 'licenses/WIL-ThirdPartyNotices.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/cheeky/licenses') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-dependencies') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/sboys/LICENCE.md') -Destination (Join-Path $payloadRoot 'licenses/Sboys-GPL-2.0.md') -Force
+& $dotnet (Join-Path $payloadRoot 'DcsVr.Cli.dll') presets | Set-Content -LiteralPath (Join-Path $payloadRoot 'profiles/presets.json') -Encoding utf8
 @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\installer.ps1" -Action Install -InstallPrerequisites
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0files\scripts\installer.ps1" -Action Install -InstallPrerequisites
 pause
-'@ | Set-Content -LiteralPath (Join-Path $releaseRoot 'Install.cmd') -Encoding ascii
+'@ | Set-Content -LiteralPath (Join-Path $releaseRoot 'Install DCS Control.cmd') -Encoding ascii
 @'
 @echo off
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\installer.ps1" -Action Uninstall
 pause
-'@ | Set-Content -LiteralPath (Join-Path $releaseRoot 'Uninstall.cmd') -Encoding ascii
+'@ | Set-Content -LiteralPath (Join-Path $payloadRoot 'Uninstall.cmd') -Encoding ascii
+# The top of the release folder also holds a short README next to the launcher and the installer command.
+@"
+DCS Control $version
+====================
+
+Start: double-click DcsControl.exe (it can stay in this folder, anywhere you like).
+Install with a Start menu entry: double-click "Install DCS Control.cmd".
+
+The files folder holds the rest of the app: leave it next to DcsControl.exe.
+
+Guide: https://github.com/NIGos/dcs-control/blob/main/docs/USER_GUIDE.md
+Problems and results: https://github.com/NIGos/dcs-control/issues
+"@ | Set-Content -LiteralPath (Join-Path $releaseRoot 'README.txt') -Encoding utf8
 $files = Get-ChildItem -LiteralPath $releaseRoot -Recurse -File | Where-Object { $_.Name -ne 'release-manifest.json' } | ForEach-Object {
     @{ path=[IO.Path]::GetRelativePath($releaseRoot,$_.FullName); sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes=$_.Length }
 }
 @{ schemaVersion=1; product='DcsControl'; version=$version; files=@($files) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'release-manifest.json') -Encoding utf8
-& (Join-Path $releaseRoot 'scripts/installer.ps1') -Action Verify -Destination (Join-Path $workspaceRoot 'artifacts/installer-verify') -NoShortcut
+& (Join-Path $payloadRoot 'scripts/installer.ps1') -Action Verify -Destination (Join-Path $workspaceRoot 'artifacts/installer-verify') -NoShortcut
 if ($LASTEXITCODE -ne 0) { throw 'Release integrity check failed.' }
 $releaseZip = $releaseRoot + '.zip'
 if (Test-Path -LiteralPath $releaseZip) { Remove-Item -LiteralPath $releaseZip }

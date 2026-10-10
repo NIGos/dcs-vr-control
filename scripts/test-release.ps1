@@ -6,10 +6,10 @@ $releaseRoot=Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win
 $fixtureRoot=Join-Path $workspaceRoot ('artifacts/release-tests/'+[Guid]::NewGuid().ToString('N'))
 $installRoot=Join-Path $fixtureRoot 'installed-app'
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
-$cli=Join-Path $releaseRoot 'DcsVr.Cli.exe'
+$cli=Join-Path $releaseRoot 'files/DcsVr.Cli.exe'
 & $cli app-verify --source $releaseRoot
 if($LASTEXITCODE -ne 0){throw 'Payload verification failed.'}
-& "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $releaseRoot 'scripts/installer.ps1') -Action Verify -Destination $installRoot -NoShortcut
+& "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $releaseRoot 'files/scripts/installer.ps1') -Action Verify -Destination $installRoot -NoShortcut
 if($LASTEXITCODE -ne 0){throw 'Windows PowerShell installer frontend failed.'}
 $publishedPrevious=Join-Path $workspaceRoot 'artifacts/release/DcsVrControl-0.3.0-preview-win-x64'
 # Earlier releases shipped Cheeky's version.dll fallback, which Microsoft Defender blocks. The upgrade fixture is a
@@ -35,8 +35,8 @@ foreach($attempt in 1..2){
     & $cli app-install --source $releaseRoot --destination $installRoot
     if($LASTEXITCODE -ne 0){throw 'Application install/update fixture failed.'}
 }
-if(Test-Path -LiteralPath (Join-Path $installRoot 'packages/CustomHeadset-1.3.0-Pimax-UI.zip')){throw 'Upgrade retained the obsolete bundled Sboys archive.'}
-$installedCli=Join-Path $installRoot 'DcsVr.Cli.exe'
+if(Test-Path -LiteralPath (Join-Path $installRoot 'files/packages/CustomHeadset-1.3.0-Pimax-UI.zip')){throw 'Upgrade retained the obsolete bundled Sboys archive.'}
+$installedCli=Join-Path $installRoot 'files/DcsVr.Cli.exe'
 & $installedCli inventory | Set-Content -LiteralPath (Join-Path $fixtureRoot 'inventory.json') -Encoding utf8
 if($LASTEXITCODE -ne 0){throw 'Installed self-contained CLI failed.'}
 $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $installRoot 'DcsControl.exe'))
@@ -127,7 +127,7 @@ foreach($case in $cases){
     if(@(Get-ChildItem -LiteralPath (Join-Path $gameRoot 'bin') -Recurse -File).Count -ne 1){throw 'Fixture game mods were not removed.'}
     # The focus adapter only deploys with DLSS 5 (Foveated SR alone is stereo-only), so the tamper check needs the neural case.
     if($presetId -eq 'pimax-combined' -and $case.neural){
-        $focusDll=Join-Path $installRoot 'components/cheeky-focus/CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll'
+        $focusDll=Join-Path $installRoot 'files/components/cheeky-focus/CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll'
         $original=[IO.File]::ReadAllBytes($focusDll)
         try{
             $changed=$original.Clone(); $changed[0]=$changed[0] -bxor 1
@@ -143,7 +143,7 @@ $notes=Join-Path $installRoot 'user-notes.txt'
 [IO.File]::WriteAllText($notes,'Retain this unowned file.')
 & $cli app-uninstall --destination $installRoot
 if($LASTEXITCODE -ne 0){throw 'Application uninstall fixture failed.'}
-if(Test-Path -LiteralPath (Join-Path $installRoot 'DcsControl.exe')){throw 'Owned application executable was not removed.'}
+if((Test-Path -LiteralPath (Join-Path $installRoot 'DcsControl.exe')) -or (Test-Path -LiteralPath (Join-Path $installRoot 'files/DcsControl.exe'))){throw 'Owned application executable was not removed.'}
 if([IO.File]::ReadAllText($notes) -ne 'Retain this unowned file.'){throw 'User file was changed.'}
 $result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=48;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
 $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureRoot 'result.json') -Encoding utf8
