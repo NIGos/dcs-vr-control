@@ -3,9 +3,9 @@ namespace DcsVr.Core;
 public sealed record LuaValueChange(string Path, string? PreviousRaw, string InstalledRaw);
 /// <param name="IniValues">Owned keys of a configuration file that its component rewrites at runtime (adding defaults,
 /// reformatting numbers). Launch checks compare these values instead of the file hash.</param>
-/// <param name="OwnHashes">Other bytes of DCS VR Control's own for this path (the other Cheeky loader variant, for
+/// <param name="OwnHashes">Other bytes of DCS Control's own for this path (the other Cheeky loader variant, for
 /// example): an existing file with them is a leftover of ours, not another program's file.</param>
-/// <param name="OwnedLocation">The path lies in DCS VR Control's own folder: whatever is there is ours.</param>
+/// <param name="OwnedLocation">The path lies in DCS Control's own folder: whatever is there is ours.</param>
 public sealed record FileMutation(string Path, string? ExpectedSha256, byte[] Content, string Purpose, IReadOnlyList<LuaValueChange>? LuaChanges = null, bool Delete = false, IReadOnlyDictionary<string, string>? IniValues = null, IReadOnlyList<string>? RuntimeLogs = null, string? Root = null, IReadOnlyCollection<string>? OwnHashes = null, bool OwnedLocation = false);
 public sealed record ApplyPlan(string ProfileId, string Description, IReadOnlyList<FileMutation> Files, IReadOnlyDictionary<string, string> LaunchEnvironment, string Executable);
 public sealed record JournalEntry

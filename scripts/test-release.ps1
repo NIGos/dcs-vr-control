@@ -2,7 +2,7 @@ param([string]$NeuralRuntime)
 $ErrorActionPreference='Stop'
 $workspaceRoot=Split-Path -Parent $PSScriptRoot
 $version = & (Join-Path $PSScriptRoot 'version.ps1')
-$releaseRoot=Join-Path $workspaceRoot "artifacts/release/DcsVrControl-$version-win-x64"
+$releaseRoot=Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"
 $fixtureRoot=Join-Path $workspaceRoot ('artifacts/release-tests/'+[Guid]::NewGuid().ToString('N'))
 $installRoot=Join-Path $fixtureRoot 'installed-app'
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
@@ -39,7 +39,7 @@ if(Test-Path -LiteralPath (Join-Path $installRoot 'packages/CustomHeadset-1.3.0-
 $installedCli=Join-Path $installRoot 'DcsVr.Cli.exe'
 & $installedCli inventory | Set-Content -LiteralPath (Join-Path $fixtureRoot 'inventory.json') -Encoding utf8
 if($LASTEXITCODE -ne 0){throw 'Installed self-contained CLI failed.'}
-$start=[Diagnostics.ProcessStartInfo]::new((Join-Path $installRoot 'DcsVrControl.exe'))
+$start=[Diagnostics.ProcessStartInfo]::new((Join-Path $installRoot 'DcsControl.exe'))
 $start.UseShellExecute=$false; $start.CreateNoWindow=$true
 $start.ArgumentList.Add('--web-smoke');$start.ArgumentList.Add((Join-Path $fixtureRoot 'gui'))
 if ($NeuralRuntime) { $start.Environment['DCSVR_TEST_NEURAL_PATH'] = $NeuralRuntime }
@@ -143,7 +143,7 @@ $notes=Join-Path $installRoot 'user-notes.txt'
 [IO.File]::WriteAllText($notes,'Retain this unowned file.')
 & $cli app-uninstall --destination $installRoot
 if($LASTEXITCODE -ne 0){throw 'Application uninstall fixture failed.'}
-if(Test-Path -LiteralPath (Join-Path $installRoot 'DcsVrControl.exe')){throw 'Owned application executable was not removed.'}
+if(Test-Path -LiteralPath (Join-Path $installRoot 'DcsControl.exe')){throw 'Owned application executable was not removed.'}
 if([IO.File]::ReadAllText($notes) -ne 'Retain this unowned file.'){throw 'User file was changed.'}
 $result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=48;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
 $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureRoot 'result.json') -Encoding utf8

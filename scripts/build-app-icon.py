@@ -69,7 +69,7 @@ def render(size):
 def svg(tile):
     silhouette = " ".join(("M" if i == 0 else "L")+f"{x} {y}" for i, (x, y) in enumerate(JET)) + "Z"
     background = '<rect x="16" y="16" width="480" height="480" rx="88" fill="url(#tile)" stroke="#4a4a4a" stroke-width="3"/>' if tile else ""
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DCS VR Control: aircraft in a focus reticle">
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DCS Control: aircraft in a focus reticle">
   <defs><linearGradient id="tile" gradientUnits="userSpaceOnUse" x2="0" y2="512"><stop stop-color="#343434"/><stop offset="1" stop-color="#191919"/></linearGradient><linearGradient id="aircraft" gradientUnits="userSpaceOnUse" x2="0" y2="512"><stop stop-color="#ffbe55"/><stop offset="1" stop-color="#f5a01a"/></linearGradient></defs>
   {background}
   <g fill="none" stroke="#ba7b25" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">{''.join(f'<path d="{p}"/>' for p in BRACKETS)}</g>

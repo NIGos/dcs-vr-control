@@ -1,13 +1,16 @@
-# DCS VR Control
+# DCS Control
 
-A free Windows app that sets up DCS World for VR on Pimax headsets and launches it in one click.
+A free Windows app that makes DCS World run faster, on a monitor or in VR, and sets up VR on Pimax headsets in one click.
 
-Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame generation, a CPU boost — and press **Launch DCS**. The app puts the right files and settings in place, starts DCS with them, and can put everything back the way it was with **Back to stock DCS**.
+- **Every pilot** (monitor, Quest, Varjo, Reverb, Pimax…): **Engine Optimizations** remove CPU work inside DCS without changing the image, about **+60 % FPS** at a busy airfield when DCS is CPU-bound. Once applied they stay on every time DCS starts, also from Steam or a desktop shortcut.
+- **Pimax pilots** additionally get foveated rendering, DLSS 5 on the area you look at and frame generation, set up and launched with one button.
 
-> **Early beta.** It has been flown on one PC so far (Pimax Crystal Super, RTX 5090, Windows 11, DCS 2.9 Steam, single player), so expect rough edges. It was built with an AI coding assistant. Bug reports are very welcome: see [Reporting a problem](docs/USER_GUIDE.md#reporting-a-problem).
+Everything the app changes is backed up and comes back with **Back to stock DCS**.
+
+> **Early beta.** Flown mostly on one PC so far (Pimax Crystal Super, RTX 5090, Windows 11, DCS 2.9 Steam, single player), so expect rough edges. It was built with an AI coding assistant. Bug reports are very welcome: see [Reporting a problem](docs/USER_GUIDE.md#reporting-a-problem).
 
 <p align="center">
-  <img src="docs/screenshots/overview-last-flight.png" alt="Overview: launch status, the four features and a summary of the last flight" width="800">
+  <img src="docs/screenshots/overview-last-flight.png" alt="Overview: launch status, the features and a summary of the last flight" width="800">
 </p>
 
 | Quad Views, read from Pimax Play | Frame generation | Back to stock DCS |
@@ -16,36 +19,44 @@ Pick what you want — foveated rendering, DLSS 5 on the area you look at, frame
 
 ## What it does
 
-- **Quad Views (foveated rendering):** sharp where you look, lighter in the periphery, eye-tracked. It can use the focus area you already set in Pimax Play, shown with the same values Pimax Play shows. Keep Quad Views on in Pimax Play: the bundled Quad Views takes over from it for DCS.
+**For every pilot, on a monitor or with any headset**
+
+- **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR: about **+60 % FPS** and **p95 frame time −39 %**; with everything on, the GPU becomes the limit. How much you gain depends on how CPU-bound you are.
+- **CPU Boost:** gives DCS priority and its fastest cores while it runs, and fixes a DCS terrain loop that wastes CPU time (the fix also works when DCS starts from Steam).
+- **Free VRAM:** closes memory-hungry apps before the flight and reopens them after.
+
+Not on a Pimax? Choose **Optimizations only**: DCS runs exactly as you set it up (monitor, or your headset with its own software) and the app adds only these optimizations.
+
+**For Pimax headsets (Pimax Play, or SteamVR with Sboys)**
+
+- **Quad Views (foveated rendering):** sharp where you look, lighter in the periphery, eye-tracked. It uses the focus area you already set in Pimax Play. Keep Quad Views on in Pimax Play: the bundled Quad Views takes over from it for DCS.
 - **DLSS 5 (DLSS-NR neural rendering)** on the focus area only, optionally just its central part to save GPU time, with an in-flight on/off key to compare.
 - **Frame generation (OFXR):** Auto picks 2× when DCS can hold 45 FPS and 3× when it can't.
-- **CPU Boost (optional):** gives DCS priority and its fastest cores, and includes a fix for a DCS terrain loop that wastes CPU time.
-- **Engine Optimizations (optional):** a module DCS loads from Saved Games that removes CPU work from its render and model threads without changing the image (about 23 % more FPS when CPU-bound, measured).
-- **Optimizations only (any other headset, or no VR):** choose **Optimizations only** and DCS runs as you set it up (any headset, or the monitor) with only the optimizations: Engine Optimizations, CPU Boost, Free VRAM.
-- **VRAM helpers (optional):** close memory-hungry apps before the flight, use a small DCS window on the monitor, lower the monitor's mode while you fly.
-- **In-headset panel:** FPS, frame-generation mode, DLSS state and, if you want, VRAM use.
-- **Last flight summary** on the Overview after each session.
+- **VR helpers:** a small DCS window on the monitor, a lower monitor mode while you fly, the in-headset panel (FPS, frame-generation mode, DLSS state, VRAM).
+
+After each flight the Overview shows a **Last flight** summary.
 
 ## Quick start
 
-1. **You need:** Windows 11, an NVIDIA RTX GPU, a Pimax headset with Pimax Play (or SteamVR with the Sboys driver), DCS World 2.9. For DLSS 5 you also need your own `nvngx_dlssnr.dll` (tested with 310.8); it isn't included.
-2. **Download** `DcsVrControl-0.4.2-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-vr-control/releases), unzip it and run `Install.cmd` (or just `DcsVrControl.exe`).
-3. **Click Detect my setup** in the right panel, or follow **Guided setup**.
+1. **You need:** Windows 11 and DCS World 2.9. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (tested with 310.8, not included).
+2. **Download** `DcsControl-0.5.0-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-control/releases), unzip it and run `Install.cmd` (or just `DcsControl.exe`).
+3. **Choose how you fly** in the right panel: **Pimax**, **Sboys**, or **Optimizations only** (monitor or another headset). **Detect my setup** and **Guided setup** can do it for you.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
-5. **Start your headset software and press Launch DCS.** Start DCS from the app each time; a normal Steam shortcut starts plain DCS.
+5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.
 
 The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, the in-flight keys, and what to do when something goes wrong.
 
 ## Good to know
 
-- **Single player only so far.** The app places a `dxgi.dll` loader (and, with the prefetch fix, `dxgi2.dll`) in DCS's `bin` folder. Multiplayer and server integrity checks haven't been tested.
+- **Single player only so far.** The app places a `dxgi.dll` loader (and, with the prefetch fix, `dxgi2.dll`) in DCS's `bin` folder and, with Engine Optimizations, a hook in `Saved Games\DCS\Scripts`. Multiplayer and server integrity checks haven't been tested.
 - **Frame generation adds latency**, more in 3× than in 2×. Head movement stays smooth; the mouse cursor moves at DCS's own frame rate.
 - **Start the app from the Start menu or Explorer**, not as administrator.
+- **Formerly DCS VR Control.** The app was renamed in 0.5.0. Installing it replaces the old install; your backups and profiles are kept.
 - **Before updating or repairing DCS**, close it and use **Back to stock DCS**.
 
 ## Credits and licences
 
-DCS VR Control's own code is MIT-licensed ([LICENSE](LICENSE)). It builds on other people's work, each under its own licence:
+DCS Control's own code is MIT-licensed ([LICENSE](LICENSE)). It builds on other people's work, each under its own licence:
 
 - **Quad-Views-Foveated** by mbucchia (MIT)
 - **CheekyFoveatedDLSS** (GPL-3.0), with local changes for the Quad Views focus views
@@ -57,7 +68,7 @@ The NVIDIA DLSS runtime is not included. Every release has a sources ZIP with th
 
 ## Support
 
-Feedback and bug reports go in [Issues](https://github.com/NIGos/dcs-vr-control/issues). If the app saves you some frames and you'd like to buy me a coffee: [ko-fi.com/nigos](https://ko-fi.com/nigos). Thank you!
+Feedback and bug reports go in [Issues](https://github.com/NIGos/dcs-control/issues). If the app saves you some frames and you'd like to buy me a coffee: [ko-fi.com/nigos](https://ko-fi.com/nigos). Thank you!
 
 ---
 
@@ -71,7 +82,7 @@ Third-party changes are kept as reproducible patches: `scripts/patch-cheeky.py` 
 
 ### Original files and recovery
 
-The first time the app writes a path it backs up the original (or notes that there was none) under `%LOCALAPPDATA%\DcsVrControl\originals`. Later launches simply overwrite. **Back to stock DCS** puts every path back: backups are written back, new files are removed, and in `options.lua` only the settings the app changed are restored. Only a running DCS blocks it.
+The first time the app writes a path it backs up the original (or notes that there was none) under `%LOCALAPPDATA%\DcsControl\originals`. Later launches simply overwrite. **Back to stock DCS** puts every path back: backups are written back, new files are removed, and in `options.lua` only the settings the app changed are restored. Only a running DCS blocks it.
 
 ### Build and test
 
@@ -112,5 +123,5 @@ $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--force-device-scale-factor=1'
 $env:DCSVR_SMOKE_DEMO_ROOT = 'C:\DcsVrDemo'
 $env:DCSVR_SMOKE_DOC_VIEWS = '1'
 $env:DCSVR_TEST_NEURAL_PATH = 'C:\DcsVrDemo\Downloads\nvngx_dlssnr.dll'
-./DcsVrControl.exe --web-smoke <output-folder>\interface
+./DcsControl.exe --web-smoke <output-folder>\interface
 ```

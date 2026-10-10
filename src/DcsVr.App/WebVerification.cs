@@ -10,7 +10,7 @@ namespace DcsVr.App;
 /// <summary>Real WebView2 Chromium + .NET bridge, hosted in an HWND that is never shown.</summary>
 internal static class WebVerification
 {
-    /// <summary>Logs of one flight in the formats DCS VR Control reads (see LastFlight): 2× most of the time, 3× for a
+    /// <summary>Logs of one flight in the formats DCS Control reads (see LastFlight): 2× most of the time, 3× for a
     /// stretch, DLSS 5 on, CPU Boost restored with one service it could not move, the prefetch fix skipping repeats.</summary>
     private static FlightSources WriteFlightFixture(string root, DateTimeOffset start, DateTimeOffset end)
     {
@@ -118,7 +118,7 @@ internal static class WebVerification
         var runtimeDll = At("runtime.dll", @"Pimax\Runtime\PiOpenXR_64.dll"); File.Copy(Path.Combine(AppContext.BaseDirectory,"WebView2Loader.dll"),runtimeDll,true); // PE fixture, never loaded as a runtime.
         var runtime = At("runtime.json", @"Pimax\Runtime\PiOpenXR_64.json"); File.WriteAllText(runtime,JsonData.Serialize(new { runtime = new { library_path = runtimeDll } }));
         var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime, SteamVrRuntime = runtime, PimaxVersion = "1.0.1.103", Tracking = TrackingKind.Lighthouse, Observations = ["Offline fixture. No DCS process or headset session."] };
-        var service = new ControlService(AppContext.BaseDirectory,Path.Combine(fixture,demoRoot is null ? "state" : @"AppData\Local\DcsVrControl"));
+        var service = new ControlService(AppContext.BaseDirectory,Path.Combine(fixture,demoRoot is null ? "state" : @"AppData\Local\DcsControl"));
         Readiness.ActiveRouteProvider = () => new(null, "Offline verification: no headset route.", TrackingKind.Unknown);
         // Pimax Play as saved on a Crystal Super (float32 values as Pimax writes them), never the user's own file: Quick 33 %,
         // or with DCSVR_TEST_PIMAX_MODE=fine the Fine tab at 33/10 · 33/33. runtime_* is what Pimax's runtime renders.
@@ -150,7 +150,7 @@ internal static class WebVerification
         var flight = WriteFlightFixture(Path.Combine(fixture, "flight"), sessionStart, sessionEnd);
         PimaxFovea.SettingsPath = pimax;
         var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") });
-        using var source = new HwndSource(new HwndSourceParameters("DCS VR Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
+        using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
         var env = await CoreWebView2Environment.CreateAsync(null,Path.Combine(fixture,"browser"),new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-component-update --no-first-run --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion"));
         Log("Environment ready");
         var controller = await env.CreateCoreWebView2ControllerAsync(source.Handle);
@@ -275,7 +275,7 @@ internal static class WebVerification
             if (await Text("document.getElementById('statusTitle').textContent") != "Ready to fly") throw new IOException("The applied profile does not read Ready to fly.");
             await Capture("ready-to-fly");
             // Recovery with a profile applied: one Original files card, its file list open.
-            if (!(await Text("document.getElementById('originals').textContent")).Contains("files changed by DCS VR Control", StringComparison.Ordinal)) throw new IOException("Recovery does not list the original files.");
+            if (!(await Text("document.getElementById('originals').textContent")).Contains("files changed by DCS Control", StringComparison.Ordinal)) throw new IOException("Recovery does not list the original files.");
             await Capture("recovery-applied", "recovery");
             File.WriteAllText(pimax, pimaxBefore.Replace("\"runtime_quadviews_gaze_resolution_scale\":0.25", "\"runtime_quadviews_gaze_resolution_scale\":0.5"));
             try

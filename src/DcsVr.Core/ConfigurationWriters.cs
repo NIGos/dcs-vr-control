@@ -59,7 +59,7 @@ public static class ConfigurationWriters
     /// loss (peripheral exclusion, the D3D11 state meter, extra suite phases), which stay off here. The test suite
     /// (run_suite.flag or Ctrl+Alt+F11) compares the two optimizations off and on.</summary>
     public static string DcsQvCull(VrProfile p) => $"""
-        ; Written by DCS VR Control for the applied profile; edits here are replaced the next time it is applied.
+        ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
         ; DcsQvCull re-reads this file every second while DCS runs.
 
         [General]
@@ -126,8 +126,16 @@ public static class ConfigurationWriters
         ShadowRecorderScope=0x30f
         ShadowRecorderWaitUs=200
         ShadowRecorderPriority=0
-        ShadowRecorderSplit=0x3
+        ShadowRecorderSplit=0xf
         ShadowRecorderInstancing=1
+        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}
+        GBufferRecorderScope=0x10055
+        GBufferRecorderMaxSegments=12
+        GBufferRecorderHelpers=2
+        GBufferRecorderWaitUs=300
+        GBufferRecorderIsland=30
+        GBufferRecorderRedo=1
+        GBufferRecorderSwapAhead=1
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
@@ -188,6 +196,18 @@ public static class ConfigurationWriters
         ShadowRecVerifySec=5
         BenchShadowRecorder=0
         ShadowRecCount=0
+        GBufferRecVerify=0
+        GBufferRecVerifySec=6
+        GBufferRecVerifyStride=0
+        BenchGBufferRecorder=0
+        GBufferRecCount=0
+        GBufferRecStateDump=0
+        GpuPassTiming=0
+        YawProfile=0
+        YawProfileStep=30
+        RotationProfile=0
+        RotationDegPerSec=60
+        RotationSeconds=20
         BenchSplitFilter=0
         JoinTailCount=0
         SrvSpanCount=0

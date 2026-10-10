@@ -11,12 +11,13 @@ public sealed class ApplicationInstaller(string destination)
 {
     public string Root { get; } = ValidateRoot(destination);
     public TransactionStore Transactions => new(Path.Combine(Root, ".installer"));
-    public static string DefaultDestination => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs/DcsVrControl");
+    public static string DefaultDestination => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs/DcsControl");
     public static ReleaseManifest VerifySource(string source)
     {
         var root = Path.GetFullPath(source);
         var manifest = JsonData.Deserialize<ReleaseManifest>(File.ReadAllText(Path.Combine(root, "release-manifest.json")));
-        if (manifest.Product != "DcsVrControl" || manifest.SchemaVersion != 1 || manifest.Files.Count == 0 || manifest.Files.Count > 10000)
+        // Releases before 0.5.0 were published as DcsVrControl (DCS VR Control).
+        if (manifest.Product is not ("DcsControl" or "DcsVrControl") || manifest.SchemaVersion != 1 || manifest.Files.Count == 0 || manifest.Files.Count > 10000)
             throw new InvalidDataException("Invalid release manifest.");
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in manifest.Files)
@@ -56,7 +57,7 @@ public sealed class ApplicationInstaller(string destination)
         var previousLedger = owned.GetValueOrDefault(ledger);
         if (File.Exists(ledger) && previousLedger is null) throw new IOException("Unowned installation ledger retained.");
         changes.Add(new(ledger, previousLedger?.InstalledSha256, Encoding.UTF8.GetBytes(JsonData.Serialize(manifest)), "Application installation ledger", Root: Root));
-        return Transactions.Apply(new("application", "DCS VR Control " + manifest.Version, changes, new Dictionary<string, string>(), ""), beforeWrite);
+        return Transactions.Apply(new("application", "DCS Control " + manifest.Version, changes, new Dictionary<string, string>(), ""), beforeWrite);
     }
     public RestoreResult Uninstall()
     {
@@ -103,8 +104,9 @@ public sealed class ApplicationInstaller(string destination)
     }
     private static void EnsureAppClosed()
     {
-        var processes = Process.GetProcessesByName("DcsVrControl");
-        try { if (processes.Length > 0) throw new InvalidOperationException("Close DCS VR Control before installing or uninstalling it."); }
+        // The app as it is named now and as it was named before (DCS VR Control).
+        var processes = Process.GetProcessesByName("DcsControl").Concat(Process.GetProcessesByName("DcsVrControl")).ToArray();
+        try { if (processes.Length > 0) throw new InvalidOperationException("Close DCS Control before installing or uninstalling it."); }
         finally { foreach (var p in processes) p.Dispose(); }
     }
 }

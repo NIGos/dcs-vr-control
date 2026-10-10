@@ -3,7 +3,7 @@ using DcsVr.Core;
 
 namespace DcsVr.App;
 
-/// <summary>Unexpected errors the interface survived, appended to %LOCALAPPDATA%\DcsVrControl\app.log (kept under 1 MB).
+/// <summary>Unexpected errors the interface survived, appended to %LOCALAPPDATA%\DcsControl\app.log (kept under 1 MB).
 /// Logging never throws.</summary>
 internal static class AppLog
 {

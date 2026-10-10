@@ -20,7 +20,7 @@ public static partial class BoostPlanner
     /// <see cref="ProfileValidation.BoostProtectedProcesses"/>.</summary>
     internal static readonly IReadOnlySet<string> KnownLaunchers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "steam", "steamservice", "explorer", "DcsVrControl", "DcsVr.Cli", "cmd", "powershell", "pwsh",
+        "steam", "steamservice", "explorer", "DcsControl", "DcsVrControl", "DcsVr.Cli", "cmd", "powershell", "pwsh",
         "conhost", "svchost", "services", "wininit", "winlogon", "System", "System Idle Process", "Registry",
         "dllhost", "devenv", "lsass", "csrss", "smss", "fontdrvhost", "dwm"
     };

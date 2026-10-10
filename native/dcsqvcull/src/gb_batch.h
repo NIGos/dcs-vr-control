@@ -140,6 +140,17 @@ bool Install() {
   return true;
 }
 
+// Slot 19 back to DCS's thunk, for a measurement phase that installed the
+// hook itself (gb_rec_count.h) and only when nothing wraps it any more;
+// g_orig stays valid for calls in flight.
+void Uninstall() {
+  if (g_state != 1 || g_wrap.load()) return;
+  auto* gc = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"GraphicsCore.dll"));
+  if (!gc) return;
+  UnhookSlot(&reinterpret_cast<void**>(gc + kVtableRva)[kExecSlot], reinterpret_cast<void*>(g_orig));
+  g_state = 0;
+}
+
 }  // namespace gbpass
 
 namespace gbbatch {

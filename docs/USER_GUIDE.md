@@ -1,8 +1,8 @@
-# DCS VR Control — User Guide
+# DCS Control — User Guide
 
-**Version 0.4.2-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.5.0-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
-> **Early beta.** DCS VR Control has been flown on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
+> **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
 ![Overview with the last flight](screenshots/overview-last-flight.png)
 
@@ -12,7 +12,7 @@
 - [Requirements](#requirements)
 - [Install](#install)
 - [First run](#first-run)
-- [The four features](#the-four-features)
+- [The features](#the-features)
 - [Launch DCS](#launch-dcs)
 - [In flight: hotkeys and the diagnostic panel](#in-flight-hotkeys-and-the-diagnostic-panel)
 - [After the flight: the Last flight card](#after-the-flight-the-last-flight-card)
@@ -24,22 +24,33 @@
 
 ## What the app does
 
-DCS VR Control prepares and starts DCS World in VR with a set of performance and image mods, without you copying files by hand:
+DCS Control makes DCS World faster and, on Pimax headsets, sets up VR, without you copying files by hand. It was called **DCS VR Control** before 0.5.0; it is no longer only for VR.
+
+**For every pilot, on a monitor or with any headset**
+
+| Feature | What you get |
+| --- | --- |
+| **Engine Optimizations** | A small module DCS loads by itself from Saved Games takes CPU work off DCS's render and model threads, with exactly the same image: about +60 % FPS at a busy airfield when DCS is CPU-bound. Once applied it stays on every time DCS starts, also from Steam or a desktop shortcut. |
+| **CPU Boost** | Gives DCS priority and its best CPU cores while it runs, keeps background apps off those cores, and fixes a DCS terrain loop that wastes CPU (the fix also works when DCS starts from Steam). Plus Free VRAM before flight. |
+
+Not on a Pimax? Choose **Optimizations only** in the right panel: DCS runs exactly as you set it up and the app adds only these two (see [Optimizations only](#optimizations-only-any-other-headset-or-no-vr)).
+
+**For Pimax headsets (Pimax Play, or SteamVR with Sboys)**
 
 | Feature | What you get |
 | --- | --- |
 | **Quad Views** | Foveated rendering: DCS draws a sharp *focus* area where you look (eye tracked or fixed in the centre) and a lower-resolution periphery. Uses the focus values you already set in Pimax Play. |
 | **DLSS 5** | NVIDIA's DLSS-NR neural rendering, applied to the Quad Views focus area on DCS's own DLSS (you bring the NVIDIA runtime file). Without Quad Views, optional Foveated Super Resolution (Cheeky) saves GPU outside where you look. |
 | **Frame generation** | OFXR optical-flow frame generation: DCS renders half (or a third) of the headset refresh rate and generated frames fill the rest. |
-| **CPU Boost** | Gives DCS priority and its best CPU cores while it runs, keeps VR services and background apps off those cores, and an optional fix for a DCS terrain loop that wastes CPU. Plus three VRAM helpers. |
 
-You tick the features you want in the right panel, adjust them on their pages if you like, and press **Launch DCS**. The app writes the needed files into DCS (backing up the originals the first time), starts DCS with the right VR settings, and puts everything back when you press **Back to stock DCS**.
+You tick the features you want in the right panel, adjust them on their pages if you like, and press **Launch DCS**. The app writes the needed files into DCS (backing up the originals the first time), starts DCS, and puts everything back when you press **Back to stock DCS**. What stays on without the app: Engine Optimizations and the CPU Boost prefetch fix. What needs DCS started from the app: the VR features and CPU Boost's priority and cores.
 
-What it does **not** do: it does not change Windows settings, your GPU driver settings, your global OpenXR runtime or your DCS graphics settings (apart from a few listed `options.lua` values such as the frame limit, which it restores). It does not add NVIDIA DLSS Frame Generation to DCS; frame generation here is OFXR's optical flow.
+What it does **not** do: it does not change Windows settings, your GPU driver settings, your global OpenXR runtime or your DCS graphics settings (apart from a few listed `options.lua` values such as the frame limit with the VR features, which it restores). It does not add NVIDIA DLSS Frame Generation to DCS; frame generation here is OFXR's optical flow.
 
 ## Requirements
 
 - **Windows 11, 64-bit.** Run as a normal user — not as administrator.
+- **For Engine Optimizations and CPU Boost:** any GPU and headset, or none. The items below are for the VR features.
 - **NVIDIA RTX graphics card** for DLSS 5 and for NVIDIA optical-flow frame generation. (The Framegen page also offers FidelityFX, which works on any GPU, but the tested setup is NVIDIA.) Development and testing: RTX 5090.
 - **Pimax headset** (tested: Crystal Super Micro OLED) with either
   - **Pimax Play** (the original Pimax OpenXR runtime), or
@@ -50,10 +61,12 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-Download `DcsVrControl-0.4.2-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-vr-control/releases) and extract it to a folder of your choice. Then either:
+Download `DcsControl-0.5.0-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
 
-- **Run it directly:** double-click `DcsVrControl.exe` in the extracted folder (.NET is included), or
-- **Install it:** double-click `Install.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsVrControl`, adds **DCS VR Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
+- **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
+- **Install it:** double-click `Install.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsControl`, adds **DCS Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
+
+If you had **DCS VR Control** installed (the app's name before 0.5.0), `Install.cmd` replaces it and its Start menu entry; your backups and profiles stay where they are and Back to stock DCS keeps working.
 
 Installing the app does not touch DCS or your VR software. Nothing is written into DCS until you press **Launch DCS** (or **Apply without launching**).
 
@@ -71,7 +84,7 @@ Click **Detect my setup** in the right panel. The app looks at what runs on your
 
 Or click **Guided setup** for three short steps:
 
-1. **Choose** — headset route, the features you want and, with Quad Views, whether the focus follows your eyes or stays centred. Your quality settings are kept.
+1. **Choose** — how you fly (Pimax, Sboys, or Optimizations only for a monitor or another headset), the features you want and, with Quad Views, whether the focus follows your eyes or stays centred. Your quality settings are kept.
 2. **Check** — the app checks files, the VR runtime, package hashes, the DLSS runtime file and (on Sboys) the driver and gaze bridge. Problems are listed first; nothing is written in this step.
 3. **Fly** — start your headset software, then press **Launch DCS**.
 
@@ -83,14 +96,14 @@ Closing the wizard before **Launch DCS** writes nothing.
 
 ![The right panel](screenshots/right-panel-features.png)
 
-- **Headset route** — **Pimax** (Pimax Play) or **Sboys** (SteamVR). The line below shows which one is running; the app warns you if your profile uses the other one.
-- **Features** — one row per feature: tick it on or off, read its current settings at a glance, click the row to open its page.
+- **How you fly** — **Pimax** (Pimax Play), **Sboys** (SteamVR), or **Optimizations only** (a monitor, or any other headset with its own software). The line below shows which VR software is running; the app warns you if your profile uses the other one.
+- **Features** — one row per feature, the optimizations first: tick it on or off, read its current settings at a glance, click the row to open its page. With Optimizations only, the VR features are hidden.
 - **Import / Save** — load or save a profile file.
 - **Launch DCS** — the one button you need. Under it: **Review files** (what Launch will write, read-only), **Apply without launching** and **Back to stock DCS**.
 
 Everything you change is kept as a draft across app restarts. **Reset to applied** (shown when the draft differs) brings back what is currently installed.
 
-## The four features
+## The features
 
 ### Quad Views
 
@@ -116,7 +129,7 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
 
 DLSS 5 runs NVIDIA's DLSS-NR neural model on the two Quad Views focus views. DCS's own DLSS keeps running as usual.
 
-**The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8**, x64, signed by NVIDIA Corporation. It is not included in this app. Select it once with **Browse** (or let **Detect my setup** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsVrControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
+**The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8**, x64, signed by NVIDIA Corporation. It is not included in this app. Select it once with **Browse** (or let **Detect my setup** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
 
 Settings:
 
@@ -183,9 +196,10 @@ Four more options on the CPU Boost page, all off by default and usable without C
 - **Model data allocator (parallel)** (on) — the threads that prepare aircraft and object models share one allocator and wait for each other; the module gives each thread its own blocks. Measured: **+6 % FPS**, p95 −9 %.
 - **Texture streaming dedupe** (on) — repeated streaming requests for the same texture and size within a millisecond are skipped. Measured: **+2 % FPS**.
 - **Effect constant-buffer skip** and **Statistics counter without lock** (on) — a constant buffer set again although it is already set is skipped, and a statistics-only triangle counter no longer makes the model threads wait on each other. Measured together: **+3.6 % FPS**.
+- **Multi-threaded G-buffer** (on) — DCS draws the scene's models into its G-buffer on the render thread, one at a time. The module records those draws on worker threads in DCS's exact order and DCS replays them; parts whose textures changed are recorded again. Verified pixel-identical live. Measured: **+22 to +24 % FPS** on its own. It uses about 12 more worker threads and turns itself off, with a warning on the page, if DCS's code is not what it expects.
 - **Multi-threaded shadows** (on) — DCS draws the shadow cascades on its render thread, one object at a time. The module records those draws on 8 worker threads and DCS replays them; the nearest cascade but one stays as DCS draws it. Verified texel-identical live. Measured: **+3 to +5 % FPS**, p95 −4 to −7 %; total CPU use rises 4 to 7 % because the work moves to other cores, and it uses about 30 MB more memory. It turns itself off, with a warning on the page, if DCS's code is not what it expects.
 - **Redundant state filter** (on) — DCS's renderer sets graphics state (shaders, buffers, textures, samplers) that is already set, about 228,000 times a frame on an airfield; the repeat is skipped where DCS makes the call. Verified identical live (362 frames, no mismatch). Measured: about **+0.5 to +1 % FPS** and **1.2 % less CPU**. It turns itself off after a DCS update until it is checked against the new build.
-- All together about **+30 % FPS** (+29.8 to +30.0 %, ±1.5 to 2.1; 39.5 → 51.4 FPS), frame time −23 %, p95 −20 to −23 %, 11 % less CPU (multi-threaded shadows move work to otherwise idle cores) and 30 % less culling time, measured with the module's automatic A/B test (the in-flight switch off and on, 24 alternating blocks, twice) at a busy VR airfield (Ryzen 7 9800X3D, RTX 5090, Pimax Crystal Super, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first; after a DCS update it looks for the code it patches by signature and checks the bytes it expects, and stays off, with a warning on the page, if it does not find them.
+- All together about **+60 % FPS** (+59.7 % ±3.6; 37.1 → 59.2 FPS), frame time −37.5 %, p95 −39 %, with the image verified identical pixel by pixel; with everything on, the GPU becomes the limit (about 92 % busy, from 59 %), measured with the module's automatic A/B test (the in-flight switch off and on, 24 alternating blocks) at a busy VR airfield (Ryzen 7 9800X3D, RTX 5090, Pimax Crystal Super, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first; after a DCS update it looks for the code it patches by signature and checks the bytes it expects, and stays off, with a warning on the page, if it does not find them.
 - **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps** turns the sounds off). Applying a profile starts with them on again.
 - **Developer mode** (off; keep it off for normal flying and for testing a release) is for working on the module: when on, the page says so in Status in DCS, and DCS hot-reloads a payload DLL built elsewhere and takes every engine setting from a separate settings file (a `run_suite.flag` next to it starts the test suite). Logs and reports still go to `Saved Games\DCS\Scripts\DcsQvCull`.
 
@@ -223,7 +237,7 @@ Good to know:
 
 ### The DCS launcher option
 
-**Show the DCS launcher** (Game & headset page, off by default) keeps DCS's own launcher window; press Play there. When you press Play, the DCS launcher restarts DCS and asks Windows to take it out of the "job" its parent runs in. If DCS VR Control itself was started by a program that puts its children in a restricted job (a script runner, an automation tool, some sandboxes), Windows refuses: DCS never opens and `dcs.log` ends with "… failed with error code 5". The app detects this, disables the option and explains why. **Opened from the Start menu or Explorer, the app is not in such a job and the launcher works.**
+**Show the DCS launcher** (Game & headset page, off by default) keeps DCS's own launcher window; press Play there. When you press Play, the DCS launcher restarts DCS and asks Windows to take it out of the "job" its parent runs in. If DCS Control itself was started by a program that puts its children in a restricted job (a script runner, an automation tool, some sandboxes), Windows refuses: DCS never opens and `dcs.log` ends with "… failed with error code 5". The app detects this, disables the option and explains why. **Opened from the Start menu or Explorer, the app is not in such a job and the launcher works.**
 
 ## In flight: hotkeys and the diagnostic panel
 
@@ -273,13 +287,13 @@ The **Checks** page lists every finding once:
 
 ![Stock DCS page with the original files](screenshots/recovery-original-files.png)
 
-The **Stock DCS** page (last in the menu) has one card, *Original files*, with one button: **Back to stock DCS**. It puts every file DCS VR Control ever changed back to what was there before:
+The **Stock DCS** page (last in the menu) has one card, *Original files*, with one button: **Back to stock DCS**. It puts every file DCS Control ever changed back to what was there before:
 
 - backups are written back,
 - files that did not exist before are removed,
-- in `options.lua`, only the settings DCS VR Control changed go back — your other edits stay.
+- in `options.lua`, only the settings DCS Control changed go back — your other edits stay.
 
-Only a running DCS stops it. The folded list shows what will happen to each file. Use it **before repairing or updating DCS**, before uninstalling the app, or whenever you want plain DCS back. Backups live in `%LOCALAPPDATA%\DcsVrControl\originals` — keep that folder until you have restored.
+Only a running DCS stops it. The folded list shows what will happen to each file. Use it **before repairing or updating DCS**, before uninstalling the app, or whenever you want plain DCS back. Backups live in `%LOCALAPPDATA%\DcsControl\originals` — keep that folder until you have restored.
 
 ## Troubleshooting and FAQ
 
@@ -321,7 +335,7 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 
 1. Open the app and press **Back to stock DCS** (Stock DCS page) with DCS closed.
 2. Run `Uninstall.cmd` from the extracted release folder. It removes the application files after checking them; your profiles and backups stay.
-3. If you want everything gone, delete `%LOCALAPPDATA%\DcsVrControl` afterwards (only after Back to stock DCS — it holds the backups).
+3. If you want everything gone, delete `%LOCALAPPDATA%\DcsControl` (or `%LOCALAPPDATA%\DcsVrControl` if you used the app before 0.5.0) afterwards (only after Back to stock DCS — it holds the backups).
 
 The Sboys driver, if you installed it, is managed by its own tool.
 
@@ -331,15 +345,16 @@ Only the `options.lua` values a feature needs — the frame limit, desktop VSync
 
 ## Reporting a problem
 
-Please open an issue on [GitHub](https://github.com/NIGos/dcs-vr-control/issues) with:
+Please open an issue on [GitHub](https://github.com/NIGos/dcs-control/issues) with:
 
 1. **What you did and what happened** (route, features, 2×/3×/Auto, single-player or multiplayer).
-2. **The diagnostic report:** Checks → **Export report**. It lists detected files and versions, runtime manifests, OpenXR layers, saved DCS settings, problems found and the files DCS VR Control changed.
+2. **The diagnostic report:** Checks → **Export report**. It lists detected files and versions, runtime manifests, OpenXR layers, saved DCS settings, problems found and the files DCS Control changed.
 3. **Logs** from the flight (zip them):
    - `%USERPROFILE%\Saved Games\DCS\Logs\dcs.log`
-   - `%LOCALAPPDATA%\DcsVrControl\app.log` and `%LOCALAPPDATA%\DcsVrControl\originals\originals.log`
-   - CPU Boost: `%LOCALAPPDATA%\DcsVrControl\boost\boost.log` and `status.json`
-   - Frame generation (with **OFXR log** on): `%LOCALAPPDATA%\DcsVrControl\managed\profiles\<profile>\ofxr\`
+   - (If you used the app before 0.5.0, when it was DCS VR Control, these files are in `%LOCALAPPDATA%\DcsVrControl` instead.)
+   - `%LOCALAPPDATA%\DcsControl\app.log` and `%LOCALAPPDATA%\DcsControl\originals\originals.log`
+   - CPU Boost: `%LOCALAPPDATA%\DcsControl\boost\boost.log` and `status.json`
+   - Frame generation (with **OFXR log** on): `%LOCALAPPDATA%\DcsControl\managed\profiles\<profile>\ofxr\`
    - DLSS 5 / Cheeky: the `.log` files in `<DCS folder>\bin\CheekyFoveatedDLSS\`
    - Prefetch fix: `<DCS folder>\bin\DcsVrPrefetchFix.log`
    - Pimax route: the newest `%LOCALAPPDATA%\Pimax\runtime\pvr_srv_log_*.txt`
@@ -348,4 +363,4 @@ Please open an issue on [GitHub](https://github.com/NIGos/dcs-vr-control/issues)
 
 ## Support
 
-DCS VR Control is free. If it improved your flying and you'd like to support the work: [ko-fi.com/nigos](https://ko-fi.com/nigos).
+DCS Control is free. If it improved your flying and you'd like to support the work: [ko-fi.com/nigos](https://ko-fi.com/nigos).

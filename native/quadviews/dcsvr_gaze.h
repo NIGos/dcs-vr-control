@@ -1,4 +1,4 @@
-// DCS VR Control: eye-tracked focus area with frame generation (copied into Quad-Views-Foveated by
+// DCS Control: eye-tracked focus area with frame generation (copied into Quad-Views-Foveated by
 // scripts/build-quadviews.ps1; tested by tests/quadviews-gaze).
 //
 // DCS places the focus area once per rendered frame, and with frame generation that frame reaches the headset 55-88 ms

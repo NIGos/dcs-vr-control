@@ -7,14 +7,14 @@ $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
 $env:NUGET_PACKAGES=Join-Path $workspaceRoot '.cache/nuget'
 $dotnet = Join-Path $workspaceRoot '.tools/dotnet/dotnet.exe'
 $version = & (Join-Path $PSScriptRoot 'version.ps1')
-$releaseRoot = Join-Path $workspaceRoot "artifacts/release/DcsVrControl-$version-win-x64"
+$releaseRoot = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"
 # The user's real DCS settings are hashed before the pipeline; verify-web-release.py checks that nothing in
 # building, testing or verifying the release changed them. A profile the user applied earlier is fine.
 $actualDcs = @{}; foreach ($name in 'options.lua','autoexec.cfg') { $file = Join-Path $env:USERPROFILE "Saved Games/DCS/Config/$name"; if (Test-Path -LiteralPath $file) { $actualDcs[$file] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } }
 $actualDcs | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $workspaceRoot 'artifacts/fps-actual-before.json') -Encoding utf8
 if (Test-Path -LiteralPath $releaseRoot) {
     $resolvedRelease = (Resolve-Path -LiteralPath $releaseRoot).Path
-    $allowedRelease = [IO.Path]::GetFullPath((Join-Path $workspaceRoot "artifacts/release/DcsVrControl-$version-win-x64"))
+    $allowedRelease = [IO.Path]::GetFullPath((Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"))
     if ($resolvedRelease -ne $allowedRelease -or -not $resolvedRelease.StartsWith([IO.Path]::GetFullPath($workspaceRoot) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to clean an unexpected release destination.' }
     Remove-Item -LiteralPath $resolvedRelease -Recurse -Force
 }
@@ -84,13 +84,13 @@ Copy-Item -LiteralPath (Join-Path $workspaceRoot 'README.md') -Destination (Join
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'PLAN_DCS_VR.md') -Destination $releaseRoot -Force
 # The policy's version and corresponding-source name always match this build (GPL source offer).
 $policy = Get-Content -LiteralPath (Join-Path $workspaceRoot 'distribution-policy.json') -Raw | ConvertFrom-Json
-$policy.version = $version; $policy.correspondingSource = "DcsVrControl-$version-sources.zip"
+$policy.version = $version; $policy.correspondingSource = "DcsControl-$version-sources.zip"
 $policy | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'distribution-policy.json') -Encoding utf8
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/SETUP.md') -Destination (Join-Path $releaseRoot 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/FRAME_PACING.md') -Destination (Join-Path $releaseRoot 'docs') -Force
 foreach ($doc in @('docs/INTERFACE.md','docs/VALIDATION.md','docs/FIRST_FLIGHT.md','docs/THIRD_PARTY.md','docs/RELEASE_NOTES.md','docs/APPROACHES.md','docs/QUAD_FOCUS_ADAPTER.md','docs/NEURAL_TUNING.md','docs/PERFORMANCE.md','docs/performance-results.json','docs/APP_ICON.md','docs/USER_GUIDE.md','docs/app-icon-preview.png')) { Copy-Item -LiteralPath (Join-Path $workspaceRoot $doc) -Destination (Join-Path $releaseRoot 'docs') -Force }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/screenshots') -Destination (Join-Path $releaseRoot 'docs') -Recurse -Force
-$renderStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $releaseRoot 'DcsVrControl.exe'))
+$renderStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $releaseRoot 'DcsControl.exe'))
 $renderStart.UseShellExecute = $false; $renderStart.CreateNoWindow = $true
 $renderRoot = Join-Path $workspaceRoot ('artifacts/web-ui/' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $renderRoot -Force | Out-Null
@@ -135,7 +135,7 @@ pause
 $files = Get-ChildItem -LiteralPath $releaseRoot -Recurse -File | Where-Object { $_.Name -ne 'release-manifest.json' } | ForEach-Object {
     @{ path=[IO.Path]::GetRelativePath($releaseRoot,$_.FullName); sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes=$_.Length }
 }
-@{ schemaVersion=1; product='DcsVrControl'; version=$version; files=@($files) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'release-manifest.json') -Encoding utf8
+@{ schemaVersion=1; product='DcsControl'; version=$version; files=@($files) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'release-manifest.json') -Encoding utf8
 & (Join-Path $releaseRoot 'scripts/installer.ps1') -Action Verify -Destination (Join-Path $workspaceRoot 'artifacts/installer-verify') -NoShortcut
 if ($LASTEXITCODE -ne 0) { throw 'Release integrity check failed.' }
 $releaseZip = $releaseRoot + '.zip'

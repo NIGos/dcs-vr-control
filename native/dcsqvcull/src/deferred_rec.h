@@ -653,7 +653,7 @@ struct PoolConfig {
 
 class Pool {
  public:
-  static constexpr int kMaxWorkers = 8;
+  static constexpr int kMaxWorkers = 16;
 
   // No destructor join: a global Pool must be stopped explicitly (Shutdown),
   // never from DllMain (joining there would wait on the loader lock).

@@ -6,10 +6,10 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <!-- Single source for the product version. Scripts read VersionPrefix/VersionSuffix from this file. -->
-    <VersionPrefix>0.4.2</VersionPrefix>
+    <VersionPrefix>0.5.0</VersionPrefix>
     <VersionSuffix>preview</VersionSuffix>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <Authors>DCS VR Control contributors</Authors>
-    <Product>DCS VR Control</Product>
+    <Authors>DCS Control contributors</Authors>
+    <Product>DCS Control</Product>
   </PropertyGroup>
 </Project>

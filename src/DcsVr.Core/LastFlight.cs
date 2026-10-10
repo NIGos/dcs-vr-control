@@ -9,7 +9,7 @@ namespace DcsVr.Core;
 /// <param name="DcsLog">Saved Games\DCS\Logs\dcs.log: the session's start and end (UTC).</param>
 /// <param name="PimaxLogDirectory">%LOCALAPPDATA%\Pimax\runtime with pvr_srv_log_*.txt: frames the headset received.</param>
 /// <param name="ManagedProfiles">The app's managed\profiles folder: OFXR's flight logs in each profile's ofxr folder.</param>
-/// <param name="BoostStatus">%LOCALAPPDATA%\DcsVrControl\boost\status.json written by the CPU Boost helper.</param>
+/// <param name="BoostStatus">%LOCALAPPDATA%\DcsControl\boost\status.json written by the CPU Boost helper.</param>
 /// <param name="DcsBin">DCS's bin folder: DcsVrPrefetchFix.log and Cheeky's CheekyFoveatedDLSS logs.</param>
 public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = null, string? ManagedProfiles = null, string? BoostStatus = null, string? DcsBin = null);
 

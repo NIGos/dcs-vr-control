@@ -1,0 +1,4754 @@
+// G-buffer recorder, R18 stages S1-S3: the G-buffer passes' ModelMaterialMT
+// draws recorded on worker threads into D3D11 command lists in DCS's exact
+// order and executed with ExecuteCommandList(TRUE) inside DCS's own G-buffer
+// pass, DCS drawing every other item between the lists. [Model]
+// GBufferRecorder (default 0), GBufferRecorderScope, GBufferRecorderWaitUs,
+// GBufferRecorderIsland, GBufferRecorderMaxSegments, GBufferRecorderHelpers, [Suite]
+// GBufferRecVerify (+Sec, +Stride), [Suite]
+// BenchGBufferRecorder (bench mode 29).
+//
+// Tags: [V] verified in the binary (DCS 2.9.30: NGModel, dx11backend,
+// GraphicsCore) or the shader sources, [I] inferred, [M] measured. Design and
+// section numbers: docs/research/R18_gbuffer_recorder.md; the template is
+// shadow_rec.h (R17 A1).
+//
+// What DCS does per G-buffer model draw [V NGModel, re-read 2026-10-10]:
+//  SceneRenderable vt[1] 0x44350: pass [r+0x60] in {1,2} -> lock add
+//  [globals+0x1e8], [r+0x78]; mat->vt[4] 0x16140(mat, item, &{1,1,1e5},
+//  pass, mesh [item+0xc0], mesh2, &ctx r+0x64, &size r+0x6c):
+//   mat+0x18c = [item+0xd4]; DX11Shader vt[27](h [mat+0x68], page buffer):
+//   sbPositions; 0xeb60: per {dst, prop} at [mat+8, mat+0x10)
+//   prop->vt[9](prop, &copy of item[0..16], dst) [V 0xeb80-0xeb97]; 0xcf80:
+//   slot 26 per texture handle (streaming request vt[23](size), compat,
+//   getSRV, SetResource); then 0x15e20: mat+0xb0..0xef = item+0x60..0x9c,
+//   mat+0x110 = arg 3 (1.0), mat+0x114/0x118 = viewport / frame-buffer size
+//   ratios (renderer vt[40], vt[54]) [V 0x15e2b-0x1600d]; pass 1 with
+//   props+0x33 == 0 and ctx byte 0 == 0: technique [mat+0x1d8], pass index 0
+//   [V 0x16019-0x16081]; the submit 0x131e0: [mat+0x1c0]->vt[2](mat+0x90,
+//   0x130), shader vt[13](h [mat+0x70], buffer), indices, vertex stream,
+//   technique, DX11Renderer::draw (FX Apply, input layout, DrawIndexed(3 *
+//   [mesh+0x210])) [V 0x131fa-0x132e8]. The draw itself is the shadow
+//   recorder's (same submit, same mesh fields): its mesh table and probe
+//   checks are reused.
+//
+// This file:
+//  - Scope ([Model] GBufferRecorderScope): bits 0-15 = G-buffer executions by
+//    their ordinal since RenderGraph::render entry (the "#k" of the GPU pass
+//    profile); up to 4 of them, one job each on a primary worker plus up to
+//    2 helpers ([Model] GBufferRecorderHelpers). Bit 16 = also
+//    BM_ALPHA_TEST (A2C) draws besides BM_NONE. Default 0x10004: execution #2
+//    (the heaviest in the S0 GPU profile, 2.7 ms, and later in the frame than
+//    #0, so its job has more lead), BM_NONE and A2C.
+//  - Recordable (S3): NGModel SceneRenderable items with ModelMaterialMT,
+//    model pass 1, opaque (props+0x33 == 0), not cockpit (ctx byte 0), blend
+//    mode in scope, key and mesh probed, sbPositions page view present, every
+//    texture set in the texture table (usable, no swap due), every texture the
+//    pass reads mapped to a PS slot by the key's probe. Everything else is
+//    residual: DCS draws it in place, between our lists.
+//  - Keys (DX11Shader, technique [mat+0x1d8], renderer+0xd4 flags): the VS
+//    slots from the reflection of shadow_inst's (b) G-buffer VS (only
+//    def_uniforms, sbPositions, cPerFrame b6 / cPerView b7 / cAmbientMap b8
+//    and samplers allowed); the rest from DCS's own draw read back right after
+//    its D3D draw (probe): VS, PS, states, samplers, PS slots holding the
+//    material CB, the page view and each read texture (found by the view the
+//    texture's FX variable holds after the draw). The pass's read names
+//    (shadow_inst's (a) RDEF) must all be def_uniforms, the three context
+//    buffers, sbPositions, samplers or the shader's texture records (the
+//    reads table, per (shader, technique)).
+//  - Texture table (R18 3.3): per (texture, aux, type) DCS's getSRV inputs
+//    and one reference per view, built on the render thread (getDesc and
+//    compat are DCS calls); workers pick a view with getSRV's own math from
+//    the entry (no DCS call). Missing or unusable entries make the draw
+//    residual and are (re)built after the pass. Changed only under an
+//    exclusive SRW lock taken with TryAcquire on the render thread; a job
+//    holds it shared from its first read until its lists are recorded.
+//  - Jobs (workers): the vector is snapshotted; pass 1 decides per item and
+//    marks per DX11Shader whether any of its items here inherits an FX
+//    variable (a texture record the pass reads that the item does not set, or
+//    no page buffer) or is not analysed: such a shader is drawn by DCS
+//    entirely (R18 3.1, gb_batch's rule). Pass 2 checks keys, meshes, pages,
+//    textures. Runs of recordable items shorter than the island ([Model]
+//    GBufferRecorderIsland, default 30) stay residual; at most [Model]
+//    GBufferRecorderMaxSegments (default 12) segments, the longest. Stage A
+//    is split: the per-item reads of DCS memory in chunks on the primary and
+//    the helpers, then a serial commit in vector order. The recorded draws are
+//    cut by draw count into one run per recording worker; each run is one
+//    command list per segment it covers, so a segment executes its lists one
+//    after the other, in order. Each list: the frame buffer's
+//    RTVs, DSV, viewports and scissors, our copies of b6-b8, then per draw
+//    the key's objects, the mesh's input layout and buffers, the page view,
+//    the read textures' views and the CB window, in vector order. CB window =
+//    the material's def_uniforms bytes (snapshot), +0xfc = [item+0xd4], the
+//    animated properties written by DCS's own vt[9] into the window, +0x20 =
+//    item+0x60..0x9c, +0x80 = the 12 bytes DCS wrote at mat+0x110 in this
+//    execution (learned from a stock draw, inputs checked at the pass).
+//  - Pass (render thread): DCS's loop is handed [front entry, residual items
+//    and one exec entry per segment, in order] ({begin, end} swapped for the
+//    call, as shadow_rec.h S6). The front entry runs after the frame buffer,
+//    clears and binder: it checks RTVs, DSV, viewports, scissors, renderer
+//    flags, the context buffers and the ratio inputs against the job. An exec
+//    entry replays its segment's streaming requests (vt[23] once per
+//    (texture, size)), checks its textures (table entries against the live
+//    textures), the guarded material dwords (what the key's stages read, minus
+//    the per-draw overrides) and the page views, copies DCS's bound b6-b8 into
+//    ours and executes the list; on any failure DCS draws that segment's
+//    items itself right there (vt[1], in order). After the pass, for executed
+//    segments: the triangle counter sum, each material whose last item was
+//    recorded gets the bytes DCS's last draw leaves (0x18c, animated, 0xb0,
+//    0x110), and each FX variable whose last writer was recorded is set to
+//    that writer's value (texture view or page view).
+// Verification ([Suite] GBufferRecVerify): the scoped execution runs twice in
+// the same frame from the same target contents (gb_batch.h's verifier:
+// targets captured at the front entry, restored between the runs, all 6 RTs
+// and the DSV compared bit for bit); the first 3 compares stock vs stock
+// (reproducibility), then stock vs recorded; any difference latches the
+// recorder off. While verifying, the immediate state is read before and after
+// each ExecuteCommandList and must be equal (R18 T9). [Suite]
+// GBufferRecVerifyStride=N forces every N-th recordable draw residual and the
+// island to N-1 (R18 T10).
+//
+// Fail-safe: a failed check makes the segment (or the execution) stock;
+// DCS memory is read under SEH; a fault, a verify mismatch or a worker fault
+// latches the recorder off for the session; off = pass-through. Requires
+// G-buffer batching off, a device that is not SINGLETHREADED, driver command
+// lists and constant-buffer offsets.
+// Included once from main.cpp inside its anonymous namespace, after
+// pass_timing.h, gb_count.h, shadow_inst.h, shadow_batch.h, gb_batch.h,
+// split_filter.h, shadow_rec.h and gb_rec_count.h.
+#pragma once
+
+namespace gbrec {
+
+using shrec::Mix;
+using shrec::SafeRel;
+
+// ---------------------------------------------------------------------------
+// Constants, scope, reasons
+// ---------------------------------------------------------------------------
+constexpr uint32_t kCbOff = 0x90, kCbLen = 0x130, kPsoCb = 0xfc;
+constexpr uint32_t kMatrixCb = 0x20, kMatrixLen = 0x40;  // mat+0xb0..0xef = item+0x60..0x9c
+constexpr uint32_t kRatioCb = 0x80, kRatioLen = 12;      // mat+0x110..0x11b
+constexpr uint32_t kDbgBits = 0x1 | 0x4 | 0x10 | 0x20 | 0x40;  // renderer+0x2120: skips (0x20: no sbPositions set)
+constexpr int kSlots = 4;
+constexpr int kMaxSegments = 16;          // array size; [Model] GBufferRecorderMaxSegments (default 12) caps a job
+constexpr uint32_t kDefaultMaxSeg = 12;
+constexpr uint32_t kDefaultIsland = 30;
+constexpr size_t kMaxItems = 1 << 15;
+constexpr int kThreads = 3;               // per job: the primary worker and up to 2 helpers (stage A and recording)
+constexpr uint32_t kTSets = 1 << 15;      // texture sets of the candidate draws, per stage-A thread
+constexpr uint32_t kTViews = 1 << 15;     // PS views of the candidate draws, per stage-A thread
+constexpr uint32_t kTMisses = 2048, kTRefresh = 1024, kTDedupe = 4096;  // per thread
+constexpr uint32_t kPreMatTable = 1 << 12;
+constexpr uint32_t kPreChunk = 32;        // items per stage-A chunk
+constexpr double kPreWaitUs = 20000.0;    // the primary waits this long for a helper's last chunk
+constexpr uint32_t kSplitMinDraws = 192;  // fewer recorded draws: one worker records them all
+constexpr int kMaxPieces = kMaxSegments + kThreads;
+constexpr uint32_t kMaxTex = 32;           // texture handles per material (mat+0x2d8)
+constexpr int kMaxPsTex = 12;              // texture records a key's pass reads
+constexpr uint32_t kRecWords = 8;          // 512 texture records per shader
+constexpr uint32_t kMaxRecords = 64 * kRecWords;
+constexpr uint32_t kMaxAnim = 32;
+constexpr uint32_t kMatTable = 1 << 14;    // powers of two
+constexpr uint32_t kMaxMats = 1 << 13;
+constexpr uint32_t kShaderTable = 1 << 12;
+constexpr uint32_t kMaxShaders = 1 << 11;
+constexpr uint32_t kDedupe = 1 << 16;
+constexpr uint32_t kWantTable = 512;  // power of two
+constexpr uint32_t kMeshCache = 1 << 13;
+constexpr uint32_t kMaxWants = 64;
+constexpr uint32_t kMaxReadWants = 64;
+constexpr uint32_t kMaxMisses = 4096;
+constexpr uint32_t kMaxRefresh = 4096;
+constexpr uint32_t kMaxSegEnts = 1 << 16;
+constexpr uint32_t kMaxSegPairs = 1 << 16;
+constexpr uint32_t kMaxSegMats = 1 << 14;
+constexpr uint32_t kMaxSegPages = 4096;
+constexpr uint32_t kMaxRestores = 1 << 15;
+constexpr int kProbesPerPass = 64;
+constexpr size_t kKeyTable = 4096, kReadsTable = 4096, kMeshTable = 32768;  // powers of two
+constexpr UINT kVp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+constexpr UINT kSrvSlots = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+constexpr UINT kSampSlots = D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT;
+// DX11StateManager's sampler pool, bound at s5-s15 on every stage (samplers11.hlsl USE_SAMPLERSTATEPOOL)
+// [V R19 2.3]. Per execution: read at the front entry, checked at every exec entry, bound in each list's prologue.
+constexpr UINT kPoolFirst = 5;
+constexpr uint32_t kPoolMask = ((1u << kSampSlots) - 1) & ~((1u << kPoolFirst) - 1);
+constexpr UINT kCbSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
+constexpr UINT kRtv = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;
+constexpr UINT kCtx0 = 6;  // b6 cPerFrame, b7 cPerView, b8 cAmbientMap [V common/context.hlsl, AmbientCube.hlsl]
+constexpr uint8_t kNoSeg = 0xff;
+shrec::WorkLoad g_load;  // this recorder's worker regions (shadow_rec.h)
+shrec::ClassCensus g_census;  // texture classes the table refused (shadow_rec.h)
+
+// [Model] GBufferRecorderScope: bits 0-15 = executions by ordinal, bit 16 = A2C.
+enum : uint32_t { kScopeExec = 0xffff, kScopeA2c = 1u << 16 };
+constexpr uint32_t kDefaultScope = (1u << 2) | kScopeA2c;
+
+// The scoped ordinal of slot s (the s-th set bit, at most kSlots), or -1.
+inline int OrdinalOfSlot(uint32_t scope, int s) {
+  int k = 0;
+  for (int o = 0; o < 16; ++o)
+    if (scope & (1u << o)) {
+      if (k == s) return o;
+      ++k;
+    }
+  return -1;
+}
+// The slot of ordinal o under scope, or -1.
+inline int SlotOfOrdinal(uint32_t scope, int o) {
+  if (o < 0 || o > 15 || !(scope & (1u << o))) return -1;
+  int k = 0;
+  for (int b = 0; b < o; ++b) k += (scope >> b) & 1;
+  return k < kSlots ? k : -1;
+}
+
+enum ItemReason : int {
+  kRecorded = 0,
+  kRNotModel,
+  kRPass,
+  kRTransparent,
+  kRCockpit,
+  kRNoShader,
+  kRBlend,
+  kRMatExcluded,
+  kRAnim,
+  kRUnclean,
+  kRNoCompile,
+  kRKeyPending,
+  kRKeyRejected,
+  kRKeyCooling,
+  kRMeshPending,
+  kRMeshRejected,
+  kRMeshChanged,
+  kRPage,
+  kRTexMiss,
+  kRTexUnusable,
+  kRTexSlot,
+  kRTooMany,
+  kRForced,
+  kRIsland,
+  kRSegments,
+  kReasons
+};
+const char* const kReasonName[kReasons] = {
+    "recorded",
+    "not a ModelMaterialMT SceneRenderable (terrain, shells, other materials)",
+    "model pass number is not 1",
+    "transparent material",
+    "cockpit technique",
+    "no DX11Shader",
+    "blend mode not in scope",
+    "its material has an item of another pass in this vector",
+    "an animated property not replicable",
+    "its DX11Shader has an item here that inherits an FX variable, or one not analysed yet",
+    "key not compiled by shadow inst yet",
+    "key not probed yet",
+    "key not recordable",
+    "its key's state varied between draws: relearnt after a cooldown",
+    "mesh not probed yet",
+    "mesh not recordable",
+    "mesh differs from its probe",
+    "no sbPositions view for the page",
+    "a texture not in the texture table yet",
+    "a texture not usable (class, swap due, mip-set shape)",
+    "a read texture without a PS slot in its key",
+    "a job table is full",
+    "forced residual (verify stride)",
+    "in a run shorter than the island",
+    "beyond the segment limit"};
+
+// Per execution: every segment executed, or why the whole execution was stock.
+enum PassReason : int {
+  kPExecuted = 0,
+  kPNoJob,
+  kPLate,
+  kPFailed,
+  kPNothing,
+  kPIdentity,
+  kPTarget,
+  kPFlags,
+  kPCtx,
+  kPRatio,
+  kPPool,
+  kPNoEntry,
+  kPVerifyAa,
+  kPVerifyCapture,
+  kPassReasons
+};
+const char* const kPassReasonName[kPassReasons] = {
+    "executed",
+    "no job (execution or target not learned yet, or no render entry)",
+    "job still running at the pass",
+    "job failed or faulted",
+    "nothing recordable",
+    "item vector changed since the job read it",
+    "render targets, depth target, viewports or scissors differ",
+    "renderer flags differ (rasterizer index or debug bits)",
+    "context buffers b6-b8 missing or of another size",
+    "frame-buffer or viewport size differs from the learned ratios",
+    "the sampler pool s5-s15 differs from the learned one",
+    "the front entry did not run",
+    "verify: stock vs stock run",
+    "verify: targets not captured"};
+
+// Per segment of an execution that passed the front checks.
+enum SegReason : int {
+  kSExecuted = 0,
+  kSTexture,
+  kSGuard,
+  kSPage,
+  kSCtx,
+  kSPool,
+  kSFlags,
+  kSRedo,
+  kSFault,
+  kSegReasons
+};
+const char* const kSegReasonName[kSegReasons] = {
+    "executed", "a texture's view changed or a swap is due", "a material's shader-read CB dwords changed",
+    "a page's sbPositions view changed", "a context buffer changed", "the sampler pool s5-s15 changed",
+    "renderer flags (rasterizer index or debug bits) changed",
+    "a texture changed and the re-recorded list was not ready", "fault in the checks"};
+
+// ---------------------------------------------------------------------------
+// Pure helpers (offline tested)
+// ---------------------------------------------------------------------------
+// The pool slots s5-s15 of two sampler arrays are the same objects.
+inline bool PoolSame(const void* const* a, const void* const* b) {
+  for (UINT q = kPoolFirst; q < kSampSlots; ++q)
+    if (a[q] != b[q]) return false;
+  return true;
+}
+// The sampler slots a key binds itself (below the pool): its FX dependencies,
+// or every slot when those were not read.
+inline uint32_t KeyOwnSamplers(uint32_t deps) { return deps & ~kPoolMask; }
+
+inline void MarkDwords(uint64_t m[2], uint32_t off, uint32_t size) {
+  for (uint32_t d = off / 4; d < (off + size + 3) / 4 && d < kCbLen / 4; ++d) m[d >> 6] |= 1ull << (d & 63);
+}
+// The per-draw writes of 0x16140/0x15e20 (pass 1 opaque) besides the animated ones.
+inline void BaseOverrides(uint64_t m[2]) {
+  MarkDwords(m, kPsoCb, 4);
+  MarkDwords(m, kMatrixCb, kMatrixLen);
+  MarkDwords(m, kRatioCb, kRatioLen);
+}
+inline void AllDwords(uint64_t m[2]) {
+  m[0] = ~0ull;
+  m[1] = (1ull << (kCbLen / 4 - 64)) - 1;
+}
+
+// Runs of recordable items (flag != 0) in vector order: runs shorter than
+// island are cleared; at most maxSeg runs are kept (the longest, the earlier
+// on equal length). Returns the runs kept as [first, end) pairs in vector
+// order; out must hold maxSeg pairs. Cleared items get demote[] = 1 and the
+// reason (island or segment limit) in why[] (1 = island, 2 = limit).
+inline int PlanSegments(const uint8_t* flag, size_t n, uint32_t island, int maxSeg, uint32_t (*out)[2],
+                        uint8_t* why) {
+  struct Run {
+    uint32_t a, b;
+  };
+  std::vector<Run> runs;
+  size_t i = 0;
+  while (i < n) {
+    if (!flag[i]) {
+      ++i;
+      continue;
+    }
+    size_t e = i;
+    while (e < n && flag[e]) ++e;
+    if (e - i >= island) {
+      runs.push_back({static_cast<uint32_t>(i), static_cast<uint32_t>(e)});
+    } else {
+      for (size_t k = i; k < e; ++k) why[k] = 1;
+    }
+    i = e;
+  }
+  if (static_cast<int>(runs.size()) > maxSeg) {
+    std::vector<size_t> idx(runs.size());
+    for (size_t k = 0; k < idx.size(); ++k) idx[k] = k;
+    std::stable_sort(idx.begin(), idx.end(),
+                     [&](size_t x, size_t y) { return runs[x].b - runs[x].a > runs[y].b - runs[y].a; });
+    std::vector<uint8_t> keep(runs.size(), 0);
+    for (int k = 0; k < maxSeg; ++k) keep[idx[k]] = 1;
+    std::vector<Run> kept;
+    for (size_t k = 0; k < runs.size(); ++k) {
+      if (keep[k]) {
+        kept.push_back(runs[k]);
+      } else {
+        for (uint32_t q = runs[k].a; q < runs[k].b; ++q) why[q] = 2;
+      }
+    }
+    runs.swap(kept);
+  }
+  for (size_t k = 0; k < runs.size(); ++k) {
+    out[k][0] = runs[k].a;
+    out[k][1] = runs[k].b;
+  }
+  return static_cast<int>(runs.size());
+}
+
+// The texture table lives in shadow_rec.h (both recorders).
+using shrec::kTexViews;
+using shrec::kTeEmpty;
+using shrec::kTeLive;
+using shrec::kTeTomb;
+using shrec::kTmFixed;
+using shrec::kTmAreas;
+using shrec::TexWhy;
+using shrec::kTwOk;
+using shrec::kTwClass;
+using shrec::kTw678;
+using shrec::kTwMipSet;
+using shrec::kTwSwap;
+using shrec::kTwFault;
+using shrec::kTwCount;
+using shrec::kTexWhyName;
+using shrec::TexEntry;
+using shrec::TexTable;
+using shrec::TexHash;
+using shrec::TexFind;
+using shrec::TexReleaseViews;
+using shrec::TexInsert;
+using shrec::TexBuildRaw;
+using shrec::TexBuildGuarded;
+using shrec::TexCheckRaw;
+using shrec::TexPick;
+using shrec::TexSwapDueNow;
+using shrec::TexSwapDueGuarded;
+using shrec::TexWipe;
+using shrec::TexEvict;
+using shrec::AllocTex;
+using shrec::FreeTex;
+using shrec::ReplayVt18;
+
+// ---------------------------------------------------------------------------
+// Reads table: the texture records a (shader, technique) pass 0 reads
+// ---------------------------------------------------------------------------
+struct ReadsEntry {
+  std::atomic<void*> shader{nullptr};
+  uint64_t tech = 0;
+  void* effect = nullptr;
+  void* techBegin = nullptr;
+  int state = 0;  // 1: mask valid; -1: the pass binds something unmapped or was not analysed
+  const char* why = nullptr;
+  uint64_t mask[kRecWords] = {};
+  uint32_t count = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Keys: (DX11Shader, technique, renderer flags)
+// ---------------------------------------------------------------------------
+struct VsStatic {
+  const char* why = nullptr;  // nullptr = the VS reads only what the recorder binds
+  UINT cbSlot = ~0u, sbSlot = ~0u;
+  uint32_t ctxMask = 0;  // bit s: the VS reads a context buffer at b<s> (6..8)
+};
+
+// The VS bindings of shadow_inst's (b) G-buffer blob (CompareVariants: equal
+// to (a)'s but for qvInstOffsets).
+inline const char* AnalyseGbVs(decltype(&D3DReflect) reflect, const void* code, size_t n, const char* cbName,
+                               VsStatic& out) {
+  out = VsStatic();
+  ID3D11ShaderReflection* r = nullptr;
+  if (!reflect || !code || !cbName ||
+      FAILED(reflect(code, n, __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(&r))) || !r)
+    return out.why = "D3DReflect failed";
+  D3D11_SHADER_DESC d = {};
+  r->GetDesc(&d);
+  const char* why = nullptr;
+  static const char* const kCtxNames[3] = {"cPerFrame", "cPerView", "cAmbientMap"};
+  for (UINT i = 0; i < d.BoundResources && !why; ++i) {
+    D3D11_SHADER_INPUT_BIND_DESC b = {};
+    r->GetResourceBindingDesc(i, &b);
+    const bool one = b.BindCount == 1;
+    if (b.Type == D3D_SIT_CBUFFER && strcmp(b.Name, cbName) == 0 && one) {
+      out.cbSlot = b.BindPoint;
+    } else if (b.Type == D3D_SIT_CBUFFER) {
+      int k = 0;
+      while (k < 3 && strcmp(b.Name, kCtxNames[k]) != 0) ++k;
+      if (k == 3 || b.BindPoint != kCtx0 + k || !one) why = "the VS reads another constant buffer";
+      else out.ctxMask |= 1u << b.BindPoint;
+    } else if (b.Type == D3D_SIT_STRUCTURED && strcmp(b.Name, "sbPositions") == 0 && one) {
+      out.sbSlot = b.BindPoint;
+    } else if (b.Type == D3D_SIT_STRUCTURED && strcmp(b.Name, "qvInstOffsets") == 0 && b.BindPoint == 127) {
+      // (b) only
+    } else if (b.Type == D3D_SIT_SAMPLER) {
+      // samplers: every slot is copied from DCS's draw
+    } else {
+      why = "the VS reads a texture or another buffer";
+    }
+  }
+  if (!why && out.cbSlot == ~0u) why = "the VS reads no def_uniforms";
+  if (!why && out.sbSlot == ~0u) why = "the VS reads no sbPositions";
+  if (!why && out.cbSlot >= kCtx0 && out.cbSlot < kCtx0 + 3) why = "def_uniforms is bound at a context slot";
+  r->Release();
+  return out.why = why;
+}
+
+struct GbKey {
+  std::atomic<void*> shader{nullptr};
+  uint64_t tech = 0;
+  uint32_t flags = 0;
+  void* effect = nullptr;
+  void* techBegin = nullptr;
+  uint32_t scope = 0;         // the execution's collection index (keys are learnt per G-buffer view)
+  std::atomic<int> state{0};  // 1 recordable, -1 not, kRetired (state changed; relearnt after the cooldown)
+  const char* why = nullptr;
+  uint32_t retiredAt = 0;     // render entry + 1
+  VsStatic st;
+  // From DCS's draw (references held while recordable).
+  ID3D11VertexShader* vs = nullptr;
+  ID3D11PixelShader* ps = nullptr;
+  ID3D11DepthStencilState* dss = nullptr;
+  UINT stencilRef = 0;
+  ID3D11BlendState* bs = nullptr;
+  float blendFactor[4] = {};
+  UINT sampleMask = 0;
+  ID3D11RasterizerState* rs = nullptr;
+  ID3D11SamplerState* vsSamp[kSampSlots] = {};
+  ID3D11SamplerState* psSamp[kSampSlots] = {};
+  uint32_t vsSampDeps = 0xffff, psSampDeps = 0xffff;  // sampler slots FX Apply sets (all when not read)
+  uint32_t psCbMask = 0;     // PS slots holding the material's CB (of the slots FX Apply sets)
+  uint32_t psCtxMask = 0;    // PS slots 6..8 holding a context buffer (informative: lists bind the front's)
+  uint64_t psSbMask[2] = {}; // PS slots holding the page view
+  int psTexCount = 0;        // = the reads entry's record count
+  int32_t psTexH[kMaxPsTex] = {};
+  UINT psTexSlot[kMaxPsTex] = {};
+};
+
+struct Tables {
+  GbKey* keys = nullptr;          // kKeyTable
+  ReadsEntry* reads = nullptr;    // kReadsTable
+  shrec::Tables mesh;             // meshes only (shadow_rec.h's entries and checks)
+  uint32_t keysUsed = 0, readsUsed = 0;
+};
+
+inline size_t KeyHash(const void* s, uint64_t tech, uint32_t flags) {
+  return Mix(reinterpret_cast<uintptr_t>(s) * 0x9E3779B97F4A7C15ull ^ tech * 0xC2B2AE3D27D4EB4Full ^ flags);
+}
+inline uint32_t ScopedFlags(uint32_t flags, uint32_t scope) { return flags ^ (scope * 0x9E3779B1u); }
+
+constexpr int kRetired = shrec::kRetired;
+constexpr uint32_t kKeyCooldown = shrec::kKeyCooldown;
+
+const GbKey* FindKey(const Tables& t, void* shader, uint64_t tech, uint32_t flags, void* effect, void* techBegin,
+                     uint32_t scope = 0) {
+  if (!t.keys || !shader) return nullptr;
+  size_t i = KeyHash(shader, tech, ScopedFlags(flags, scope)) & (kKeyTable - 1);
+  for (size_t p = 0; p < kKeyTable; ++p, i = (i + 1) & (kKeyTable - 1)) {
+    const GbKey& e = t.keys[i];
+    void* k = e.shader.load(std::memory_order_acquire);
+    if (!k) return nullptr;
+    if (k == shader && e.tech == tech && e.flags == flags && e.scope == scope && e.effect == effect &&
+        e.techBegin == techBegin && e.state.load(std::memory_order_acquire) != kRetired)
+      return &e;
+  }
+  return nullptr;
+}
+
+// A retired entry of the key exists (anyTime) or was retired less than
+// kKeyCooldown render entries before `now`.
+bool KeyCooling(const Tables& t, void* shader, uint64_t tech, uint32_t flags, void* effect, void* techBegin,
+                uint32_t scope, uint32_t now, bool anyTime) {
+  if (!t.keys || !shader) return false;
+  size_t i = KeyHash(shader, tech, ScopedFlags(flags, scope)) & (kKeyTable - 1);
+  for (size_t p = 0; p < kKeyTable; ++p, i = (i + 1) & (kKeyTable - 1)) {
+    const GbKey& e = t.keys[i];
+    void* k = e.shader.load(std::memory_order_acquire);
+    if (!k) return false;
+    if (k == shader && e.tech == tech && e.flags == flags && e.scope == scope && e.effect == effect &&
+        e.techBegin == techBegin && e.state.load(std::memory_order_acquire) == kRetired &&
+        (anyTime || now + 1 - e.retiredAt < kKeyCooldown))
+      return true;
+  }
+  return false;
+}
+
+GbKey* NewKey(Tables& t, void* shader, uint64_t tech, uint32_t flags, uint32_t scope = 0) {
+  if (!t.keys || t.keysUsed >= kKeyTable * 3 / 4) return nullptr;
+  size_t i = KeyHash(shader, tech, ScopedFlags(flags, scope)) & (kKeyTable - 1);
+  for (size_t p = 0; p < kKeyTable; ++p, i = (i + 1) & (kKeyTable - 1))
+    if (!t.keys[i].shader.load(std::memory_order_relaxed)) return &t.keys[i];
+  return nullptr;
+}
+
+void PublishKey(Tables& t, GbKey& e, void* shader) {
+  ++t.keysUsed;
+  e.shader.store(shader, std::memory_order_release);
+}
+
+const ReadsEntry* FindReads(const Tables& t, void* shader, uint64_t tech, void* effect, void* techBegin) {
+  if (!t.reads || !shader) return nullptr;
+  size_t i = KeyHash(shader, tech, 0) & (kReadsTable - 1);
+  for (size_t p = 0; p < kReadsTable; ++p, i = (i + 1) & (kReadsTable - 1)) {
+    const ReadsEntry& e = t.reads[i];
+    void* k = e.shader.load(std::memory_order_acquire);
+    if (!k) return nullptr;
+    if (k == shader && e.tech == tech && e.effect == effect && e.techBegin == techBegin) return &e;
+  }
+  return nullptr;
+}
+
+ReadsEntry* NewReads(Tables& t, void* shader, uint64_t tech) {
+  if (!t.reads || t.readsUsed >= kReadsTable * 3 / 4) return nullptr;
+  size_t i = KeyHash(shader, tech, 0) & (kReadsTable - 1);
+  for (size_t p = 0; p < kReadsTable; ++p, i = (i + 1) & (kReadsTable - 1))
+    if (!t.reads[i].shader.load(std::memory_order_relaxed)) return &t.reads[i];
+  return nullptr;
+}
+
+void PublishReads(Tables& t, ReadsEntry& e, void* shader) {
+  ++t.readsUsed;
+  e.shader.store(shader, std::memory_order_release);
+}
+
+bool AllocTables(Tables& t) {
+  if (!t.keys) t.keys = new (std::nothrow) GbKey[kKeyTable];
+  if (!t.reads) t.reads = new (std::nothrow) ReadsEntry[kReadsTable];
+  if (!t.mesh.meshes) t.mesh.meshes = new (std::nothrow) shrec::MeshEntry[shrec::kMeshTable];
+  return t.keys && t.reads && t.mesh.meshes;
+}
+
+void FreeTables(Tables& t) {
+  if (t.keys)
+    for (size_t i = 0; i < kKeyTable; ++i) {
+      GbKey& e = t.keys[i];
+      SafeRel(e.vs), SafeRel(e.ps), SafeRel(e.dss), SafeRel(e.bs), SafeRel(e.rs);
+      for (auto*& s : e.vsSamp) SafeRel(s);
+      for (auto*& s : e.psSamp) SafeRel(s);
+    }
+  delete[] t.keys;
+  delete[] t.reads;
+  t.keys = nullptr;
+  t.reads = nullptr;
+  shrec::FreeTables(t.mesh);
+  t.keysUsed = t.readsUsed = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Environment of a job (DCS's classes and globals; fakes in the tests)
+// ---------------------------------------------------------------------------
+using Vt1Fn = uint64_t(__fastcall*)(void* self, void* ctx);
+using PropFn = uint64_t(__fastcall*)(void* prop, void* span, void* dst);
+using EvalAnimFn = void(__fastcall*)(void* mat, const void* span);
+using SetResFn = long(__fastcall*)(void* var, void* srv);
+
+struct Env {
+  void* srVt = nullptr;      // NGModel SceneRenderable
+  void* modelVt = nullptr;   // NGModel ModelMaterialMT
+  void* shaderVt = nullptr;  // dx11backend DX11Shader
+  uint8_t* const* globals = nullptr;  // &model::globals (GlobalsMT*)
+  const void* propVt[gbbatch::kPropClasses] = {};  // ModelDesc animated property classes (pure vt[9])
+  uint32_t propBytes[gbbatch::kPropClasses] = {};
+  void* setResource = nullptr;  // the FX variables' vt[31] (SetResource)
+  EvalAnimFn evalAnim = nullptr;  // NGModel 0xeb60 (render thread, restores)
+  bool (*compiled)(void* shader, uint64_t tech) = nullptr;  // shadow_inst has the G-buffer key's compile
+  bool (*cbUsed)(void* shader, uint64_t tech, uint64_t out[2]) = nullptr;  // def_uniforms dwords pass 0 reads
+  int (*blend)(uint8_t* shader) = nullptr;  // BLEND_MODE (gb_rec_count.h codes)
+  gbbatch::TexEnv tex;
+};
+
+// sbPositions of page `page` [V NGModel 0xc310: [[globals]+0x80] + 0x20 +
+// page * 0x30, view at +0x30] (as shadow_rec.h). Plain.
+inline uint8_t* PageBuffer(const Env& env, uint32_t page) {
+  const uint8_t* g = env.globals ? *env.globals : nullptr;
+  if (!g) return nullptr;
+  const uint8_t* base = *reinterpret_cast<const uint8_t* const*>(g + 0x80);
+  if (!base) return nullptr;
+  return *reinterpret_cast<uint8_t* const*>(base + 0x20 + static_cast<size_t>(page) * 0x30);
+}
+inline ID3D11ShaderResourceView* PageSrv(const Env& env, uint32_t page) {
+  const uint8_t* buf = PageBuffer(env, page);
+  return buf ? *reinterpret_cast<ID3D11ShaderResourceView* const*>(buf + 0x30) : nullptr;
+}
+// The FX variable of the shader's parameter record h ([shader+0xc8] + h*0x50, +0x40).
+inline uint8_t* VarOf(const uint8_t* shader, int64_t h) {
+  return *reinterpret_cast<uint8_t* const*>(*reinterpret_cast<uint8_t* const*>(shader + 0xc8) + h * 0x50 + 0x40);
+}
+inline int64_t RecordCount(const uint8_t* shader) {
+  const uint8_t* b = *reinterpret_cast<uint8_t* const*>(shader + 0xc8);
+  const uint8_t* e = *reinterpret_cast<uint8_t* const*>(shader + 0xd0);
+  return b && e > b ? (e - b) / 0x50 : 0;
+}
+// The material's texture entries for this item ([item+0x18] array, base [props+0x26c]).
+inline const uint8_t* EntriesOf(const uint8_t* mat, const uint8_t* item) {
+  const uint8_t* props = *reinterpret_cast<uint8_t* const*>(mat + 0x28);
+  auto* arr = *reinterpret_cast<uint8_t* const* const*>(item + 0x18);
+  if (!props || !arr || !*arr) return nullptr;
+  return *arr + static_cast<size_t>(*reinterpret_cast<const uint32_t*>(props + 0x26c)) * 0x18;
+}
+
+// ---------------------------------------------------------------------------
+// Job: built and recorded on a worker
+// ---------------------------------------------------------------------------
+enum : int { kJobEmpty = 0, kJobBuilt = 1 };
+enum : int { kBuildNone = 0, kBuildOk, kBuildNoVector, kBuildOversize, kBuildVarClass, kBuildPreLate };
+enum : int { kStartIdle = 0, kStartArmed = 1, kStartRun = 2, kStartAbort = 3 };
+enum : int { kGoWait = 0, kGoRun = 1, kGoAbort = 2 };
+constexpr DWORD kStartWaitMs = 250;  // an armed job waits this long for its vector to be final
+
+struct Item {
+  uint32_t mat;      // mats[] or ~0u
+  uint32_t shader;   // shaders[] or ~0u
+  uint32_t cand;     // cands[] or ~0u
+  uint8_t reason;
+  uint8_t seg;       // kNoSeg: residual
+  uint8_t writer;    // pass-1 opaque non-cockpit model item with a DX11Shader (writes its FX variables)
+  uint8_t want;      // probe request
+};
+
+struct MatRec {
+  uint8_t* mat;
+  uint8_t* shader;
+  uint64_t tech;
+  void* effect;
+  void* techBegin;
+  const GbKey* key;
+  uint32_t shaderIdx;
+  int32_t last;       // vector index of its last ModelMaterialMT item
+  int8_t why;         // -1: not decided; kRecorded; else the reason of all its items
+  bool excluded;      // an item of another pass, transparent
+  bool shaderOk;      // a DX11Shader
+  bool transparent;
+  uint32_t animN;
+  uint32_t rec;       // recorded draws
+  uint32_t segStamp;  // dedupe per segment
+  uint64_t guard[2];  // CB dwords compared at the exec entry
+  uint8_t cb[kCbLen]; // def_uniforms at the job's read
+};
+
+struct ShaderRec {
+  uint8_t* shader;
+  uint32_t gen;
+  uint8_t unclean;
+  uint32_t rec;
+};
+
+struct SetRef {  // one texture set of a candidate draw
+  const TexEntry* e;
+  uint8_t* tex;
+  uint64_t size;
+  int64_t h;
+};
+
+struct Cand {
+  const GbKey* key;
+  const shrec::MeshEntry* mesh;
+  ID3D11ShaderResourceView* page;
+  uint32_t item;
+  uint32_t pageIdx;
+  uint32_t setFirst, viewFirst;  // in the stage-A thread's arrays (tsets/tviews[thread])
+  uint16_t setCount;
+  uint8_t alive;
+  uint8_t thread;
+};
+
+struct Seg {
+  uint32_t first, end;           // vector indexes
+  uint32_t candFirst, candEnd;   // cands[] (alive ones are the draws)
+  uint32_t entFirst, entEnd;     // segEnts[]
+  uint32_t pairFirst, pairEnd;   // segPairs[] (texture, size): the streaming replay
+  uint32_t matFirst, matEnd;     // segMats[]
+  uint32_t pageFirst, pageEnd;   // segPages[]
+  uint32_t draws;
+  uint64_t tris;
+  uint32_t pieceFirst, pieceEnd; // pieces[]: its command lists, executed in order by its exec entry
+};
+
+// A contiguous range of a segment's draws recorded by one worker into one
+// command list (a segment split over workers has several, in order).
+// A segment re-recorded during its pass (the slot's idle workers).
+struct Job;
+struct RedoArg {
+  Job* j;
+  uint8_t seg, worker;
+};
+constexpr uint32_t kMaxRedoEnts = 256;
+enum : int { kRedoNone = 0, kRedoWant, kRedoRun, kRedoOk, kRedoFail };
+
+struct Piece {
+  uint32_t candFirst, candEnd, draws;
+  uint8_t seg, role;  // role: 0 the primary, 1.. the helpers in their arrival order
+  ID3D11CommandList* cl;
+};
+
+// Stage A's reads per material, per thread (cache).
+struct PreMat {
+  uint8_t* mat;
+  uint32_t gen;
+  uint8_t* shader;
+  bool shaderOk, transparent;
+  uint64_t tech;
+  void* effect;
+  void* techBegin;
+  const ReadsEntry* rd;
+  const GbKey* key;
+};
+
+// Stage A's reads per item (any thread; the serial commit decides from them).
+enum : uint8_t { kPreNone = 0, kPreModel = 1 };
+struct Pre {
+  uint8_t* item;
+  uint8_t* mat;
+  uint8_t* mesh;
+  const PreMat* pm;
+  const GbKey* key;            // the key the mesh and textures were read against (nullptr: not read)
+  const shrec::MeshEntry* me;
+  ID3D11ShaderResourceView* page;
+  uint32_t pageIdx;
+  uint32_t setFirst, viewFirst;
+  uint16_t setCount;
+  uint8_t kind;      // kPreModel: a ModelMaterialMT SceneRenderable
+  uint8_t pass1, cockpit;
+  uint8_t inherit;   // pass-1 writer: a read record not set by it
+  uint8_t pageOk;    // a page buffer (vt[27] sets sbPositions)
+  uint8_t meshCode;  // kRecorded or the mesh reason
+  uint8_t texCode;   // kRecorded or the texture reason
+  uint8_t thread;
+};
+
+struct Pair {
+  uint8_t* tex;
+  uint64_t size;
+};
+struct PageRef {
+  uint32_t page;
+  ID3D11ShaderResourceView* srv;
+};
+struct MatRestore {
+  uint32_t mat;
+  uint32_t item;
+  uint8_t seg;
+};
+struct VarRestore {
+  uint8_t* var;
+  void* value;
+  uint8_t seg;
+};
+struct Dd {
+  uint64_t a, b;
+  uint32_t stamp;
+};
+struct Miss {
+  uint8_t* tex;
+  int64_t aux;
+  int32_t type;
+};
+struct ReadWant {
+  uint8_t* shader;
+  uint64_t tech;
+};
+
+struct Job {
+  // Inputs (render thread, written only while the worker is idle).
+  void** vec = nullptr;
+  uint32_t scope = 0, flags = 0, island = kDefaultIsland, stride = 0;
+  uint32_t splitMin = kSplitMinDraws;  // fewer recorded draws: one worker records them
+  uint32_t keyScope = 0;               // keys of this execution's collection
+  ID3D11RenderTargetView* rtv[kRtv] = {};  // references held by the job
+  ID3D11DepthStencilView* dsv = nullptr;
+  UINT nvp = 0, nsc = 0;
+  D3D11_VIEWPORT vp[kVp] = {};
+  D3D11_RECT sc[kVp] = {};
+  ID3D11Buffer* ctxBuf[2][3] = {};  // ours (VS, PS b6-b8), bound in the lists; null where DCS binds none
+  ID3D11SamplerState* pool[2][kSampSlots] = {};  // VS, PS: DCS's s5-s15 at the front entry (references)
+  uint8_t ratio[kRatioLen] = {};
+  void* ratioFb = nullptr;
+  int32_t ratioVp[2] = {};
+  void* front = nullptr;
+  void* execObj[kMaxSegments] = {};
+  const Env* env = nullptr;
+  const Tables* tab = nullptr;
+  const TexTable* tex = nullptr;
+  SRWLOCK* texLock = nullptr;
+  uint32_t useGen = 0;
+  HANDLE start = nullptr;
+  std::atomic<int> startState{kStartIdle};
+  void* armRg = nullptr;
+  uint32_t armIdx = 0;
+  bool startedEarly = false;
+  int64_t tStart = 0;
+  uint32_t entryGen = 0;
+  // Outputs (the worker; readable once it is idle).
+  std::atomic<int> phase{kJobEmpty};
+  int result = kBuildNone;
+  void** begin = nullptr;
+  size_t n = 0;
+  uint32_t gen = 0, ddStamp = 0;
+  uint32_t matCount = 0, shaderCount = 0, candCount = 0, segCount = 0, maxSeg = kDefaultMaxSeg;
+  uint32_t entCount = 0, pairCount = 0, segMatCount = 0, pageCount = 0, matRestCount = 0, varRestCount = 0;
+  uint32_t wantCount = 0, readWantCount = 0, missCount = 0, refreshCount = 0;
+  uint32_t recorded = 0, draws = 0;
+  uint32_t reasons[kReasons] = {};
+  double buildUs = 0, recordUs = 0, preUs = 0, commitUs = 0;
+  uint64_t cbBytes = 0;
+  int64_t tDone = 0, tPreDone = 0, tBuilt = 0;
+  // Helpers (stage A chunks and recording pieces).
+  HANDLE preGo = nullptr;  // manual-reset: stage A may start (or aborted)
+  HANDLE recGo = nullptr;  // manual-reset: the pieces are planned (or aborted)
+  std::atomic<int> preState{kGoWait}, recState{kGoWait};
+  std::atomic<uint32_t> preNext{0}, preDone{0}, started{0}, ready{0}, recFail{0};
+  uint32_t helpers = 0, recWorkers = 1, pieceCount = 0;
+  uint32_t preItems[kThreads] = {};
+  double recUs[kThreads] = {};
+  uint64_t cbBytesT[kThreads] = {};
+  int64_t tRecDone[kThreads] = {};
+  Piece pieces[kMaxPieces] = {};
+  Seg segs[kMaxSegments] = {};
+  void* snap[kMaxItems];
+  Item items[kMaxItems];
+  Cand cands[kMaxItems];
+  defrec::CbSlice slices[kMaxItems];
+  uint8_t flag[kMaxItems];
+  uint8_t segWhy[kMaxItems];
+  Pre pre[kMaxItems];
+  SetRef tsets[kThreads][kTSets];
+  ID3D11ShaderResourceView* tviews[kThreads][kTViews];
+  uint32_t tsetCount[kThreads], tviewCount[kThreads];
+  PreMat preMats[kThreads][kPreMatTable];
+  Miss tmiss[kThreads][kTMisses];
+  uint32_t tmissCount[kThreads];
+  const TexEntry* trefresh[kThreads][kTRefresh];
+  uint32_t trefreshCount[kThreads];
+  Dd tdd[kThreads][kTDedupe];
+  MatRec mats[kMaxMats];
+  uint32_t matIdx[kMatTable];   // mats index + 1
+  uint32_t matGen[kMatTable];
+  ShaderRec shaders[kMaxShaders];
+  uint32_t shIdx[kShaderTable];
+  uint32_t shGen[kShaderTable];
+  const shrec::MeshEntry* meshKey[kThreads][kMeshCache];
+  uint32_t meshGen[kThreads][kMeshCache];
+  uint8_t meshOk[kThreads][kMeshCache];
+  Dd dd[kDedupe];
+  const TexEntry* segEnts[kMaxSegEnts];
+  uint32_t segEntVer[kMaxSegEnts];  // the entry's version when the job read it
+  Pair segPairs[kMaxSegPairs];
+  uint32_t segMats[kMaxSegMats];
+  PageRef segPages[kMaxSegPages];
+  MatRestore matRest[kMaxRestores];
+  VarRestore varRest[kMaxRestores];
+  Miss misses[kMaxMisses];
+  const TexEntry* refresh[kMaxRefresh];  // entries found unusable (rebuilt after the pass)
+  ReadWant readWants[kMaxReadWants];
+  uint64_t wantKey[kWantTable];
+  uint32_t wantGen[kWantTable];
+  void* swapList[kMaxItems + 2];
+  uint32_t swapCount = 0;
+  // Segments whose textures changed after the job read them (render thread
+  // plans at the front and exec entries; the slot's idle workers re-record).
+  TexEntry redoEnt[kMaxRedoEnts];  // the job's own entries built from the live textures (views referenced)
+  const TexEntry* redoFrom[kMaxRedoEnts];
+  uint32_t redoEntCount = 0;
+  std::atomic<int> redoState[kMaxSegments];
+  ID3D11CommandList* redoCl[kMaxSegments];
+  RedoArg redoArg[kMaxSegments];
+};
+
+Job* NewJob() {
+  void* mem = VirtualAlloc(nullptr, sizeof(Job), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);  // zeroed
+  Job* j = mem ? new (mem) Job : nullptr;
+  if (j) {
+    j->start = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    j->preGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    j->recGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  }
+  if (j && (!j->start || !j->preGo || !j->recGo)) {
+    if (j->start) CloseHandle(j->start);
+    if (j->preGo) CloseHandle(j->preGo);
+    if (j->recGo) CloseHandle(j->recGo);
+    j->~Job();
+    VirtualFree(j, 0, MEM_RELEASE);
+    j = nullptr;
+  }
+  return j;
+}
+
+// The pieces' lists nobody executed, released (workers idle).
+void ReleaseSegLists(Job& j) {
+  for (Piece& p : j.pieces) SafeRel(p.cl);
+  for (auto*& l : j.redoCl) SafeRel(l);
+}
+
+// The re-record state of the last pass (workers idle).
+void ReleaseRedo(Job& j) {
+  for (auto*& l : j.redoCl) SafeRel(l);
+  for (uint32_t i = 0; i < j.redoEntCount; ++i) {
+    TexReleaseViews(j.redoEnt[i]);
+    j.redoEnt[i].usable = 0;
+    j.redoEnt[i].slot.store(kTeEmpty, std::memory_order_relaxed);
+  }
+  j.redoEntCount = 0;
+  for (auto& st : j.redoState) st.store(kRedoNone, std::memory_order_relaxed);
+}
+
+void ReleaseTargetRefs(Job& j) {
+  for (auto*& p : j.rtv) SafeRel(p);
+  SafeRel(j.dsv);
+  for (auto& row : j.pool)
+    for (auto*& p : row) SafeRel(p);
+}
+
+void FreeJob(Job*& j) {
+  if (!j) return;
+  ReleaseSegLists(*j);
+  ReleaseRedo(*j);
+  ReleaseTargetRefs(*j);
+  if (j->start) CloseHandle(j->start);
+  if (j->preGo) CloseHandle(j->preGo);
+  if (j->recGo) CloseHandle(j->recGo);
+  j->~Job();
+  VirtualFree(j, 0, MEM_RELEASE);
+  j = nullptr;
+}
+
+// The texture sets and PS views of candidate c (in its stage-A thread's arrays).
+inline const SetRef* SetsOf(const Job& j, const Cand& c) { return j.tsets[c.thread] + c.setFirst; }
+inline ID3D11ShaderResourceView* const* ViewsOf(const Job& j, const Cand& c) { return j.tviews[c.thread] + c.viewFirst; }
+
+// Gen-stamped dedupe of (a, b) pairs under the current ddStamp: true when new.
+// A full table answers "new" (a repeat streaming request or check costs only time).
+bool DdInsert(Job& j, uint64_t a, uint64_t b) {
+  size_t s = Mix(a * 0x9E3779B97F4A7C15ull ^ b * 0xC2B2AE3D27D4EB4Full) & (kDedupe - 1);
+  for (uint32_t p = 0; p < 64; ++p, s = (s + 1) & (kDedupe - 1)) {
+    Dd& d = j.dd[s];
+    if (d.stamp != j.ddStamp) {
+      d = {a, b, j.ddStamp};
+      return true;
+    }
+    if (d.a == a && d.b == b) return false;
+  }
+  return true;
+}
+bool DdFind(const Job& j, uint64_t a, uint64_t b) {
+  size_t s = Mix(a * 0x9E3779B97F4A7C15ull ^ b * 0xC2B2AE3D27D4EB4Full) & (kDedupe - 1);
+  for (uint32_t p = 0; p < 64; ++p, s = (s + 1) & (kDedupe - 1)) {
+    const Dd& d = j.dd[s];
+    if (d.stamp != j.ddStamp) return false;
+    if (d.a == a && d.b == b) return true;
+  }
+  return false;
+}
+void NextStamp(Job& j) {
+  if (++j.ddStamp == 0) {
+    memset(j.dd, 0, sizeof(j.dd));
+    j.ddStamp = 1;
+  }
+}
+
+ShaderRec* ShaderFor(Job& j, uint8_t* sh, uint32_t* idx) {
+  size_t i = Mix(reinterpret_cast<uintptr_t>(sh)) & (kShaderTable - 1);
+  for (uint32_t p = 0; p < kShaderTable; ++p, i = (i + 1) & (kShaderTable - 1)) {
+    if (j.shGen[i] != j.gen) {
+      if (j.shaderCount == kMaxShaders) return nullptr;
+      j.shGen[i] = j.gen;
+      j.shIdx[i] = j.shaderCount + 1;
+      ShaderRec& s = j.shaders[j.shaderCount];
+      s = {sh, j.gen, 0, 0};
+      *idx = j.shaderCount++;
+      return &s;
+    }
+    ShaderRec& s = j.shaders[j.shIdx[i] - 1];
+    if (s.shader == sh) {
+      *idx = j.shIdx[i] - 1;
+      return &s;
+    }
+  }
+  return nullptr;
+}
+
+void WantReads(Job& j, uint8_t* sh, uint64_t tech) {
+  if (j.readWantCount == kMaxReadWants) return;
+  for (uint32_t k = 0; k < j.readWantCount; ++k)
+    if (j.readWants[k].shader == sh && j.readWants[k].tech == tech) return;
+  j.readWants[j.readWantCount++] = {sh, tech};
+}
+
+// One probe request per (shader, technique, mesh): its first item.
+void WantProbe(Job& j, size_t i, const void* sh, uint64_t tech, const void* mesh) {
+  if (j.wantCount >= kMaxWants) return;
+  const uint64_t h = (reinterpret_cast<uintptr_t>(sh) * 0x9E3779B97F4A7C15ull ^ tech * 0xC2B2AE3D27D4EB4Full ^
+                      reinterpret_cast<uintptr_t>(mesh) * 0x165667B19E3779F9ull) |
+                     1;
+  size_t s = Mix(h) & (kWantTable - 1);
+  for (uint32_t p = 0; p < kWantTable; ++p, s = (s + 1) & (kWantTable - 1)) {
+    if (j.wantGen[s] != j.gen) {
+      j.wantGen[s] = j.gen;
+      j.wantKey[s] = h;
+      j.items[i].want = 1;
+      ++j.wantCount;
+      return;
+    }
+    if (j.wantKey[s] == h) return;
+  }
+}
+
+// Pass 2 runs under one dedupe stamp: misses and rebuild requests once each.
+void AddMiss(Job& j, uint8_t* tex, int64_t aux, int32_t type) {
+  if (j.missCount == kMaxMisses ||
+      !DdInsert(j, reinterpret_cast<uintptr_t>(tex) ^ 0x1111000000000000ull,
+                static_cast<uint64_t>(aux) * 0x9E3779B97F4A7C15ull ^ static_cast<uint32_t>(type)))
+    return;
+  j.misses[j.missCount++] = {tex, aux, type};
+}
+
+void AddRefresh(Job& j, const TexEntry* e) {
+  if (j.refreshCount == kMaxRefresh || !DdInsert(j, reinterpret_cast<uintptr_t>(e), 0x2222)) return;
+  j.refresh[j.refreshCount++] = e;
+}
+
+// Material-level facts, at its first item in the job (pass 1 of stage A).
+MatRec* MatFor(Job& j, uint8_t* mat, uint32_t* idx) {
+  const Env& env = *j.env;
+  size_t i = Mix(reinterpret_cast<uintptr_t>(mat)) & (kMatTable - 1);
+  for (uint32_t p = 0; p < kMatTable; ++p, i = (i + 1) & (kMatTable - 1)) {
+    if (j.matGen[i] != j.gen) {
+      if (j.matCount == kMaxMats) return nullptr;
+      j.matGen[i] = j.gen;
+      j.matIdx[i] = j.matCount + 1;
+      MatRec& m = j.mats[j.matCount];
+      *idx = j.matCount++;
+      m.mat = mat;
+      m.key = nullptr;
+      m.shaderIdx = ~0u;
+      m.last = -1;
+      m.why = -1;
+      m.excluded = false;
+      m.animN = 0;
+      m.rec = 0;
+      m.segStamp = 0;
+      m.guard[0] = m.guard[1] = 0;
+      const uint8_t* props = *reinterpret_cast<uint8_t* const*>(mat + 0x28);
+      m.transparent = props && props[0x33] != 0;
+      m.shader = *reinterpret_cast<uint8_t**>(mat + 0x30);
+      m.shaderOk = m.shader && *reinterpret_cast<void**>(m.shader) == env.shaderVt;
+      m.tech = *reinterpret_cast<uint64_t*>(mat + 0x1d8);
+      m.effect = m.shaderOk ? *reinterpret_cast<void**>(m.shader + 0x50) : nullptr;
+      m.techBegin = m.shaderOk ? *reinterpret_cast<void**>(m.shader + 0xb0) : nullptr;
+      memcpy(m.cb, mat + kCbOff, kCbLen);
+      if (m.shaderOk) ShaderFor(j, m.shader, &m.shaderIdx);
+      return &m;
+    }
+    MatRec& m = j.mats[j.matIdx[i] - 1];
+    if (m.mat == mat) {
+      *idx = j.matIdx[i] - 1;
+      return &m;
+    }
+  }
+  return nullptr;
+}
+
+// The animated property list of the material: classes whose vt[9] is pure
+// (gb_batch.h notes), destinations inside def_uniforms and off
+// posStructOffset. Adds their destinations to the overrides. False: not
+// replicable.
+bool AnimOk(const Env& env, const uint8_t* mat, uint32_t* count, uint64_t over[2]) {
+  const uint8_t* b = *reinterpret_cast<uint8_t* const*>(mat + 8);
+  const uint8_t* e = *reinterpret_cast<uint8_t* const*>(mat + 0x10);
+  const intptr_t bytes = e - b;
+  if (bytes < 0 || bytes % 16 || bytes / 16 > kMaxAnim) return false;
+  *count = static_cast<uint32_t>(bytes / 16);
+  for (const uint8_t* p = b; p < e; p += 16) {
+    const uint8_t* dst = *reinterpret_cast<uint8_t* const*>(p);
+    const uint8_t* prop = *reinterpret_cast<uint8_t* const*>(p + 8);
+    const void* vt = prop ? *reinterpret_cast<void* const*>(prop) : nullptr;
+    int c = 0;
+    while (c < gbbatch::kPropClasses && env.propVt[c] != vt) ++c;
+    if (!vt || c == gbbatch::kPropClasses) return false;
+    const intptr_t off = dst - mat;
+    const intptr_t end = off + static_cast<intptr_t>(env.propBytes[c]);
+    if (off < static_cast<intptr_t>(kCbOff) || end > static_cast<intptr_t>(kCbOff + kCbLen) ||
+        (off < 0x190 && end > 0x18c))
+      return false;
+    MarkDwords(over, static_cast<uint32_t>(off - kCbOff), env.propBytes[c]);
+  }
+  return true;
+}
+
+// Material-level decision (its first candidate item).
+void DecideMat(Job& j, MatRec& m) {
+  const Env& env = *j.env;
+  const int blend = env.blend ? env.blend(m.shader) : gbreccount::kBmNone;
+  if (blend != gbreccount::kBmNone && !(blend == gbreccount::kBmAlphaTest && (j.scope & kScopeA2c))) {
+    m.why = kRBlend;
+    return;
+  }
+  uint64_t over[2] = {};
+  BaseOverrides(over);
+  if (!AnimOk(env, m.mat, &m.animN, over)) {
+    m.why = kRAnim;
+    return;
+  }
+  uint64_t used[2];
+  if (!env.cbUsed || !env.cbUsed(m.shader, m.tech, used)) AllDwords(used);
+  m.guard[0] = used[0] & ~over[0];
+  m.guard[1] = used[1] & ~over[1];
+  m.key = FindKey(*j.tab, m.shader, m.tech, j.flags, m.effect, m.techBegin, j.keyScope);
+  if (!m.key && KeyCooling(*j.tab, m.shader, m.tech, j.flags, m.effect, m.techBegin, j.keyScope, 0, true))
+    m.why = kRKeyCooling;  // probed again once the cooldown ends
+  else if (!m.key)
+    m.why = static_cast<int8_t>(env.compiled && !env.compiled(m.shader, m.tech) ? kRNoCompile : kRKeyPending);
+  else if (m.key->state.load(std::memory_order_acquire) <= 0)
+    m.why = kRKeyRejected;
+  else
+    m.why = kRecorded;
+}
+
+// Mesh entry still describes the live mesh (once per entry per job).
+bool MeshLiveOk(Job& j, int t, const uint8_t* mesh, const shrec::MeshEntry* me) {
+  auto live = [&] {
+    shrec::MeshLive l;
+    return !shrec::ReadMesh(mesh, l) && l.fp == me->fp && l.vb == me->vb && l.ib == me->ib &&
+           l.stride == me->stride && l.ibFormat == me->ibFormat;
+  };
+  size_t s = Mix(reinterpret_cast<uintptr_t>(me)) & (kMeshCache - 1);
+  for (uint32_t p = 0; p < kMeshCache; ++p, s = (s + 1) & (kMeshCache - 1)) {
+    if (j.meshGen[t][s] != j.gen) {
+      const bool ok = live();
+      j.meshGen[t][s] = j.gen;
+      j.meshKey[t][s] = me;
+      j.meshOk[t][s] = ok ? 1 : 0;
+      return ok;
+    }
+    if (j.meshKey[t][s] == me) return j.meshOk[t][s] != 0;
+  }
+  return live();
+}
+
+// Stage A is split in two (R17 S5's pattern): the reads of DCS memory per
+// item (PreOne, any worker, chunks of items, no shared writes but the item's
+// own Pre slot and the thread's arrays), then the serial commit in vector
+// order (CommitBuild, the primary: materials, shaders, decisions, segments).
+
+// The material's reads for thread t (cached per job); a scratch entry when the cache is full.
+const PreMat* PreMatFor(Job& j, int t, uint8_t* mat, PreMat* scratch) {
+  const Env& env = *j.env;
+  PreMat* tab = j.preMats[t];
+  size_t i = Mix(reinterpret_cast<uintptr_t>(mat)) & (kPreMatTable - 1);
+  PreMat* s = scratch;
+  for (uint32_t p = 0; p < 16; ++p, i = (i + 1) & (kPreMatTable - 1)) {
+    if (tab[i].gen == j.gen && tab[i].mat == mat) return &tab[i];
+    if (tab[i].gen != j.gen) {
+      s = &tab[i];
+      break;
+    }
+  }
+  *s = PreMat();
+  s->mat = mat;
+  s->gen = j.gen;
+  const uint8_t* props = *reinterpret_cast<uint8_t* const*>(mat + 0x28);
+  s->transparent = props && props[0x33] != 0;
+  s->shader = *reinterpret_cast<uint8_t**>(mat + 0x30);
+  s->shaderOk = s->shader && *reinterpret_cast<void**>(s->shader) == env.shaderVt;
+  s->tech = *reinterpret_cast<uint64_t*>(mat + 0x1d8);
+  if (s->shaderOk) {
+    s->effect = *reinterpret_cast<void**>(s->shader + 0x50);
+    s->techBegin = *reinterpret_cast<void**>(s->shader + 0xb0);
+    s->rd = FindReads(*j.tab, s->shader, s->tech, s->effect, s->techBegin);
+    s->key = FindKey(*j.tab, s->shader, s->tech, j.flags, s->effect, s->techBegin, j.keyScope);
+  }
+  return s;
+}
+
+// Per-thread dedupe (stamp = the job's gen): true when new.
+bool DdInsertT(Job& j, int t, uint64_t a, uint64_t b) {
+  size_t s = Mix(a * 0x9E3779B97F4A7C15ull ^ b * 0xC2B2AE3D27D4EB4Full) & (kTDedupe - 1);
+  for (uint32_t p = 0; p < 32; ++p, s = (s + 1) & (kTDedupe - 1)) {
+    Dd& d = j.tdd[t][s];
+    if (d.stamp != j.gen) {
+      d = {a, b, j.gen};
+      return true;
+    }
+    if (d.a == a && d.b == b) return false;
+  }
+  return true;
+}
+
+void AddMissT(Job& j, int t, uint8_t* tex, int64_t aux, int32_t type) {
+  if (j.tmissCount[t] == kTMisses ||
+      !DdInsertT(j, t, reinterpret_cast<uintptr_t>(tex) ^ 0x1111000000000000ull,
+                 static_cast<uint64_t>(aux) * 0x9E3779B97F4A7C15ull ^ static_cast<uint32_t>(type)))
+    return;
+  j.tmiss[t][j.tmissCount[t]++] = {tex, aux, type};
+}
+
+void AddRefreshT(Job& j, int t, const TexEntry* e) {
+  if (j.trefreshCount[t] == kTRefresh || !DdInsertT(j, t, reinterpret_cast<uintptr_t>(e), 0x2222)) return;
+  j.trefresh[t][j.trefreshCount[t]++] = e;
+}
+
+// Stage A reads of item i on thread t: class, material (cached), the stock
+// inheritance facts of a pass-1 writer, and for a recordable key the mesh,
+// page and texture sets (PS views in the key's slot order). Plain.
+void PreOne(Job& j, int t, size_t i) {
+  const Env& env = *j.env;
+  Pre& p = j.pre[i];
+  p.kind = kPreNone;
+  p.thread = static_cast<uint8_t>(t);
+  p.pm = nullptr;
+  p.key = nullptr;
+  p.me = nullptr;
+  p.page = nullptr;
+  p.setCount = 0;
+  p.inherit = p.pageOk = 0;
+  p.meshCode = kRMeshPending;
+  p.texCode = kRTexUnusable;
+  auto* r = static_cast<uint8_t*>(j.snap[i]);
+  if (!r || *reinterpret_cast<void**>(r) != env.srVt) return;
+  auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+  auto* mat = item ? *reinterpret_cast<uint8_t**>(item + 0x10) : nullptr;
+  if (!mat || *reinterpret_cast<void**>(mat) != env.modelVt) return;
+  p.kind = kPreModel;
+  p.item = item;
+  p.mat = mat;
+  p.mesh = *reinterpret_cast<uint8_t**>(item + 0xc0);
+  p.pass1 = *reinterpret_cast<uint32_t*>(r + 0x60) == 1 ? 1 : 0;
+  p.cockpit = r[0x64] ? 1 : 0;
+  PreMat scratch;
+  const PreMat* pm = PreMatFor(j, t, mat, &scratch);
+  if (pm == &scratch) return;  // the cache is full: the commit sees no reads (residual)
+  p.pm = pm;
+  if (!p.pass1 || p.cockpit || pm->transparent || !pm->shaderOk) return;
+  const uint32_t page = *reinterpret_cast<uint32_t*>(item + 0xd0);
+  p.pageIdx = page;
+  p.pageOk = PageBuffer(env, page) ? 1 : 0;
+  const ReadsEntry* rd = pm->rd;
+  const uint32_t ntex = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint8_t* en = ntex ? EntriesOf(mat, item) : nullptr;
+  if (rd && rd->state > 0) {
+    uint64_t set[kRecWords] = {};
+    for (uint32_t k = 0; k < ntex && k < kMaxTex && en; ++k) {
+      const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * k);
+      if (h < 0 || h >= static_cast<int64_t>(kMaxRecords)) continue;
+      if (*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) set[h >> 6] |= 1ull << (h & 63);
+    }
+    for (uint32_t w = 0; w < kRecWords; ++w)
+      if (rd->mask[w] & ~set[w]) p.inherit = 1;
+  }
+  const GbKey* key = pm->key;
+  if (!key || key->state.load(std::memory_order_acquire) <= 0 || !rd || rd->state <= 0 || p.inherit || !p.pageOk)
+    return;  // the commit gives the reason
+  p.key = key;
+  const shrec::MeshEntry* me = shrec::FindMesh(j.tab->mesh, p.mesh, pm->shader, pm->tech, pm->effect, pm->techBegin);
+  if (!me) return;  // kRMeshPending
+  if (me->state.load(std::memory_order_acquire) <= 0) {
+    p.meshCode = kRMeshRejected;
+    return;
+  }
+  if (!MeshLiveOk(j, t, p.mesh, me)) {
+    p.meshCode = kRMeshChanged;
+    return;
+  }
+  p.meshCode = kRecorded;
+  p.me = me;
+  p.page = PageSrv(env, page);
+  if (!p.page) return;
+  if (ntex > kMaxTex || j.tsetCount[t] + ntex > kTSets ||
+      j.tviewCount[t] + static_cast<uint32_t>(key->psTexCount) > kTViews) {
+    p.texCode = kRTooMany;
+    return;
+  }
+  const uint8_t* recs = *reinterpret_cast<uint8_t* const*>(pm->shader + 0xc8);
+  const int64_t nrec = RecordCount(pm->shader);
+  const uint64_t size = *reinterpret_cast<uint64_t*>(r + 0x6c);
+  p.setFirst = j.tsetCount[t];
+  p.viewFirst = j.tviewCount[t];
+  SetRef* sets = j.tsets[t] + p.setFirst;
+  ID3D11ShaderResourceView** views = j.tviews[t] + p.viewFirst;
+  uint32_t found = 0;
+  int why = kRecorded;
+  for (uint32_t k = 0; k < ntex && en; ++k) {
+    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * k);
+    if (h == -1) continue;
+    auto* tex = *reinterpret_cast<uint8_t* const*>(en + k * 0x18 + 8);
+    if (!tex) continue;  // slot 26 returns at once: nothing set (an unread record: the inheritance check covers the read ones)
+    if (h < 0 || h >= nrec) {
+      why = kRTexUnusable;
+      break;
+    }
+    const int64_t aux = *reinterpret_cast<const int64_t*>(en + k * 0x18);
+    const int32_t type = *reinterpret_cast<const int32_t*>(recs + h * 0x50 + 0xc);
+    const TexEntry* e = TexFind(*j.tex, tex, aux, type);
+    if (!e) {
+      AddMissT(j, t, tex, aux, type);
+      if (why == kRecorded) why = kRTexMiss;
+      continue;  // every miss of the draw is requested
+    }
+    ID3D11ShaderResourceView* v = nullptr;
+    if (!e->usable || e->dirty.load(std::memory_order_relaxed) || !TexPick(*e, size, &v) || TexSwapDueGuarded(*e)) {
+      // A class, 0x678 or mip-set refusal stays until the texture changes; the rest is retried.
+      if (e->usable || e->why == kTwSwap || e->why == kTwFault || e->dirty.load(std::memory_order_relaxed))
+        AddRefreshT(j, t, e);
+      if (why == kRecorded) why = kRTexUnusable;
+      continue;
+    }
+    if (why != kRecorded) continue;
+    sets[p.setCount++] = {e, tex, size, h};
+    int q = 0;
+    while (q < key->psTexCount && key->psTexH[q] != h) ++q;
+    if (q < key->psTexCount) {
+      views[q] = v;  // a repeated record: the last set wins, as stock
+      found |= 1u << q;
+    }
+  }
+  if (why == kRecorded && found != (1u << key->psTexCount) - 1) why = kRTexSlot;
+  p.texCode = static_cast<uint8_t>(why);
+  if (why != kRecorded) {
+    p.setCount = 0;
+    return;
+  }
+  j.tsetCount[t] += p.setCount;
+  j.tviewCount[t] += static_cast<uint32_t>(key->psTexCount);
+}
+
+// Reads chunks of items until none is left (t: 0 primary, 1.. helpers).
+void PreChunks(Job& j, int t) {
+  shrec::LoadScope load(g_load);
+  const uint32_t n = static_cast<uint32_t>(j.n);
+  for (;;) {
+    const uint32_t from = j.preNext.fetch_add(kPreChunk, std::memory_order_relaxed);
+    if (from >= n) return;
+    const uint32_t to = from + kPreChunk < n ? from + kPreChunk : n;
+    for (uint32_t i = from; i < to; ++i) PreOne(j, t, i);
+    j.preItems[t] += to - from;
+    j.preDone.fetch_add(to - from, std::memory_order_release);
+  }
+}
+
+// Primary: every chunk read (the helpers' last ones included). False after
+// kPreWaitUs (a helper stalled: the job is not built).
+bool WaitPre(Job& j) {
+  const int64_t t0 = defrec::Qpc();
+  const double k = defrec::QpcToUs();
+  while (j.preDone.load(std::memory_order_acquire) < j.n) {
+    if ((defrec::Qpc() - t0) * k > kPreWaitUs) return false;
+    _mm_pause();
+  }
+  return true;
+}
+
+// Commit, pass 2 for one candidate: the material's decision, then the
+// item's reads. kRecorded or why not.
+int Pass2Commit(Job& j, size_t i) {
+  Item& it = j.items[i];
+  MatRec& m = j.mats[it.mat];
+  const Pre& p = j.pre[i];
+  if (m.excluded) return kRMatExcluded;
+  if (j.shaders[it.shader].unclean) return kRUnclean;
+  if (m.why < 0) DecideMat(j, m);
+  if (m.why != kRecorded) {
+    if (m.why == kRKeyPending || m.why == kRKeyCooling) WantProbe(j, i, m.shader, m.tech, p.mesh);
+    return m.why;
+  }
+  if (!p.key || p.key != m.key || !p.pm || p.pm->shader != m.shader || p.pm->tech != m.tech)
+    return kRKeyPending;  // read against another key state (published meanwhile)
+  if (p.meshCode != kRecorded) {
+    if (p.meshCode == kRMeshPending) WantProbe(j, i, m.shader, m.tech, p.mesh);
+    return p.meshCode;
+  }
+  if (!p.page) return kRPage;
+  if (p.texCode != kRecorded) return p.texCode;
+  Cand& c = j.cands[j.candCount];
+  c.key = m.key;
+  c.mesh = p.me;
+  c.page = p.page;
+  c.item = static_cast<uint32_t>(i);
+  c.pageIdx = p.pageIdx;
+  c.setFirst = p.setFirst;
+  c.viewFirst = p.viewFirst;
+  c.setCount = p.setCount;
+  c.thread = p.thread;
+  c.alive = 1;
+  it.cand = j.candCount++;
+  return kRecorded;
+}
+
+int FinishBuild(Job& j);
+
+// The serial commit (primary, in vector order, from the Pre slots): texture
+// requests, materials and shaders (pass 1: stock inheritance per shader),
+// the decisions (pass 2), the verify stride, the island rule and the
+// segment limit, then FinishBuild. Plain.
+int CommitBuild(Job& j) {
+  NextStamp(j);
+  for (int t = 0; t < kThreads; ++t) {
+    for (uint32_t k = 0; k < j.tmissCount[t]; ++k) AddMiss(j, j.tmiss[t][k].tex, j.tmiss[t][k].aux, j.tmiss[t][k].type);
+    for (uint32_t k = 0; k < j.trefreshCount[t]; ++k) AddRefresh(j, j.trefresh[t][k]);
+  }
+  for (size_t i = 0; i < j.n; ++i) {
+    Item& it = j.items[i];
+    it = {~0u, ~0u, ~0u, static_cast<uint8_t>(kRNotModel), kNoSeg, 0, 0};
+    const Pre& p = j.pre[i];
+    if (p.kind != kPreModel) continue;
+    uint32_t mi = 0;
+    MatRec* m = MatFor(j, p.mat, &mi);
+    if (!m) return j.result = kBuildOversize;  // a material untracked: its end state could not be restored
+    it.mat = mi;
+    it.shader = m->shaderIdx;
+    m->last = static_cast<int32_t>(i);
+    ShaderRec* sh = m->shaderIdx != ~0u ? &j.shaders[m->shaderIdx] : nullptr;
+    if (!p.pass1 || m->transparent) {
+      m->excluded = true;  // another route writes other material bytes
+      if (sh) sh->unclean = 1;
+      it.reason = static_cast<uint8_t>(!p.pass1 ? kRPass : kRTransparent);
+      continue;
+    }
+    if (p.cockpit) {
+      if (sh) sh->unclean = 1;  // normal_cockpit*: its pass index and reads are not analysed here
+      it.reason = kRCockpit;
+      continue;
+    }
+    if (!m->shaderOk) {
+      it.reason = kRNoShader;
+      continue;
+    }
+    if (!sh) return j.result = kBuildOversize;
+    it.writer = 1;
+    it.reason = kRecorded;  // candidate so far
+    if (sh->unclean) continue;
+    const ReadsEntry* rd = p.pm && p.pm->shader == m->shader && p.pm->tech == m->tech ? p.pm->rd : nullptr;
+    if (!rd) {
+      WantReads(j, m->shader, m->tech);
+      sh->unclean = 1;
+      continue;
+    }
+    if (rd->state <= 0 || p.inherit || !p.pageOk) sh->unclean = 1;
+  }
+  uint32_t candSeen = 0;
+  for (size_t i = 0; i < j.n; ++i) {
+    Item& it = j.items[i];
+    if (it.reason != kRecorded) continue;
+    int why = Pass2Commit(j, i);
+    if (why == kRecorded && j.stride > 1 && (candSeen++ % j.stride) == j.stride - 1) {
+      why = kRForced;
+      j.cands[it.cand].alive = 0;
+      it.cand = ~0u;
+    }
+    it.reason = static_cast<uint8_t>(why);
+  }
+  for (size_t i = 0; i < j.n; ++i) {
+    j.flag[i] = j.items[i].reason == kRecorded ? 1 : 0;
+    j.segWhy[i] = 0;
+  }
+  uint32_t runs[kMaxSegments][2];
+  const uint32_t island = j.stride > 1 ? (std::min)(j.island, j.stride - 1) : j.island;
+  const int maxSeg = static_cast<int>(j.maxSeg < 1 ? 1 : j.maxSeg > kMaxSegments ? kMaxSegments : j.maxSeg);
+  const int nseg = PlanSegments(j.flag, j.n, island ? island : 1, maxSeg, runs, j.segWhy);
+  for (size_t i = 0; i < j.n; ++i) {
+    if (!j.segWhy[i]) continue;
+    Item& it = j.items[i];
+    it.reason = static_cast<uint8_t>(j.segWhy[i] == 1 ? kRIsland : kRSegments);
+    if (it.cand != ~0u) j.cands[it.cand].alive = 0;
+    it.cand = ~0u;
+  }
+  j.segCount = static_cast<uint32_t>(nseg);
+  for (int k = 0; k < nseg; ++k) {
+    Seg& s = j.segs[k];
+    s.first = runs[k][0];
+    s.end = runs[k][1];
+    s.candFirst = j.items[s.first].cand;
+    s.candEnd = j.items[s.end - 1].cand + 1;
+    for (uint32_t i = s.first; i < s.end; ++i) j.items[i].seg = static_cast<uint8_t>(k);
+  }
+  for (size_t i = 0; i < j.n; ++i) ++j.reasons[j.items[i].reason];
+  return FinishBuild(j);
+}
+
+// Stage A. CPU only: DCS memory is read, never written; no D3D call; texture
+// views come from the table (the caller holds its lock shared). Plain (the
+// pool runs it under SEH).
+int BeginBuild(Job& j) {
+  j.matCount = j.shaderCount = j.candCount = j.segCount = j.pieceCount = 0;
+  for (int t = 0; t < kThreads; ++t) {
+    j.tsetCount[t] = j.tviewCount[t] = j.tmissCount[t] = j.trefreshCount[t] = j.preItems[t] = 0;
+    j.recUs[t] = 0;
+    j.cbBytesT[t] = 0;
+    j.tRecDone[t] = 0;
+  }
+  j.preNext.store(0, std::memory_order_relaxed);
+  j.preDone.store(0, std::memory_order_relaxed);
+  j.preUs = j.commitUs = 0;
+  j.tPreDone = j.tBuilt = 0;
+  j.entCount = j.pairCount = j.segMatCount = j.pageCount = j.matRestCount = j.varRestCount = 0;
+  j.wantCount = j.readWantCount = j.missCount = j.refreshCount = 0;
+  j.recorded = j.draws = 0;
+  j.cbBytes = 0;
+  j.buildUs = j.recordUs = 0;
+  j.swapCount = 0;
+  memset(j.reasons, 0, sizeof(j.reasons));
+  for (Seg& s : j.segs) s = Seg();
+  for (Piece& p : j.pieces) {
+    SafeRel(p.cl);
+    p = Piece();
+  }
+  j.n = 0;
+  j.begin = nullptr;
+  j.result = kBuildNone;
+  auto** begin = static_cast<void**>(j.vec[0]);
+  auto** end = static_cast<void**>(j.vec[1]);
+  j.begin = begin;
+  if (!begin || end < begin) return j.result = kBuildNoVector;
+  const size_t n = static_cast<size_t>(end - begin);
+  if (n > kMaxItems) return j.result = kBuildOversize;
+  memcpy(j.snap, begin, n * sizeof(void*));
+  j.n = n;
+  if (++j.gen == 0) {
+    memset(j.matGen, 0, sizeof(j.matGen));
+    memset(j.shGen, 0, sizeof(j.shGen));
+    memset(j.meshGen, 0, sizeof(j.meshGen));
+    memset(j.wantGen, 0, sizeof(j.wantGen));
+    memset(j.preMats, 0, sizeof(j.preMats));
+    memset(j.tdd, 0, sizeof(j.tdd));
+    j.gen = 1;
+  }
+  return kBuildOk;
+}
+
+// The per-segment unique lists, the restore lists and the caster list.
+int FinishBuild(Job& j) {
+  const Env& env = *j.env;
+  for (Seg& s : j.segs) s.draws = 0;
+  for (uint32_t k = 0; k < j.segCount; ++k) {
+    Seg& s = j.segs[k];
+    s.entFirst = j.entCount;
+    s.pairFirst = j.pairCount;
+    s.matFirst = j.segMatCount;
+    s.pageFirst = j.pageCount;
+    s.tris = 0;
+    NextStamp(j);
+    for (uint32_t c = s.candFirst; c < s.candEnd; ++c) {
+      Cand& cd = j.cands[c];
+      if (!cd.alive) continue;
+      ++s.draws;
+      Item& it = j.items[cd.item];
+      MatRec& m = j.mats[it.mat];
+      ++m.rec;
+      ++j.shaders[it.shader].rec;
+      s.tris += *reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(j.snap[cd.item]) + 0x78);
+      if (m.segStamp != j.ddStamp) {
+        m.segStamp = j.ddStamp;
+        if (j.segMatCount == kMaxSegMats) return j.result = kBuildOversize;
+        j.segMats[j.segMatCount++] = it.mat;
+      }
+      if (DdInsert(j, reinterpret_cast<uintptr_t>(cd.page), 3)) {
+        if (j.pageCount == kMaxSegPages) return j.result = kBuildOversize;
+        j.segPages[j.pageCount++] = {cd.pageIdx, cd.page};
+      }
+      for (uint32_t q = 0; q < cd.setCount; ++q) {
+        const SetRef& sr = SetsOf(j, cd)[q];
+        if (DdInsert(j, reinterpret_cast<uintptr_t>(sr.e), 1)) {
+          if (j.entCount == kMaxSegEnts) return j.result = kBuildOversize;
+          j.segEntVer[j.entCount] = sr.e->version.load(std::memory_order_relaxed);
+          j.segEnts[j.entCount++] = sr.e;
+          const_cast<TexEntry*>(sr.e)->lastUse.store(j.useGen, std::memory_order_relaxed);
+        }
+        if (DdInsert(j, reinterpret_cast<uintptr_t>(sr.tex), sr.size ^ 0x5a5a000000000000ull)) {
+          if (j.pairCount == kMaxSegPairs) return j.result = kBuildOversize;
+          j.segPairs[j.pairCount++] = {sr.tex, sr.size};
+        }
+      }
+    }
+    s.entEnd = j.entCount;
+    s.pairEnd = j.pairCount;
+    s.matEnd = j.segMatCount;
+    s.pageEnd = j.pageCount;
+    j.draws += s.draws;
+  }
+  j.recorded = j.draws;
+  // Materials whose last item here is recorded: their end state after the pass.
+  for (uint32_t mi = 0; mi < j.matCount; ++mi) {
+    const MatRec& m = j.mats[mi];
+    if (!m.rec || m.last < 0) continue;
+    const Item& it = j.items[m.last];
+    if (it.seg == kNoSeg) continue;
+    if (j.matRestCount == kMaxRestores) return j.result = kBuildOversize;
+    j.matRest[j.matRestCount++] = {mi, static_cast<uint32_t>(m.last), it.seg};
+  }
+  // FX variables whose last writer here is recorded (reverse scan over the
+  // writers of the shaders with recorded draws: the first sight is the last
+  // writer in vector order).
+  NextStamp(j);
+  for (size_t i = j.n; i-- > 0;) {
+    const Item& it = j.items[i];
+    if (!it.writer || it.shader == ~0u || !j.shaders[it.shader].rec) continue;
+    const MatRec& m = j.mats[it.mat];
+    auto* r = static_cast<uint8_t*>(j.snap[i]);
+    auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+    const bool recorded = it.seg != kNoSeg;
+    const Cand* cd = recorded ? &j.cands[it.cand] : nullptr;
+    auto note = [&](uint8_t* var, void* value) -> bool {
+      if (!var) return true;
+      if (*reinterpret_cast<void**>(var) == nullptr ||
+          (*reinterpret_cast<void***>(var))[31] != env.setResource)
+        return false;
+      if (!DdInsert(j, reinterpret_cast<uintptr_t>(var), 7)) return true;
+      if (!recorded) return true;
+      if (j.varRestCount == kMaxRestores) return false;
+      j.varRest[j.varRestCount++] = {var, value, it.seg};
+      return true;
+    };
+    const uint32_t page = *reinterpret_cast<uint32_t*>(item + 0xd0);
+    if (PageBuffer(env, page)) {
+      const int64_t hsb = *reinterpret_cast<int64_t*>(m.mat + 0x68);
+      if (!note(VarOf(m.shader, hsb), recorded ? static_cast<void*>(cd->page) : nullptr))
+        return j.result = kBuildVarClass;
+    }
+    const uint32_t ntex = *reinterpret_cast<uint32_t*>(m.mat + 0x2d8);
+    const uint8_t* en = ntex ? EntriesOf(m.mat, item) : nullptr;
+    for (uint32_t k = 0; k < ntex && k < kMaxTex && en; ++k) {
+      const int64_t h = *reinterpret_cast<int64_t*>(m.mat + 0x240 + 8 * k);
+      if (h == -1 || !*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) continue;
+      void* value = nullptr;
+      if (recorded) {
+        // The set's entry (Pass2One kept every set with a texture, in handle order).
+        for (uint32_t q = 0; q < cd->setCount; ++q) {
+          const SetRef& sr = SetsOf(j, *cd)[q];
+          if (sr.h == h) {
+            ID3D11ShaderResourceView* v = nullptr;
+            TexPick(*sr.e, sr.size, &v);
+            value = v;  // the last set of h wins
+          }
+        }
+      }
+      if (!note(VarOf(m.shader, h), value)) return j.result = kBuildVarClass;
+    }
+  }
+  // DCS's loop: [front, residual items and one exec entry per segment, in order].
+  j.swapCount = 0;
+  j.swapList[j.swapCount++] = j.front;
+  for (size_t i = 0; i < j.n; ++i) {
+    const uint8_t s = j.items[i].seg;
+    if (s == kNoSeg)
+      j.swapList[j.swapCount++] = j.snap[i];
+    else if (i == j.segs[s].first)
+      j.swapList[j.swapCount++] = j.execObj[s];
+  }
+  return j.result = kBuildOk;
+}
+
+// Stage A on one thread (the offline tests; workers split PreChunks).
+int BuildJob(Job& j) {
+  if (BeginBuild(j) != kBuildOk) return j.result;
+  PreChunks(j, 0);
+  return CommitBuild(j);
+}
+
+// ---------------------------------------------------------------------------
+// Recording (worker)
+// ---------------------------------------------------------------------------
+// The CB bytes DCS's draw uploads for candidate c (R18 3.2): the material
+// snapshot, +0xfc = [item+0xd4], the animated properties by DCS's own vt[9]
+// into the window, +0x20 = item+0x60..0x9c, +0x80 = the learned 12 bytes.
+void BuildWindow(const Job& j, const Cand& c, uint8_t* w) {
+  const Item& it = j.items[c.item];
+  const MatRec& m = j.mats[it.mat];
+  auto* r = static_cast<uint8_t*>(j.snap[c.item]);
+  auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+  memcpy(w, m.cb, kCbLen);
+  memcpy(w + kPsoCb, item + 0xd4, 4);
+  if (m.animN) {
+    const uint8_t* b = *reinterpret_cast<uint8_t* const*>(m.mat + 8);
+    for (uint32_t k = 0; k < m.animN; ++k) {
+      const uint8_t* p = b + 16 * k;
+      uint8_t* dst = *reinterpret_cast<uint8_t* const*>(p);
+      void* prop = *reinterpret_cast<void* const*>(p + 8);
+      alignas(16) uint8_t span[16];
+      memcpy(span, item, 16);
+      (*reinterpret_cast<PropFn**>(prop))[9](prop, span, w + (dst - m.mat - kCbOff));
+    }
+  }
+  memcpy(w + kMatrixCb, item + 0x60, kMatrixLen);
+  memcpy(w + kRatioCb, j.ratio, kRatioLen);
+}
+
+// One piece on the worker's deferred context: the frame buffer's state and
+// DCS's sampler pool (s5-s15, checked at every exec entry), then every draw in
+// vector order with exactly the bindings DCS's draw leaves for its shaders
+// (bindings equal to the previous draw's are not repeated). A key binds only
+// its FX sampler dependencies below the pool (all slots below it when those
+// were not read); its probe proved the pool slots equal the pool.
+bool RecordRange(defrec::Worker& w, Job& j, const Piece& s, int role) {
+  shrec::LoadScope load(g_load);
+  ID3D11DeviceContext* dc = w.dc;
+  alignas(16) uint8_t win[kCbLen];
+  for (uint32_t c = s.candFirst; c < s.candEnd; ++c) {
+    const Cand& cd = j.cands[c];
+    if (!cd.alive) continue;
+    defrec::CbSlice sl = w.ring.Alloc(kCbLen);
+    if (!sl) return false;
+    BuildWindow(j, cd, win);
+    memcpy(sl.ptr, win, kCbLen);
+    j.slices[c] = sl;
+    j.cbBytesT[role] += static_cast<uint64_t>(sl.num) * 16;
+  }
+  w.ring.Close();
+  dc->OMSetRenderTargets(kRtv, j.rtv, j.dsv);
+  dc->RSSetViewports(j.nvp, j.vp);
+  dc->RSSetScissorRects(j.nsc, j.nsc ? j.sc : nullptr);
+  for (UINT k = 0; k < 3; ++k) {
+    if (j.ctxBuf[0][k]) dc->VSSetConstantBuffers(kCtx0 + k, 1, &j.ctxBuf[0][k]);
+    if (j.ctxBuf[1][k]) dc->PSSetConstantBuffers(kCtx0 + k, 1, &j.ctxBuf[1][k]);
+  }
+  const GbKey* ck = nullptr;
+  const shrec::MeshEntry* cm = nullptr;
+  auto* const kNone = reinterpret_cast<void*>(1);  // never equal to a binding
+  void *vs = kNone, *ps = kNone, *dss = kNone, *bs = kNone, *rs = kNone, *il = kNone, *vb = kNone, *ib = kNone;
+  void* vsSamp[kSampSlots];
+  void* psSamp[kSampSlots];
+  for (auto*& p : vsSamp) p = kNone;
+  for (auto*& p : psSamp) p = kNone;
+  dc->VSSetSamplers(kPoolFirst, kSampSlots - kPoolFirst, &j.pool[0][kPoolFirst]);
+  dc->PSSetSamplers(kPoolFirst, kSampSlots - kPoolFirst, &j.pool[1][kPoolFirst]);
+  for (UINT q = kPoolFirst; q < kSampSlots; ++q) vsSamp[q] = j.pool[0][q], psSamp[q] = j.pool[1][q];
+  void* vsv[kSrvSlots];
+  void* psv[kSrvSlots];
+  for (auto*& v : vsv) v = kNone;
+  for (auto*& v : psv) v = kNone;
+  UINT ref = 0, mask = 0, stride = 0;
+  float factor[4] = {};
+  DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+  bool topo = false;
+  for (uint32_t c = s.candFirst; c < s.candEnd; ++c) {
+    const Cand& cd = j.cands[c];
+    if (!cd.alive) continue;
+    const GbKey& k = *cd.key;
+    const shrec::MeshEntry& m = *cd.mesh;
+    if (&k != ck) {
+      ck = &k;
+      if (k.vs != vs) dc->VSSetShader(k.vs, nullptr, 0), vs = k.vs;
+      if (k.ps != ps) dc->PSSetShader(k.ps, nullptr, 0), ps = k.ps;
+      const uint32_t vm = KeyOwnSamplers(k.vsSampDeps), pm = KeyOwnSamplers(k.psSampDeps);
+      for (UINT q = 0; q < kPoolFirst; ++q) {
+        if (((vm >> q) & 1) && k.vsSamp[q] != vsSamp[q]) dc->VSSetSamplers(q, 1, &k.vsSamp[q]), vsSamp[q] = k.vsSamp[q];
+        if (((pm >> q) & 1) && k.psSamp[q] != psSamp[q]) dc->PSSetSamplers(q, 1, &k.psSamp[q]), psSamp[q] = k.psSamp[q];
+      }
+      if (k.dss != dss || k.stencilRef != ref) dc->OMSetDepthStencilState(k.dss, k.stencilRef), dss = k.dss, ref = k.stencilRef;
+      if (k.bs != bs || k.sampleMask != mask || memcmp(k.blendFactor, factor, sizeof(factor)) != 0) {
+        dc->OMSetBlendState(k.bs, k.blendFactor, k.sampleMask);
+        bs = k.bs;
+        mask = k.sampleMask;
+        memcpy(factor, k.blendFactor, sizeof(factor));
+      }
+      if (k.rs != rs) dc->RSSetState(k.rs), rs = k.rs;
+    }
+    if (&m != cm) {
+      cm = &m;
+      if (m.il != il) dc->IASetInputLayout(m.il), il = m.il;
+      if (m.vb != vb || m.stride != stride) {
+        const UINT zero = 0;
+        dc->IASetVertexBuffers(0, 1, &m.vb, &m.stride, &zero);
+        vb = m.vb;
+        stride = m.stride;
+      }
+      if (m.ib != ib || m.ibFormat != fmt) dc->IASetIndexBuffer(m.ib, m.ibFormat, 0), ib = m.ib, fmt = m.ibFormat;
+      if (!topo) dc->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST), topo = true;
+    }
+    ID3D11ShaderResourceView* page = cd.page;
+    if (vsv[k.st.sbSlot] != page) dc->VSSetShaderResources(k.st.sbSlot, 1, &page), vsv[k.st.sbSlot] = page;
+    for (int w2 = 0; w2 < 2; ++w2)
+      for (uint64_t bits = k.psSbMask[w2]; bits; bits &= bits - 1) {
+        unsigned long b;
+        _BitScanForward64(&b, bits);
+        const UINT slot = static_cast<UINT>(w2 * 64 + b);
+        if (psv[slot] != page) dc->PSSetShaderResources(slot, 1, &page), psv[slot] = page;
+      }
+    for (int q = 0; q < k.psTexCount; ++q) {
+      const UINT slot = k.psTexSlot[q];
+      ID3D11ShaderResourceView* v = ViewsOf(j, cd)[q];
+      if (psv[slot] != v) dc->PSSetShaderResources(slot, 1, &v), psv[slot] = v;
+    }
+    const defrec::CbSlice& sl = j.slices[c];
+    w.ring.BindVS(k.st.cbSlot, sl);
+    for (uint32_t bits = k.psCbMask; bits; bits &= bits - 1) {
+      unsigned long slot;
+      _BitScanForward(&slot, bits);
+      w.ring.BindPS(slot, sl);
+    }
+    dc->DrawIndexed(m.indexCount, 0, 0);
+  }
+  return true;
+}
+
+// The pieces: the recorded draws, in vector order, cut into `workers` runs of
+// about equal draw counts (worker r records run r); a run that spans segments
+// is one piece per segment. Each segment's pieces stay in order, so its exec
+// entry executes them one after the other (one Execute more per cut).
+void PlanPieces(Job& j, uint32_t workers) {
+  j.pieceCount = 0;
+  if (workers < 1) workers = 1;
+  const uint32_t quota = (j.draws + workers - 1) / workers;
+  uint32_t role = 0, acc = 0;
+  for (uint32_t k = 0; k < j.segCount; ++k) {
+    Seg& s = j.segs[k];
+    s.pieceFirst = j.pieceCount;
+    uint32_t c = s.candFirst;
+    while (c < s.candEnd) {
+      Piece& p = j.pieces[j.pieceCount++];
+      p = Piece();
+      p.seg = static_cast<uint8_t>(k);
+      p.role = static_cast<uint8_t>(role);
+      p.candFirst = c;
+      while (c < s.candEnd && (acc < quota || role + 1 == workers)) {
+        if (j.cands[c].alive) ++acc, ++p.draws;
+        ++c;
+      }
+      p.candEnd = c;
+      if (acc >= quota && role + 1 < workers) {
+        ++role;
+        acc = 0;
+      }
+    }
+    s.pieceEnd = j.pieceCount;
+  }
+  j.recWorkers = role + 1;
+}
+
+// Worker `role`'s pieces, each finished into its own list. False: a piece
+// could not be recorded (the job is not used).
+bool RecordRole(defrec::Worker& w, Job& j, int role) {
+  if (!w.dc1 || w.ring.Mode() != defrec::CbMode::kOffsets) return false;
+  for (uint32_t k = 0; k < j.pieceCount; ++k) {
+    Piece& p = j.pieces[k];
+    if (p.role != role) continue;
+    if (j.recFail.load(std::memory_order_relaxed)) return false;
+    w.ring.Reset();
+    if (!RecordRange(w, j, p, role)) return false;
+    w.ring.Close();
+    if (FAILED(w.dc->FinishCommandList(FALSE, &p.cl)) || !p.cl) return false;
+  }
+  return true;
+}
+
+// A segment re-recorded during its pass with the job's rebuilt texture
+// entries (RedoArg; one list, finished here). The texture table's lock is
+// held shared, as for any recording (the unchanged entries' views stay alive).
+bool RedoRecord(defrec::Worker& w, Job& j, uint32_t k, int role) {
+  if (!w.dc1 || w.ring.Mode() != defrec::CbMode::kOffsets) return false;
+  const Seg& sg = j.segs[k];
+  Piece p = Piece();
+  p.candFirst = sg.candFirst;
+  p.candEnd = sg.candEnd;
+  p.draws = sg.draws;
+  p.seg = static_cast<uint8_t>(k);
+  p.role = static_cast<uint8_t>(role);
+  w.ring.Reset();
+  const bool ok = RecordRange(w, j, p, role);
+  w.ring.Close();
+  ID3D11CommandList* cl = nullptr;
+  if (FAILED(w.dc->FinishCommandList(FALSE, &cl)) || !cl) return false;
+  if (!ok) {
+    cl->Release();  // a partial list is never executed
+    return false;
+  }
+  j.redoCl[k] = cl;
+  return true;
+}
+
+bool RedoMain(defrec::Worker& w, void* u) {
+  RedoArg& a = *static_cast<RedoArg*>(u);
+  Job& j = *a.j;
+  bool ok = false;
+  if (j.texLock) AcquireSRWLockShared(j.texLock);
+  __try {
+    ok = RedoRecord(w, j, a.seg, a.worker);
+  } __finally {
+    if (j.texLock) ReleaseSRWLockShared(j.texLock);
+    j.redoState[a.seg].store(ok ? kRedoOk : kRedoFail, std::memory_order_release);
+  }
+  return false;  // the list is the job's (redoCl), the pool's stays empty
+}
+
+// Starts an armed job on vector `vec` (the sort hook on a pool thread, or the
+// render thread at RenderGraph::render entry; the first one wins).
+bool StartJob(Job& j, void** vec, bool early) {
+  int st = kStartArmed;
+  if (!j.startState.compare_exchange_strong(st, kStartRun, std::memory_order_acq_rel)) return false;
+  j.vec = vec;
+  j.startedEarly = early;
+  j.tStart = defrec::Qpc();
+  SetEvent(j.start);
+  return true;
+}
+
+// Ends the helpers' waits (nothing (more) to do).
+void ReleaseHelpers(Job& j) {
+  int st = kGoWait;
+  if (j.preState.compare_exchange_strong(st, kGoAbort, std::memory_order_acq_rel)) SetEvent(j.preGo);
+  st = kGoWait;
+  if (j.recState.compare_exchange_strong(st, kGoAbort, std::memory_order_acq_rel)) SetEvent(j.recGo);
+}
+
+// The primary worker: the start (sort hook or render entry), stage A with
+// the helpers (reads in chunks, then the serial commit), the pieces, its own
+// recording. The helpers record theirs on their own contexts. Every list is
+// finished by the worker that recorded it (the pool's own list stays empty).
+bool JobMain(defrec::Worker& w, void* u) {
+  Job& j = *static_cast<Job*>(u);
+  WaitForSingleObject(j.start, kStartWaitMs);
+  int st = kStartArmed;
+  if (j.startState.compare_exchange_strong(st, kStartAbort, std::memory_order_acq_rel) || st != kStartRun) {
+    ReleaseHelpers(j);
+    j.phase.store(kJobEmpty, std::memory_order_release);
+    return false;
+  }
+  const int64_t t0 = defrec::Qpc();
+  if (j.texLock) AcquireSRWLockShared(j.texLock);
+  // The lock is released and the helpers let go even when a DCS read faults
+  // (the pool latches off then).
+  __try {
+    if (BeginBuild(j) == kBuildOk) {
+      j.preState.store(kGoRun, std::memory_order_release);
+      SetEvent(j.preGo);
+      PreChunks(j, 0);
+      j.tPreDone = defrec::Qpc();
+      j.preUs = (j.tPreDone - t0) * defrec::QpcToUs();
+      if (!WaitPre(j))
+        j.result = kBuildPreLate;
+      else
+        CommitBuild(j);
+    }
+    j.tBuilt = defrec::Qpc();
+    j.commitUs = (j.tBuilt - (j.tPreDone ? j.tPreDone : t0)) * defrec::QpcToUs();
+    j.buildUs = (j.tBuilt - t0) * defrec::QpcToUs();
+    if (j.result == kBuildOk && j.segCount) {
+      // Helpers that read chunks are at (or about to reach) the recording barrier.
+      const int64_t b0 = defrec::Qpc();
+      while (j.ready.load(std::memory_order_acquire) < j.started.load(std::memory_order_acquire) &&
+             (defrec::Qpc() - b0) * defrec::QpcToUs() < 100.0)
+        _mm_pause();
+      uint32_t workers = 1 + j.ready.load(std::memory_order_acquire);
+      if (workers > static_cast<uint32_t>(kThreads)) workers = kThreads;
+      if (j.draws < j.splitMin) workers = 1;
+      PlanPieces(j, workers);
+      j.recState.store(kGoRun, std::memory_order_release);  // publishes the pieces and recWorkers
+      SetEvent(j.recGo);
+      const int64_t r0 = defrec::Qpc();
+      if (!RecordRole(w, j, 0)) j.recFail.store(1, std::memory_order_release);
+      j.tRecDone[0] = defrec::Qpc();
+      j.recUs[0] = (j.tRecDone[0] - r0) * defrec::QpcToUs();
+    }
+  } __finally {
+    ReleaseHelpers(j);
+    if (j.texLock) ReleaseSRWLockShared(j.texLock);
+    j.tDone = defrec::Qpc();
+    j.phase.store(kJobBuilt, std::memory_order_release);
+  }
+  return false;
+}
+
+// Helper t (1..kThreads-1): stage-A chunks, then its recording role (by
+// arrival at the barrier) when the primary planned pieces for it.
+template <int T>
+bool HelperMain(defrec::Worker& w, void* u) {
+  Job& j = *static_cast<Job*>(u);
+  WaitForSingleObject(j.preGo, kStartWaitMs + 50);
+  if (j.preState.load(std::memory_order_acquire) != kGoRun) return false;
+  j.started.fetch_add(1, std::memory_order_acq_rel);
+  if (j.texLock) AcquireSRWLockShared(j.texLock);
+  __try {
+    PreChunks(j, T);
+    const uint32_t role = j.ready.fetch_add(1, std::memory_order_acq_rel) + 1;
+    WaitForSingleObject(j.recGo, 200);
+    if (j.recState.load(std::memory_order_acquire) == kGoRun && role < j.recWorkers) {
+      const int64_t r0 = defrec::Qpc();
+      if (!RecordRole(w, j, static_cast<int>(role))) j.recFail.store(1, std::memory_order_release);
+      j.tRecDone[role] = defrec::Qpc();
+      j.recUs[role] = (j.tRecDone[role] - r0) * defrec::QpcToUs();
+    }
+  } __finally {
+    if (j.texLock) ReleaseSRWLockShared(j.texLock);
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Render thread: checks, streaming replay, restores
+// ---------------------------------------------------------------------------
+// The vector is still the job's (identity; the pass compares every pointer).
+bool SameVectorRaw(const Job& j, void** vec) {
+  auto** b = static_cast<void**>(vec[0]);
+  auto** e = static_cast<void**>(vec[1]);
+  return vec == j.vec && b == j.begin && e >= b && static_cast<size_t>(e - b) == j.n &&
+         memcmp(j.snap, b, j.n * sizeof(void*)) == 0;
+}
+bool SameVectorGuarded(const Job& j, void** vec) {
+  __try {
+    return SameVectorRaw(j, vec);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// One streaming request per (texture, size) of the segment (slot 26's vt[23]).
+uint32_t ReplayRaw(const Job& j, const Seg& s) {
+  for (uint32_t k = s.pairFirst; k < s.pairEnd; ++k) {
+    uint8_t* tex = j.segPairs[k].tex;
+    (*reinterpret_cast<shrec::Tex23Fn**>(tex))[23](tex, j.segPairs[k].size);
+  }
+  return s.pairEnd - s.pairFirst;
+}
+
+// Segment checks after the replay: textures (every failing entry is marked
+// dirty for the rebuild after the pass), material dwords, page views.
+int CheckSegmentRaw(const Job& j, const Seg& s) {
+  int why = kSExecuted;
+  const gbbatch::TexEnv& tenv = j.env->tex;
+  for (uint32_t k = s.entFirst; k < s.entEnd; ++k) {
+    const TexEntry& e = *j.segEnts[k];
+    if (e.version.load(std::memory_order_relaxed) != j.segEntVer[k] ||
+        e.slot.load(std::memory_order_relaxed) != kTeLive) {
+      why = kSTexture;  // rebuilt or evicted since the job read it
+      continue;
+    }
+    if (TexCheckRaw(tenv, e)) continue;
+    const_cast<TexEntry&>(e).dirty.store(1, std::memory_order_relaxed);
+    why = kSTexture;
+  }
+  if (why) return why;
+  for (uint32_t k = s.matFirst; k < s.matEnd; ++k) {
+    const MatRec& m = j.mats[j.segMats[k]];
+    for (int w = 0; w < 2; ++w)
+      for (uint64_t bits = m.guard[w]; bits; bits &= bits - 1) {
+        unsigned long d;
+        _BitScanForward64(&d, bits);
+        const uint32_t off = (static_cast<uint32_t>(w) * 64 + d) * 4;
+        if (off + 4 <= kCbLen && memcmp(m.mat + kCbOff + off, m.cb + off, 4) != 0) return kSGuard;
+      }
+  }
+  for (uint32_t k = s.pageFirst; k < s.pageEnd; ++k)
+    if (PageSrv(*j.env, j.segPages[k].page) != j.segPages[k].srv) return kSPage;
+  return kSExecuted;
+}
+
+// After the checks, before the list: slot 26's vt[18] of the segment's
+// render-target textures (their one-time mip generation, as their first draw
+// in the segment would do it; shadow_rec.h InitInnerRt). Returns the calls.
+uint32_t ReplayRtRaw(const Job& j, const Seg& s) {
+  uint32_t n = 0;
+  for (uint32_t k = s.entFirst; k < s.entEnd; ++k)
+    if (j.segEnts[k]->rt) {
+      ReplayVt18(j.segEnts[k]->tex);
+      ++n;
+    }
+  return n;
+}
+
+bool ReplayRtGuarded(const Job& j, const Seg& s, uint32_t* calls) {
+  __try {
+    *calls += ReplayRtRaw(j, s);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+int ReplayAndCheckGuarded(const Job& j, const Seg& s, uint32_t* replays) {
+  __try {
+    *replays += ReplayRaw(j, s);
+    return CheckSegmentRaw(j, s);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return kSFault;
+  }
+}
+
+// After the pass, for the executed segments: the triangle counter, the
+// materials' and the FX variables' end state as DCS's stock loop leaves them.
+void RestoreRaw(const Job& j, const uint8_t* executed) {
+  uint64_t tris = 0;
+  for (uint32_t k = 0; k < j.segCount; ++k)
+    if (executed[k]) tris += j.segs[k].tris;
+  if (tris && j.env->globals && *j.env->globals)
+    _InterlockedExchangeAdd64(reinterpret_cast<volatile long long*>(*j.env->globals + 0x1e8),
+                              static_cast<long long>(tris));
+  for (uint32_t k = 0; k < j.matRestCount; ++k) {
+    const MatRestore& mr = j.matRest[k];
+    if (!executed[mr.seg]) continue;
+    const MatRec& m = j.mats[mr.mat];
+    auto* r = static_cast<uint8_t*>(j.snap[mr.item]);
+    auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+    *reinterpret_cast<uint32_t*>(m.mat + 0x18c) = *reinterpret_cast<uint32_t*>(item + 0xd4);
+    if (m.animN && j.env->evalAnim) {
+      alignas(16) uint8_t span[16];
+      memcpy(span, item, 16);
+      j.env->evalAnim(m.mat, span);
+    }
+    memcpy(m.mat + kCbOff + kMatrixCb, item + 0x60, kMatrixLen);
+    memcpy(m.mat + kCbOff + kRatioCb, j.ratio, kRatioLen);
+  }
+  for (uint32_t k = 0; k < j.varRestCount; ++k) {
+    const VarRestore& vr = j.varRest[k];
+    if (!executed[vr.seg]) continue;
+    (*reinterpret_cast<SetResFn**>(vr.var))[31](vr.var, vr.value);
+  }
+}
+
+bool RestoreGuarded(const Job& j, const uint8_t* executed) {
+  __try {
+    RestoreRaw(j, executed);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Texture table and reads maintenance (render thread, exclusive)
+// ---------------------------------------------------------------------------
+std::atomic<uint64_t> g_texBuilt{0}, g_texRefreshed{0}, g_texFull{0}, g_texDeferred{0};
+uint64_t g_texWhy[kTwCount] = {};
+
+// An entry the job rebuilt for itself during a pass (not the table's).
+inline bool IsRedoEnt(const Job& j, const TexEntry* e) { return e >= j.redoEnt && e < j.redoEnt + kMaxRedoEnts; }
+
+// Builds the job's misses and rebuilds its unusable and dirty entries.
+void MaintainTex(TexTable& t, const gbbatch::TexEnv& env, const Job& j, uint32_t gen) {
+  if (t.live + t.tomb >= t.size * 3 / 4) TexWipe(t);  // rare: everything is rebuilt on demand
+  for (uint32_t k = 0; k < j.missCount; ++k) {
+    const Miss& m = j.misses[k];
+    bool fresh = false;
+    TexEntry* e = TexInsert(t, m.tex, m.aux, m.type, &fresh);
+    if (!e) {
+      g_texFull++;
+      break;
+    }
+    if (!fresh && !e->dirty.load(std::memory_order_relaxed)) continue;
+    const uint8_t why = TexBuildGuarded(env, *e, &g_census);
+    g_texWhy[why < kTwCount ? why : kTwFault]++;
+    e->dirty.store(why == kTwOk ? 0 : 1, std::memory_order_relaxed);
+    e->lastUse.store(gen, std::memory_order_relaxed);
+    g_texBuilt++;
+  }
+  auto rebuild = [&](const TexEntry* ce) {
+    TexEntry& e = *const_cast<TexEntry*>(ce);
+    if (e.slot.load(std::memory_order_relaxed) != kTeLive) return;
+    const uint8_t why = TexBuildGuarded(env, e, &g_census);
+    g_texWhy[why < kTwCount ? why : kTwFault]++;
+    e.dirty.store(why == kTwOk ? 0 : 1, std::memory_order_relaxed);
+    g_texRefreshed++;
+  };
+  for (uint32_t k = 0; k < j.refreshCount; ++k) rebuild(j.refresh[k]);
+  for (uint32_t k = 0; k < j.entCount; ++k)
+    if (!IsRedoEnt(j, j.segEnts[k]) && j.segEnts[k]->dirty.load(std::memory_order_relaxed)) rebuild(j.segEnts[k]);
+}
+
+// The texture records pass 0 of (shader, tech) reads, from shadow_inst's (a)
+// RDEF names: every name must be def_uniforms, a context buffer, sbPositions,
+// a sampler or one of the shader's records. Returns false while pending.
+bool ShaderPrintGuarded(const uint8_t* shader, void** effect, void** techBegin) {
+  __try {
+    *effect = *reinterpret_cast<void* const*>(shader + 0x50);
+    *techBegin = *reinterpret_cast<void* const*>(shader + 0xb0);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+bool ResolveReads(Tables& t, uint8_t* shader, uint64_t tech) {
+  void* effect = nullptr;
+  void* techBegin = nullptr;
+  if (!ShaderPrintGuarded(shader, &effect, &techBegin)) return true;
+  if (FindReads(t, shader, tech, effect, techBegin)) return true;
+  std::vector<std::string> bound;
+  std::string why;
+  const int st = shadowinst::GbPassReadTextures(shader, tech, 0, &bound, nullptr, &why, nullptr);
+  if (st == shadowtex::kReadsPending) return false;
+  ReadsEntry* e = NewReads(t, shader, tech);
+  if (!e) return true;
+  e->tech = tech;
+  e->effect = effect;
+  e->techBegin = techBegin;
+  e->state = 1;
+  e->count = 0;
+  memset(e->mask, 0, sizeof(e->mask));
+  if (st != shadowtex::kReadsReady) {
+    e->state = -1;
+    e->why = "the pass's read names are not analysed";
+  } else {
+    for (const std::string& n : bound) {
+      if (gbreccount::NameCatOf(n.c_str()) != gbreccount::kNcOther) continue;
+      const int r = gbreccount::RecordOfGuarded(shader, n.c_str());
+      if (r < 0 || r >= static_cast<int>(kMaxRecords)) {
+        e->state = -1;
+        e->why = "the pass binds a resource that is no material texture, context buffer, sbPositions or sampler";
+        break;
+      }
+      if (!(e->mask[r >> 6] & (1ull << (r & 63)))) ++e->count;
+      e->mask[r >> 6] |= 1ull << (r & 63);
+    }
+    if (e->state > 0 && e->count > static_cast<uint32_t>(kMaxPsTex)) {
+      e->state = -1;
+      e->why = "the pass reads more textures than a key maps";
+    }
+  }
+  PublishReads(t, *e, shader);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Probes: DCS's own draw, read back
+// ---------------------------------------------------------------------------
+struct Extra {
+  ID3D11Buffer* vsCtx[3] = {};             // VS b6-b8 (references)
+  ID3D11SamplerState* vsSamp[kSampSlots] = {};
+};
+
+void CaptureExtra(ID3D11DeviceContext* c, Extra& x) {
+  c->VSGetConstantBuffers(kCtx0, 3, x.vsCtx);
+  c->VSGetSamplers(0, kSampSlots, x.vsSamp);
+}
+
+void ReleaseExtra(Extra& x) {
+  for (auto*& p : x.vsCtx) SafeRel(p);
+  for (auto*& p : x.vsSamp) SafeRel(p);
+}
+
+// What DCS's draw must have used, from DCS memory and the pass.
+struct Facts {
+  void* dcsVs = nullptr;                 // the FX pass VS, equal to shadow_inst's map entry's
+  ID3D11ShaderResourceView* pageSrv = nullptr;
+  shrec::MeshLive mesh;
+  const char* meshWhy = nullptr;
+  ID3D11Buffer* passCtx[2][3] = {};      // VS/PS b6-b8 at the front entry (identity)
+  const ReadsEntry* reads = nullptr;
+  // The read records and the views their FX variables hold after the draw.
+  int readCount = 0;
+  bool readOk = true;
+  int32_t readH[kMaxPsTex] = {};
+  void* readView[kMaxPsTex] = {};
+  // The slots FX Apply sets (shrec::FxStageDeps; not read: every slot counts).
+  bool psDepsOk = false, vsDepsOk = false;
+  uint32_t psSampDeps = 0xffff, psCbDeps = 0x3fff, vsSampDeps = 0xffff;
+};
+
+struct PsMap {
+  int count = 0;
+  int32_t h[kMaxPsTex] = {};
+  UINT slot[kMaxPsTex] = {};
+  uint32_t cbMask = 0, ctxMask = 0;
+  uint64_t sbMask[2] = {};
+  uint32_t sampMask = 0xffff, vsSampMask = 0xffff;  // the sampler slots that count
+};
+
+const char* const kInconclusive = "inconclusive";
+
+// nullptr, kInconclusive (publish nothing yet), or why the key's draws are not
+// recordable.
+const char* CheckKey(const shrec::Capture& c, const Extra& x, const VsStatic& st, const Facts& f, PsMap* ps) {
+  *ps = PsMap();
+  if (c.classInstances) return "class instances are bound";
+  if (!c.vs || c.vs != f.dcsVs) return "the bound VS is not the FX pass's (or not shadow inst's)";
+  if (c.gs || c.hs || c.ds) return "a GS, HS or DS is bound";
+  if (!c.cb) return "no def_uniforms buffer is bound";
+  if (!c.sb || c.sb != f.pageSrv) return "sbPositions is not the page buffer's view at +0x30";
+  for (UINT k = 0; k < 3; ++k)
+    if ((st.ctxMask >> (kCtx0 + k)) & 1)
+      if (!x.vsCtx[k] || x.vsCtx[k] != f.passCtx[0][k]) return "a VS context buffer is not the pass's";
+  if (!c.ps) return "no pixel shader is bound";
+  if (!f.reads || f.reads->state <= 0) return "the pass's texture reads are not known";
+  for (UINT k = 0; k < 3; ++k) {
+    ID3D11Buffer* b = c.psCb[kCtx0 + k];
+    if (!b) continue;
+    if (b != f.passCtx[1][k]) return "a PS context buffer is not the pass's";
+    ps->ctxMask |= 1u << (kCtx0 + k);
+  }
+  if (!f.readOk) return kInconclusive;  // a read record unset or without a view: another draw maps it
+  if (f.readCount != static_cast<int>(f.reads->count)) return kInconclusive;
+  uint64_t texSlots[2] = {};
+  for (int k = 0; k < f.readCount; ++k) {
+    if (!f.readView[k]) return kInconclusive;
+    int hits = 0;
+    UINT slot = 0;
+    for (UINT s = 0; s < kSrvSlots; ++s)
+      if (c.psSrv[s] == f.readView[k]) ++hits, slot = s;
+    if (hits == 0) return "a read texture's view is not bound at any PS slot";
+    if (hits > 1) return kInconclusive;  // the same view also at another slot (an earlier draw's)
+    for (int q = 0; q < k; ++q)
+      if (ps->slot[q] == slot) return kInconclusive;  // two records with the same view
+    ps->h[k] = f.readH[k];
+    ps->slot[k] = slot;
+    texSlots[slot >> 6] |= 1ull << (slot & 63);
+  }
+  ps->count = f.readCount;
+  ps->sampMask = f.psDepsOk ? f.psSampDeps : 0xffff;
+  ps->vsSampMask = f.vsDepsOk ? f.vsSampDeps : 0xffff;
+  for (UINT s = 0; s < kCbSlots; ++s)
+    if (c.psCb[s] && c.psCb[s] == c.cb && (s < kCtx0 || s >= kCtx0 + 3) && (!f.psDepsOk || ((f.psCbDeps >> s) & 1)))
+      ps->cbMask |= 1u << s;
+  for (UINT s = 0; s < kSrvSlots; ++s)
+    if (c.psSrv[s] && c.psSrv[s] == f.pageSrv && !((texSlots[s >> 6] >> (s & 63)) & 1))
+      ps->sbMask[s >> 6] |= 1ull << (s & 63);
+  return nullptr;
+}
+
+// What differs between a key's objects and another probe of it (shadow_rec.h
+// kD* bits; 0: same). Samplers count only at the slots FX Apply sets (both
+// probes' dependencies; every slot when unknown): other slots hold whatever
+// earlier draws left there, which depends on the draw history (the view).
+// The context-buffer pattern does not count: lists bind the front entry's.
+uint32_t KeyDiff(const GbKey& k, const shrec::Capture& c, const Extra& x, const PsMap& ps, uint32_t* sampSlots) {
+  uint32_t d = 0;
+  d |= k.vs != c.vs ? shrec::kDVs : 0;
+  d |= k.ps != c.ps ? shrec::kDPs : 0;
+  d |= k.dss != c.dss ? shrec::kDDepth : 0;
+  d |= k.stencilRef != c.stencilRef ? shrec::kDStencilRef : 0;
+  d |= k.bs != c.bs ? shrec::kDBlend : 0;
+  d |= memcmp(k.blendFactor, c.blendFactor, sizeof(c.blendFactor)) != 0 ? shrec::kDBlendFactor : 0;
+  d |= k.sampleMask != c.sampleMask ? shrec::kDSampleMask : 0;
+  d |= k.rs != c.rs ? shrec::kDRaster : 0;
+  *sampSlots = 0;
+  // Pool slots count per execution (each probe checks them against the pool), not per key.
+  const uint32_t pm = KeyOwnSamplers(k.psSampDeps & ps.sampMask), vm = KeyOwnSamplers(k.vsSampDeps & ps.vsSampMask);
+  uint32_t vsSlots = 0;
+  for (UINT q = 0; q < kSampSlots; ++q) {
+    if (((pm >> q) & 1) && k.psSamp[q] != c.psSamp[q]) *sampSlots |= 1u << q;
+    if (((vm >> q) & 1) && k.vsSamp[q] != x.vsSamp[q]) vsSlots |= 1u << q;
+  }
+  d |= *sampSlots ? shrec::kDSamplers : 0;
+  d |= vsSlots ? shrec::kDVsSamplers : 0;
+  *sampSlots |= vsSlots << 16;
+  d |= k.psCbMask != ps.cbMask ? shrec::kDCbSlots : 0;
+  bool tex = k.psTexCount != ps.count;
+  for (int p = 0; p < ps.count && !tex; ++p) {
+    int q = 0;
+    while (q < k.psTexCount && k.psTexH[q] != ps.h[p]) ++q;
+    tex = q == k.psTexCount || k.psTexSlot[q] != ps.slot[p];
+  }
+  d |= tex ? shrec::kDTexSlots : 0;
+  return d;
+}
+
+struct ProbeIn {
+  uint32_t scope = 0;  // the execution's collection index
+  int ordinal = -1;    // its ordinal (log only)
+  uint8_t* r = nullptr;
+  uint8_t* item = nullptr;
+  uint8_t* mat = nullptr;
+  uint8_t* shader = nullptr;
+  uint64_t tech = 0;
+  uint8_t* mesh = nullptr;
+  uint32_t page = 0;
+  void* effect = nullptr;
+  void* techBegin = nullptr;
+};
+
+std::atomic<uint32_t> g_logBudget{24};
+std::atomic<uint64_t> g_keysOk{0}, g_keysRejected{0}, g_keyDowngrades{0}, g_meshesOk{0}, g_meshesRejected{0},
+    g_tableFull{0}, g_probeInconclusive{0}, g_keyRelearnt{0}, g_probePool{0};
+std::atomic<uint32_t> g_diffLogBudget{32};
+
+void LogReject(const char* what, const ProbeIn& in, uint32_t flags, const char* why) {
+  if (g_logBudget.load() == 0) return;
+  g_logBudget.fetch_sub(1);
+  Log("gbuffer recorder: %s not recordable: %s (shader %p, technique %llu, flags 0x%x, mesh %p)", what, why, in.shader,
+      static_cast<unsigned long long>(in.tech), flags, in.mesh);
+}
+
+// Publishes what one probe learned (render thread, or the offline tests).
+// Returns false when inconclusive.
+bool ProcessProbe(Tables& t, const ProbeIn& in, const VsStatic& st, const Facts& f, const shrec::Capture& c,
+                  const Extra& x, uint32_t now = 0) {
+  GbKey* k = const_cast<GbKey*>(FindKey(t, in.shader, in.tech, c.flags, in.effect, in.techBegin, in.scope));
+  if (!k && KeyCooling(t, in.shader, in.tech, c.flags, in.effect, in.techBegin, in.scope, now, false)) return true;
+  PsMap ps;
+  const char* why = st.why ? st.why : CheckKey(c, x, st, f, &ps);
+  const bool inconclusive = why == kInconclusive;
+  if (inconclusive) {
+    g_probeInconclusive++;
+    if (!k || k->state.load() <= 0) return false;
+    why = nullptr;  // a recordable key: the mesh still applies
+  }
+  if (!k) {
+    const bool relearn = KeyCooling(t, in.shader, in.tech, c.flags, in.effect, in.techBegin, in.scope, now, true);
+    k = NewKey(t, in.shader, in.tech, c.flags, in.scope);
+    if (!k) {
+      g_tableFull++;
+      return true;
+    }
+    if (relearn) g_keyRelearnt++;
+    k->tech = in.tech;
+    k->flags = c.flags;
+    k->scope = in.scope;
+    k->effect = in.effect;
+    k->techBegin = in.techBegin;
+    k->st = st;
+    k->why = why;
+    if (!why) {
+      if ((k->vs = c.vs)) k->vs->AddRef();
+      if ((k->ps = c.ps)) k->ps->AddRef();
+      if ((k->dss = c.dss)) k->dss->AddRef();
+      k->stencilRef = c.stencilRef;
+      if ((k->bs = c.bs)) k->bs->AddRef();
+      memcpy(k->blendFactor, c.blendFactor, sizeof(c.blendFactor));
+      k->sampleMask = c.sampleMask;
+      if ((k->rs = c.rs)) k->rs->AddRef();
+      for (UINT s = 0; s < kSampSlots; ++s) {
+        if ((k->psSamp[s] = c.psSamp[s])) k->psSamp[s]->AddRef();
+        if ((k->vsSamp[s] = x.vsSamp[s])) k->vsSamp[s]->AddRef();
+      }
+      k->psSampDeps = ps.sampMask;
+      k->vsSampDeps = ps.vsSampMask;
+      k->psCbMask = ps.cbMask;
+      k->psCtxMask = ps.ctxMask;
+      k->psSbMask[0] = ps.sbMask[0];
+      k->psSbMask[1] = ps.sbMask[1];
+      k->psTexCount = ps.count;
+      for (int p = 0; p < ps.count; ++p) k->psTexH[p] = ps.h[p], k->psTexSlot[p] = ps.slot[p];
+    }
+    k->state.store(why ? -1 : 1, std::memory_order_relaxed);
+    PublishKey(t, *k, in.shader);
+    if (why) {
+      g_keysRejected++;
+      LogReject("key", in, c.flags, why);
+    } else {
+      g_keysOk++;
+    }
+  } else if (!inconclusive && k->state.load() > 0) {
+    uint32_t slots = 0;
+    const uint32_t diff = why ? 0 : KeyDiff(*k, c, x, ps, &slots);
+    if (why || diff) {
+      // Another draw of a recordable key bound something else: retired (its
+      // draws are drawn by DCS), relearnt by a probe after the cooldown.
+      k->why = why ? why : "state objects differ between draws of the key";
+      k->retiredAt = now + 1;
+      k->state.store(kRetired, std::memory_order_release);
+      g_keyDowngrades++;
+      if (g_diffLogBudget.load() > 0) {
+        g_diffLogBudget.fetch_sub(1);
+        Log("gbuffer recorder: key retired (relearnt after %u render entries): %s%s (shader %p, technique %llu, flags "
+            "0x%x, collection %u, execution #%d; stencil ref %u -> %u; sampler slots that count PS 0x%x / 0x%x, VS 0x%x "
+            "/ 0x%x; differing sampler slots PS 0x%x VS 0x%x; FX dependencies read PS %d VS %d)",
+            kKeyCooldown, why ? why : "differs: ", why ? "" : shrec::DiffText(diff, slots & 0xffff).c_str(), in.shader,
+            static_cast<unsigned long long>(in.tech), c.flags, in.scope, in.ordinal, k->stencilRef, c.stencilRef,
+            k->psSampDeps, ps.sampMask, k->vsSampDeps, ps.vsSampMask, slots & 0xffff, slots >> 16, f.psDepsOk ? 1 : 0,
+            f.vsDepsOk ? 1 : 0);
+      }
+      return true;
+    }
+  }
+  if (k->state.load() <= 0 || shrec::FindMesh(t.mesh, in.mesh, in.shader, in.tech, in.effect, in.techBegin))
+    return true;
+  shrec::ProbeFacts mf;
+  mf.mesh = f.mesh;
+  mf.meshWhy = f.meshWhy;
+  const char* mwhy = shrec::CheckMesh(c, mf);
+  shrec::MeshEntry* m = shrec::NewMesh(t.mesh, in.mesh, in.shader, in.tech);
+  if (!m) {
+    g_tableFull++;
+    return true;
+  }
+  m->shader = in.shader;
+  m->tech = in.tech;
+  m->effect = in.effect;
+  m->techBegin = in.techBegin;
+  m->why = mwhy;
+  if (!mwhy) {
+    m->fp = f.mesh.fp;
+    if ((m->il = c.il)) m->il->AddRef();
+    m->vb = f.mesh.vb;
+    m->stride = f.mesh.stride;
+    m->ib = f.mesh.ib;
+    m->ibFormat = f.mesh.ibFormat;
+    m->indexCount = 3 * f.mesh.count;
+  }
+  m->state.store(mwhy ? -1 : 1, std::memory_order_relaxed);
+  shrec::PublishMesh(t.mesh, *m, in.mesh);
+  if (mwhy) {
+    g_meshesRejected++;
+    LogReject("mesh", in, c.flags, mwhy);
+  } else {
+    g_meshesOk++;
+  }
+  return true;
+}
+
+// The read records' views as their FX variables hold them after the draw
+// (slot 26's SetResource: *[var+8] = view [V dx11backend 0x61ca0]). Plain.
+void ReadSetsRaw(const ProbeIn& in, const ReadsEntry& rd, Facts& f) {
+  f.readCount = 0;
+  f.readOk = true;
+  uint64_t seen[kRecWords] = {};
+  const uint32_t ntex = *reinterpret_cast<uint32_t*>(in.mat + 0x2d8);
+  const uint8_t* en = ntex ? EntriesOf(in.mat, in.item) : nullptr;
+  for (uint32_t k = 0; k < ntex && k < kMaxTex && en; ++k) {
+    const int64_t h = *reinterpret_cast<int64_t*>(in.mat + 0x240 + 8 * k);
+    if (h < 0 || h >= static_cast<int64_t>(kMaxRecords) || !((rd.mask[h >> 6] >> (h & 63)) & 1)) continue;
+    if (!*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) {
+      f.readOk = false;  // inherits: not this draw's to map
+      return;
+    }
+    if ((seen[h >> 6] >> (h & 63)) & 1) continue;
+    seen[h >> 6] |= 1ull << (h & 63);
+    if (f.readCount == kMaxPsTex) {
+      f.readOk = false;
+      return;
+    }
+    const uint8_t* var = VarOf(in.shader, h);
+    f.readH[f.readCount] = static_cast<int32_t>(h);
+    f.readView[f.readCount++] = var ? **reinterpret_cast<void** const*>(var + 8) : nullptr;
+  }
+}
+
+bool ReadSetsGuarded(const ProbeIn& in, const ReadsEntry& rd, Facts& f) {
+  __try {
+    ReadSetsRaw(in, rd, f);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    f.readOk = false;
+    return false;
+  }
+}
+
+// Static facts of (shader, technique): reflection of shadow_inst's (b)
+// G-buffer VS of pass 0 (render thread, once per key).
+const char* StaticFor(uint8_t* shader, uint64_t tech, VsStatic& st) {
+  st = VsStatic();
+  const shadowinst::MapEntry* e = shadowinst::FindEntry(shader, tech, 0);
+  if (!e || !e->result || e->kind != shadowinst::kKindGb) return st.why = "shadow inst has no G-buffer compile of the key";
+  char name[64];
+  if (!shrec::TechNameGuarded(shader, tech, name, sizeof(name))) return st.why = "technique name not readable";
+  std::vector<uint8_t> code;
+  std::string cbName;
+  {
+    std::lock_guard<std::mutex> lock(shadowinst::g_mutex);
+    const shadowinst::KeyResult& r = *e->result;
+    for (const shadowinst::TechVs& tv : r.techs) {
+      if (tv.name != name || tv.passVs.empty()) continue;
+      const int idx = tv.passVs[0];
+      if (idx < 0 || static_cast<size_t>(idx) >= r.vs.size()) break;
+      code = r.vs[idx].bytecode;
+      cbName = r.vs[idx].diff.cbName;
+      break;
+    }
+  }
+  if (code.empty()) return st.why = "shadow inst has no VS of pass 0";
+  if (cbName.empty()) cbName = "def_uniforms";
+  return AnalyseGbVs(shadowinst::g_compiler.reflect, code.data(), code.size(), cbName.c_str(), st);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime state
+// ---------------------------------------------------------------------------
+std::atomic<bool> g_on{false};      // [Model] GBufferRecorder, the kill switch, bench mode 29
+std::atomic<bool> g_verify{false};  // [Suite] GBufferRecVerify
+std::atomic<uint32_t> g_scope{kDefaultScope};
+std::atomic<uint32_t> g_waitUs{300};
+std::atomic<uint32_t> g_island{kDefaultIsland};
+std::atomic<uint32_t> g_stride{0};  // [Suite] GBufferRecVerifyStride (verify only)
+std::atomic<uint32_t> g_maxSeg{kDefaultMaxSeg};  // [Model] GBufferRecorderMaxSegments
+std::atomic<bool> g_redoOn{true};      // [Model] GBufferRecorderRedo: re-record segments whose textures changed
+std::atomic<bool> g_swapAhead{true};   // [Model] GBufferRecorderSwapAhead: do a due mip-set swap at the entry
+std::atomic<uint32_t> g_helpers{kThreads - 1};   // [Model] GBufferRecorderHelpers (0-2 per job)
+std::atomic<int> g_state{0};        // 0 = not tried (retried), 1 = ready, -1 = unavailable
+std::atomic<bool> g_disabled{false};
+std::atomic<bool> g_shutdown{false};
+std::atomic<int> g_inside{0};
+std::atomic<bool> g_chained{false};
+gbpass::WrapFn g_prevWrap = nullptr;
+gbcount::OverrideFn g_prevOverride = nullptr;
+shadowbatch::RenderObserverFn g_prevObserver = nullptr;
+bool g_ownRenderHook = false, g_ownSort = false;
+DWORD g_renderTid = 0;
+Env g_env;
+Tables g_tab;
+TexTable g_tex;
+SRWLOCK g_texLock = SRWLOCK_INIT;
+defrec::Pool g_pool;  // worker s + kSlots * k: slot s's primary (k 0) and helpers (k 1, 2)
+inline int Wk(int s, int k) { return s + kSlots * k; }
+inline bool SlotBusy(int s) {
+  for (int k = 0; k < kThreads; ++k)
+    if (g_pool.Busy(Wk(s, k))) return true;
+  return false;
+}
+// Drops whatever the slot's workers left (they finish their own lists; the pool's are empty).
+inline void DropPoolLists(int s) {
+  for (int k = 0; k < kThreads; ++k)
+    if (ID3D11CommandList* l = g_pool.TakeList(Wk(s, k))) l->Release();
+}
+ID3D11DeviceContext* g_ctx = nullptr;
+ID3D11Device* g_dev = nullptr;
+uint32_t g_entryGen = 0;
+int64_t g_entryQpc = 0;
+int g_ordinal = 0;       // G-buffer executions since the last render entry (render thread)
+void* g_gbRg = nullptr;  // the render graph of the G-buffer executions
+int64_t g_lastPassQpc = 0, g_gbEntryQpc = 0;
+std::atomic<uint64_t> g_faults{0}, g_probes{0}, g_probeOdd{0}, g_entries{0}, g_gbExecs{0}, g_ordMax{0};
+constexpr uint32_t kEvictAge = 1500;  // render entries an unused texture entry is kept
+
+void Disable(const char* why) {
+  if (!g_disabled.exchange(true)) Log("gbuffer recorder: disabled for this session (%s)", why);
+}
+
+bool Active() {
+  return g_on.load(std::memory_order_relaxed) && !g_disabled.load(std::memory_order_relaxed) &&
+         !g_shutdown.load(std::memory_order_relaxed) && g_state.load(std::memory_order_relaxed) == 1 &&
+         !gbbatch::g_on.load(std::memory_order_relaxed) && !gbreccount::g_chained.load(std::memory_order_relaxed);
+}
+
+// The front and exec entries handed to DCS's loop: objects whose vtable's
+// slot 1 runs our code. Only vt[1] is ever called on loop entries [V GC
+// 0x89700-0x89713]; the other slots point at a no-op.
+struct LoopObj {
+  void** vtbl;
+  int slot;
+  int seg;
+};
+uint64_t __fastcall FrontVt1(void* self, void* ctx);
+uint64_t __fastcall ExecVt1(void* self, void* ctx);
+uint64_t __fastcall LoopNop(void*, void*) { return 0; }
+void* g_frontVtbl[8];
+void* g_execVtbl[8];
+
+struct Learned {
+  bool target = false;
+  void* rg = nullptr;
+  uint32_t idx = 0;
+  bool haveVec = false;
+  ID3D11RenderTargetView* rtv[kRtv] = {};  // references
+  ID3D11DepthStencilView* dsv = nullptr;
+  UINT nvp = 0, nsc = 0;
+  D3D11_VIEWPORT vp[kVp] = {};
+  D3D11_RECT sc[kVp] = {};
+  uint32_t flags = 0;
+  ID3D11SamplerState* pool[2][kSampSlots] = {};  // VS, PS s5-s15 (references)
+  UINT ctxBytes[2][3] = {};  // DCS's b6-b8 sizes (0: none bound)
+  // The 12 bytes DCS writes at mat+0x110 in this execution and their inputs.
+  bool ratioOk = false;
+  void* ratioFb = nullptr;
+  int32_t ratioVp[2] = {};
+  uint8_t ratio[kRatioLen] = {};
+};
+
+struct Stat {
+  std::atomic<uint64_t> passes{0}, passReason[kPassReasons] = {}, partial{0}, segs{0}, segReason[kSegReasons] = {};
+  std::atomic<uint64_t> items{0}, itemReason[kReasons] = {}, recorded{0}, draws{0}, jobs{0}, jobsUsed{0}, refused{0};
+  std::atomic<uint64_t> cbBytes{0}, vt23{0}, segPlanned{0};
+  std::atomic<uint64_t> buildNs{0}, recordNs{0}, waitNs{0}, waitMaxNs{0}, frontNs{0}, execNs{0}, executeNs{0},
+      restoreNs{0}, maintNs{0};
+  std::atomic<uint64_t> tlSamples{0}, early{0}, recWorkers{0}, pieces{0}, helpersQueued{0}, helperItems{0},
+      jobItems{0}, preNs{0}, commitNs{0}, recMaxNs{0};
+  std::atomic<int64_t> tlPass{0}, tlStart{0}, tlDone{0}, tlPre{0}, tlBuilt{0}, tlRec{0};
+  // Late jobs (pass drawn stock, the job finished later): same timeline, read when the slot is re-armed.
+  std::atomic<uint64_t> lateSamples{0};
+  std::atomic<int64_t> latePass{0}, lateStart{0}, lateBuilt{0}, lateDone{0};
+  std::atomic<uint64_t> staleStart{0}, misses{0}, refreshes{0};
+  std::atomic<uint64_t> aaClean{0};  // consecutive equal stock vs stock compares
+  // Re-recorded segments: planned, executed, not ready at their exec entry, failed; swaps done ahead; plan time.
+  std::atomic<uint64_t> redoPlanned{0}, redoExecuted{0}, redoLate{0}, redoFail{0}, swapsAhead{0}, redoNs{0};
+  std::atomic<uint64_t> slackJobs{0};  // jobs armed with the slack settings (smaller island, more segments)
+  std::atomic<uint64_t> rtReplays{0};  // render-target textures' vt[18] replayed at exec entries
+  std::atomic<uint64_t> verifyAa{0}, verifyAb{0}, verifyAaBad{0}, verifyAbBad{0}, verifyTexels{0}, verifyBadTexels{0},
+      verifySkipped{0}, verifyErrors{0}, verifyStateBad{0}, verifyExecs{0};
+};
+
+struct Slot {
+  Learned learn;
+  Job* job = nullptr;
+  bool armed = false;
+  uint32_t passGen = 0;
+  ID3D11Buffer* ours[2][3] = {};  // DEFAULT copies of DCS's b6-b8 (per stage)
+  UINT oursBytes[2][3] = {};
+  void** stockList = nullptr;     // [front, the vector's items] for passes without a job
+  LoopObj front = {};
+  LoopObj exec[kMaxSegments] = {};
+  int64_t lateEntry = 0, latePassQpc = 0;  // the render entry and pass time of a late job (0: none)
+  double workUs = -1;  // the slot's jobs' worker time (stage A on every thread, commit, recording), smoothed
+  double slackMs = -1;  // the slot's jobs in time: pass minus done, smoothed
+  Stat st;
+};
+Slot g_slot[kSlots];
+
+// Helpers per job from the slot's measured work: a helper costs a wake-up and
+// a share of the stage A chunks, worth it only for long jobs [I].
+constexpr double kOneHelperUs = 1000.0, kTwoHelpersUs = 2500.0;
+inline uint32_t HelpersFor(double workUs, uint32_t cap) {
+  if (workUs < 0) return cap;  // not measured yet
+  const uint32_t want = workUs < kOneHelperUs ? 0u : workUs < kTwoHelpersUs ? 1u : 2u;
+  return want < cap ? want : cap;
+}
+inline double JobWorkUs(const Job& j) {
+  double rec = 0;
+  for (int r = 0; r < kThreads; ++r) rec += j.recUs[r];
+  return j.preUs * (1 + j.helpers) + j.commitUs + rec;
+}
+inline void NoteWork(Slot& sl, double us) { sl.workUs = sl.workUs < 0 ? us : 0.5 * (sl.workUs + us); }
+// A slot whose jobs finish this long before their pass records more of it:
+// up to 16 segments and islands of 12 draws (one more exec entry costs about
+// 16 us on the render thread; 12 stock draws more) [M live yaw profile].
+constexpr double kSlackMs = 2.0;
+constexpr uint32_t kSlackIsland = 12;
+inline void NoteSlack(Slot& sl, double ms) { sl.slackMs = sl.slackMs < 0 ? ms : 0.5 * (sl.slackMs + ms); }
+std::atomic<Job*> g_jobPub[kSlots];  // the slots' jobs for the sort observer (published once allocated)
+
+void NoteMax(std::atomic<uint64_t>& a, uint64_t v) {
+  uint64_t cur = a.load();
+  while (v > cur && !a.compare_exchange_weak(cur, v)) {
+  }
+}
+uint64_t NsSince(int64_t t0) { return static_cast<uint64_t>((defrec::Qpc() - t0) * defrec::QpcToUs() * 1000.0); }
+int64_t QpcNs(int64_t a, int64_t b) { return a && b ? static_cast<int64_t>((b - a) * defrec::QpcToUs() * 1000.0) : 0; }
+
+// ---------------------------------------------------------------------------
+// Render thread: the pass state at the front entry
+// ---------------------------------------------------------------------------
+struct Target {
+  ID3D11RenderTargetView* rtv[kRtv];  // references
+  ID3D11DepthStencilView* dsv;
+  UINT nvp, nsc;
+  D3D11_VIEWPORT vp[kVp];
+  D3D11_RECT sc[kVp];
+  ID3D11Buffer* ctx[2][3];  // references
+  UINT ctxBytes[2][3];
+  ID3D11SamplerState* pool[2][kSampSlots];  // VS, PS s5-s15 (references)
+  uint32_t flags, dbg;
+  bool rendererOk;
+  void* fb;
+  int32_t vpd[2];
+  bool ratioIn;
+};
+
+bool ReadRendererRaw(Target& t) {
+  auto* r = reinterpret_cast<uint8_t*>(shadowbatch::g_rendererObj);
+  if (!r) return false;
+  __try {
+    t.flags = *reinterpret_cast<uint32_t*>(r + 0xd4);
+    t.dbg = *reinterpret_cast<uint32_t*>(r + 0x2120);
+    t.rendererOk = true;
+    t.fb = gbbatch::FbNow();
+    gbbatch::VpNow(t.vpd);
+    t.ratioIn = true;
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+void ReadTarget(ID3D11DeviceContext* c, Target& t) {
+  memset(&t, 0, sizeof(t));
+  c->OMGetRenderTargets(kRtv, t.rtv, &t.dsv);
+  t.nvp = kVp;
+  c->RSGetViewports(&t.nvp, t.vp);
+  t.nsc = kVp;
+  c->RSGetScissorRects(&t.nsc, t.sc);
+  c->VSGetConstantBuffers(kCtx0, 3, t.ctx[0]);
+  c->PSGetConstantBuffers(kCtx0, 3, t.ctx[1]);
+  c->VSGetSamplers(kPoolFirst, kSampSlots - kPoolFirst, &t.pool[0][kPoolFirst]);
+  c->PSGetSamplers(kPoolFirst, kSampSlots - kPoolFirst, &t.pool[1][kPoolFirst]);
+  for (int s = 0; s < 2; ++s)
+    for (int k = 0; k < 3; ++k)
+      if (t.ctx[s][k]) {
+        D3D11_BUFFER_DESC d;
+        t.ctx[s][k]->GetDesc(&d);
+        t.ctxBytes[s][k] = d.ByteWidth;
+      }
+  ReadRendererRaw(t);
+}
+
+void ReleaseTarget(Target& t) {
+  for (auto*& p : t.rtv) SafeRel(p);
+  SafeRel(t.dsv);
+  for (auto& row : t.ctx)
+    for (auto*& p : row) SafeRel(p);
+  for (auto& row : t.pool)
+    for (auto*& p : row) SafeRel(p);
+}
+
+// The pass state the next jobs of slot s record against (render thread).
+void LearnTarget(int s, const Target& t) {
+  Slot& sl = g_slot[s];
+  Learned& l = sl.learn;
+  bool anyRt = false;
+  for (auto* p : t.rtv) anyRt |= p != nullptr;
+  if (!t.dsv || !anyRt || !t.rendererOk || (t.dbg & kDbgBits)) {
+    l.target = false;
+    return;
+  }
+  for (int st = 0; st < 2; ++st)
+    for (int k = 0; k < 3; ++k) {
+      const UINT bytes = t.ctxBytes[st][k];
+      l.ctxBytes[st][k] = bytes;
+      if (!bytes || sl.oursBytes[st][k] == bytes) continue;
+      SafeRel(sl.ours[st][k]);
+      sl.oursBytes[st][k] = 0;
+      D3D11_BUFFER_DESC d = {};
+      d.ByteWidth = bytes;
+      d.Usage = D3D11_USAGE_DEFAULT;
+      d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      if (!g_dev || FAILED(g_dev->CreateBuffer(&d, nullptr, &sl.ours[st][k])) || !sl.ours[st][k]) {
+        l.target = false;
+        return;
+      }
+      sl.oursBytes[st][k] = bytes;
+    }
+  for (int k = 0; k < static_cast<int>(kRtv); ++k)
+    if (l.rtv[k] != t.rtv[k]) {
+      SafeRel(l.rtv[k]);
+      if ((l.rtv[k] = t.rtv[k])) l.rtv[k]->AddRef();
+    }
+  if (l.dsv != t.dsv) {
+    SafeRel(l.dsv);
+    l.dsv = t.dsv;
+    l.dsv->AddRef();
+  }
+  l.nvp = t.nvp;
+  l.nsc = t.nsc;
+  memcpy(l.vp, t.vp, sizeof(t.vp));
+  memcpy(l.sc, t.sc, sizeof(t.sc));
+  l.flags = t.flags;
+  for (int st = 0; st < 2; ++st)
+    for (UINT q = kPoolFirst; q < kSampSlots; ++q)
+      if (l.pool[st][q] != t.pool[st][q]) {
+        SafeRel(l.pool[st][q]);
+        if ((l.pool[st][q] = t.pool[st][q])) l.pool[st][q]->AddRef();
+      }
+  l.target = true;
+}
+
+int CheckFront(const Slot& sl, const Job& j, const Target& t) {
+  if (t.dsv != j.dsv || memcmp(t.rtv, j.rtv, sizeof(t.rtv)) != 0 || t.nvp != j.nvp ||
+      memcmp(t.vp, j.vp, t.nvp * sizeof(D3D11_VIEWPORT)) != 0 || t.nsc != j.nsc ||
+      memcmp(t.sc, j.sc, t.nsc * sizeof(D3D11_RECT)) != 0)
+    return kPTarget;
+  if (!t.rendererOk || t.flags != j.flags || (t.dbg & kDbgBits)) return kPFlags;
+  for (int s = 0; s < 2; ++s)
+    for (int k = 0; k < 3; ++k) {
+      const bool have = t.ctx[s][k] != nullptr;
+      if (have != (j.ctxBuf[s][k] != nullptr)) return kPCtx;
+      if (have && (t.ctxBytes[s][k] != sl.oursBytes[s][k] || j.ctxBuf[s][k] != sl.ours[s][k])) return kPCtx;
+    }
+  if (!t.ratioIn || t.fb != j.ratioFb || t.vpd[0] != j.ratioVp[0] || t.vpd[1] != j.ratioVp[1]) return kPRatio;
+  for (int st = 0; st < 2; ++st)
+    if (!PoolSame(reinterpret_cast<void* const*>(t.pool[st]), reinterpret_cast<void* const*>(j.pool[st])))
+      return kPPool;
+  return kPExecuted;
+}
+
+// ---------------------------------------------------------------------------
+// Render thread: the pass
+// ---------------------------------------------------------------------------
+enum : int { kPsNone = 0, kPsArmed, kPsLive, kPsStock, kPsStockRun };
+struct PassCtx {
+  int slot = 0;
+  Job* job = nullptr;
+  ID3D11CommandList* cl[kMaxPieces] = {};  // by piece
+  int state = kPsNone;
+  int reason = kPNoJob;
+  bool front = false;
+  int probesLeft = 0;
+  size_t cursor = 0;
+  uint32_t flags = 0;
+  ID3D11Buffer* frontCtx[2][3] = {};  // identity only
+  void* pool[2][kSampSlots] = {};      // VS, PS s5-s15 at the front entry (identity only)
+  void* fb = nullptr;
+  int32_t vpd[2] = {};
+  bool ratioSeen = false;
+  uint8_t segDone[kMaxSegments] = {};
+  uint8_t segWhy[kMaxSegments] = {};
+  int verify = 0;  // 1: capture the targets at the front (run 1), 2: check the views (run 2)
+  bool captured = false, sameViews = false, stateBad = false;
+  const char* captureWhy = nullptr;
+  uint64_t frontNs = 0, execNs = 0, executeNs = 0;
+  uint32_t replays = 0;
+};
+PassCtx* g_pass = nullptr;
+void PlanRedo(PassCtx& pc, uint32_t from, uint32_t to);
+
+uint64_t __fastcall FrontVt1(void* self, void* ctx) {
+  (void)ctx;
+  PassCtx* pc = g_pass;
+  if (!pc || GetCurrentThreadId() != g_renderTid || static_cast<LoopObj*>(self)->slot != pc->slot) return 0;
+  const int64_t t0 = defrec::Qpc();
+  pc->front = true;
+  Slot& sl = g_slot[pc->slot];
+  Target t;
+  ReadTarget(g_ctx, t);
+  pc->flags = t.flags;
+  for (int s = 0; s < 2; ++s)
+    for (int k = 0; k < 3; ++k) pc->frontCtx[s][k] = t.ctx[s][k];
+  for (int s = 0; s < 2; ++s)
+    for (UINT q = 0; q < kSampSlots; ++q) pc->pool[s][q] = t.pool[s][q];
+  pc->fb = t.fb;
+  pc->vpd[0] = t.vpd[0];
+  pc->vpd[1] = t.vpd[1];
+  if (pc->state == kPsArmed) {  // checked before learning (learning may replace our context buffers)
+    const int why = CheckFront(sl, *pc->job, t);
+    if (why) {
+      pc->state = kPsStock;
+      pc->reason = why;
+    } else {
+      pc->state = kPsLive;
+    }
+  }
+  if (pc->state == kPsLive) PlanRedo(*pc, 0, pc->job->segCount);  // textures changed since the job read them
+  LearnTarget(pc->slot, t);
+  if (!t.rendererOk || (t.dbg & kDbgBits)) pc->probesLeft = 0;
+  if (pc->verify == 1) {
+    const char* why = gbverify::Capture();
+    pc->captureWhy = why;
+    pc->captured = !why;
+    if (pc->captured) gbverify::CopyAll(true, false);  // init
+  } else if (pc->verify == 2) {
+    ID3D11RenderTargetView* rtv[8] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    g_ctx->OMGetRenderTargets(8, rtv, &dsv);
+    bool same = static_cast<ID3D11View*>(dsv) == gbverify::g_t[8].view;
+    for (int i = 0; i < 8; ++i) same &= static_cast<ID3D11View*>(rtv[i]) == gbverify::g_t[i].view;
+    for (auto*& p : rtv) SafeRel(p);
+    SafeRel(dsv);
+    pc->sameViews = same;
+  }
+  ReleaseTarget(t);
+  pc->frontNs = NsSince(t0);
+  return 0;
+}
+
+// DCS draws segment k's items itself, in order (their own vt[1]).
+void DrawSegmentStock(const Job& j, int k, void* ctx) {
+  const Seg& s = j.segs[k];
+  for (uint32_t c = s.candFirst; c < s.candEnd; ++c) {
+    const Cand& cd = j.cands[c];
+    if (!cd.alive) continue;
+    void* r = j.snap[cd.item];
+    (*reinterpret_cast<Vt1Fn**>(r))[1](r, ctx);
+  }
+}
+
+// What a residual between segments could have changed in the state the lists
+// assume: the renderer's flags (rasterizer index, debug bits) and DCS's sampler
+// pool (R19 4.3). 0: unchanged.
+int CheckExecEntry(const Job& j) {
+  uint32_t flags = 0, dbg = 0;
+  if (!shrec::ReadRenderer(&flags, &dbg) || flags != j.flags || (dbg & kDbgBits)) return kSFlags;
+  ID3D11SamplerState* now[2][kSampSlots] = {};
+  g_ctx->VSGetSamplers(kPoolFirst, kSampSlots - kPoolFirst, &now[0][kPoolFirst]);
+  g_ctx->PSGetSamplers(kPoolFirst, kSampSlots - kPoolFirst, &now[1][kPoolFirst]);
+  int why = 0;
+  for (int st = 0; st < 2; ++st) {
+    if (!PoolSame(reinterpret_cast<void* const*>(now[st]), reinterpret_cast<void* const*>(j.pool[st]))) why = kSPool;
+    for (auto*& p : now[st]) SafeRel(p);
+  }
+  return why;
+}
+
+
+// ---- Re-recording segments whose textures changed (render thread) ----
+// A texture of a segment that changed after the job read it (another pass
+// swapped its mip sets, or a swap is due now) used to make the whole segment
+// stock. Instead, at the front entry and at each exec entry, the job builds
+// its own entry from the live texture (doing a due swap first: getSRV, as the
+// segment's first draw of the texture would; no getSRV of it runs in between
+// [I]), re-picks the views of the segment's draws and has an idle worker of
+// the slot re-record the segment. The exec checks then compare with the new
+// entries, as before.
+
+// The latest entry of the job rebuilt for `e` (nullptr: none).
+const TexEntry* RedoOf(const Job& j, const TexEntry* e) {
+  for (uint32_t i = j.redoEntCount; i-- > 0;)
+    if (j.redoFrom[i] == e) return &j.redoEnt[i];
+  return nullptr;
+}
+
+bool EntryStaleRaw(const gbbatch::TexEnv& env, const TexEntry& e, uint32_t ver) {
+  return e.version.load(std::memory_order_relaxed) != ver || e.slot.load(std::memory_order_relaxed) != kTeLive ||
+         !TexCheckRaw(env, e);
+}
+
+// The job's own entry for e's texture, built now (nullptr: not usable).
+// Plain (callers hold SEH).
+const TexEntry* RedoEntryRaw(Job& j, const TexEntry& e, bool swapAhead, Stat& st) {
+  const gbbatch::TexEnv& env = j.env->tex;
+  if (const TexEntry* r = RedoOf(j, &e))
+    if (r->usable && !EntryStaleRaw(env, *r, r->version.load(std::memory_order_relaxed))) return r;
+  if (j.redoEntCount == kMaxRedoEnts) return nullptr;
+  if (!IsRedoEnt(j, &e)) {  // the table's entry: rebuilt after the pass (the segments now use the job's)
+    const_cast<TexEntry&>(e).dirty.store(1, std::memory_order_relaxed);
+    if (j.refreshCount < kMaxRefresh) j.refresh[j.refreshCount++] = &e;
+  }
+  TexEntry& p = j.redoEnt[j.redoEntCount];
+  p.tex = e.tex;
+  p.aux = e.aux;
+  p.type = e.type;
+  p.dirty.store(0, std::memory_order_relaxed);
+  uint8_t why = TexBuildRaw(env, p, &g_census);
+  if (why == kTwSwap && swapAhead && shadowtex::g_getSrv) {
+    const uint64_t zero = 0;  // the size picks a view only; the swap does not depend on it
+    shadowtex::g_getSrv(p.tex, reinterpret_cast<void*>(static_cast<intptr_t>(p.aux)), &zero);
+    st.swapsAhead++;
+    why = TexBuildRaw(env, p, &g_census);
+  }
+  if (why != kTwOk) {
+    TexReleaseViews(p);
+    p.usable = 0;
+    return nullptr;
+  }
+  p.slot.store(kTeLive, std::memory_order_release);
+  j.redoFrom[j.redoEntCount++] = &e;
+  return &p;
+}
+
+// Segment k's textures still give the job's views; if not, its draws get the
+// rebuilt entries' views and the segment is queued for re-recording. Nothing
+// changes for the segment unless every stale entry could be rebuilt and every
+// draw's view picked. Plain (callers hold SEH).
+void PlanSegRaw(Job& j, uint32_t k, bool swapAhead, Stat& st) {
+  const int state = j.redoState[k].load(std::memory_order_acquire);
+  if (state == kRedoWant || state == kRedoRun) return;
+  const gbbatch::TexEnv& env = j.env->tex;
+  const Seg& sg = j.segs[k];
+  bool stale = false;
+  for (uint32_t q = sg.entFirst; q < sg.entEnd; ++q)
+    if (EntryStaleRaw(env, *j.segEnts[q], j.segEntVer[q])) {
+      stale = true;
+      if (!RedoEntryRaw(j, *j.segEnts[q], swapAhead, st)) return;
+    }
+  if (!stale) return;
+  // Every draw's views from the newest entries (checked before anything changes).
+  for (int pass = 0; pass < 2; ++pass) {
+    for (uint32_t c = sg.candFirst; c < sg.candEnd; ++c) {
+      const Cand& cd = j.cands[c];
+      if (!cd.alive) continue;
+      SetRef* sets = j.tsets[cd.thread] + cd.setFirst;
+      ID3D11ShaderResourceView** views = j.tviews[cd.thread] + cd.viewFirst;
+      const GbKey& key = *cd.key;
+      for (uint32_t m = 0; m < cd.setCount; ++m) {
+        const TexEntry* e = sets[m].e;
+        for (const TexEntry* r = RedoOf(j, e); r; r = RedoOf(j, e)) e = r;
+        ID3D11ShaderResourceView* v = nullptr;
+        if (!TexPick(*e, sets[m].size, &v)) return;
+        if (!pass) continue;
+        sets[m].e = e;
+        int qv = 0;
+        while (qv < key.psTexCount && key.psTexH[qv] != sets[m].h) ++qv;
+        if (qv < key.psTexCount) views[qv] = v;  // the last set wins, as stock
+      }
+    }
+  }
+  for (uint32_t q = sg.entFirst; q < sg.entEnd; ++q) {
+    const TexEntry* e = j.segEnts[q];
+    for (const TexEntry* r = RedoOf(j, e); r; r = RedoOf(j, e)) e = r;
+    j.segEnts[q] = e;
+    j.segEntVer[q] = e->version.load(std::memory_order_relaxed);
+  }
+  if (j.redoCl[k]) {
+    j.redoCl[k]->Release();
+    j.redoCl[k] = nullptr;
+  }
+  j.redoState[k].store(kRedoWant, std::memory_order_release);
+  st.redoPlanned++;
+}
+
+bool PlanSegsGuarded(Job& j, uint32_t from, uint32_t to, bool swapAhead, Stat& st) {
+  __try {
+    for (uint32_t k = from; k < to && k < j.segCount; ++k) PlanSegRaw(j, k, swapAhead, st);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// Queued segments onto the slot's idle workers, in segment order.
+void PumpRedo(int s, Job& j) {
+  for (uint32_t k = 0; k < j.segCount; ++k) {
+    if (j.redoState[k].load(std::memory_order_acquire) != kRedoWant) continue;
+    int wk = -1;
+    for (int t = 0; t < kThreads && wk < 0; ++t)
+      if (!g_pool.Busy(Wk(s, t))) wk = t;
+    if (wk < 0) return;
+    j.redoArg[k] = {&j, static_cast<uint8_t>(k), static_cast<uint8_t>(wk)};
+    j.redoState[k].store(kRedoRun, std::memory_order_release);
+    SafeRel(g_pool.At(Wk(s, wk)).list);  // nothing: our workers finish their own lists
+    if (!g_pool.Submit(Wk(s, wk), &RedoMain, &j.redoArg[k], nullptr))
+      j.redoState[k].store(kRedoFail, std::memory_order_release);
+  }
+}
+
+// Render thread: plans segments [from, to) and starts the queued ones.
+void PlanRedo(PassCtx& pc, uint32_t from, uint32_t to) {
+  if (!g_redoOn.load(std::memory_order_relaxed)) return;
+  Job& j = *pc.job;
+  Stat& st = g_slot[pc.slot].st;
+  const int64_t t0 = defrec::Qpc();
+  if (!PlanSegsGuarded(j, from, to, g_swapAhead.load(std::memory_order_relaxed), st)) g_faults++;
+  PumpRedo(pc.slot, j);
+  st.redoNs += NsSince(t0);
+}
+
+// Segment k's list(s) at its exec entry: its pieces, or its re-recorded list
+// (waited for up to about 2 us per draw, what drawing it stock would cost
+// at least). kSExecuted, or kSRedo when the re-recorded list is not there.
+int RedoReady(PassCtx& pc, uint32_t k) {
+  Job& j = *pc.job;
+  int st = j.redoState[k].load(std::memory_order_acquire);
+  if (st == kRedoNone) return kSExecuted;
+  if (st == kRedoWant) {
+    PumpRedo(pc.slot, j);
+    st = j.redoState[k].load(std::memory_order_acquire);
+  }
+  if (st == kRedoRun) {
+    const double limit = (std::min)(2000.0, 2.0 * j.segs[k].draws);
+    const int64_t t0 = defrec::Qpc();
+    const double q = defrec::QpcToUs();
+    while ((st = j.redoState[k].load(std::memory_order_acquire)) == kRedoRun && (defrec::Qpc() - t0) * q < limit)
+      _mm_pause();
+  }
+  Stat& s = g_slot[pc.slot].st;
+  if (st == kRedoOk && j.redoCl[k]) return kSExecuted;
+  (st == kRedoFail ? s.redoFail : s.redoLate)++;
+  return kSRedo;
+}
+
+int ExecSegment(PassCtx& pc, int k) {
+  Job& j = *pc.job;
+  Slot& sl = g_slot[pc.slot];
+  const int64_t t0 = defrec::Qpc();
+  PlanRedo(pc, static_cast<uint32_t>(k), static_cast<uint32_t>(k) + 2);  // a texture swapped by a residual draw
+  int why = CheckExecEntry(j);
+  if (!why) why = RedoReady(pc, static_cast<uint32_t>(k));
+  const bool redo = !why && j.redoState[k].load(std::memory_order_acquire) == kRedoOk;
+  if (!why) why = ReplayAndCheckGuarded(j, j.segs[k], &pc.replays);
+  if (!why) {
+    // DCS's b6-b8 as bound now, into ours (GPU timeline: right before the list).
+    ID3D11Buffer* now[2][3] = {};
+    g_ctx->VSGetConstantBuffers(kCtx0, 3, now[0]);
+    g_ctx->PSGetConstantBuffers(kCtx0, 3, now[1]);
+    for (int s = 0; s < 2 && !why; ++s)
+      for (int q = 0; q < 3 && !why; ++q) {
+        if (!j.ctxBuf[s][q]) continue;
+        UINT bytes = 0;
+        if (now[s][q]) {
+          D3D11_BUFFER_DESC d;
+          now[s][q]->GetDesc(&d);
+          bytes = d.ByteWidth;
+        }
+        if (!now[s][q] || bytes != sl.oursBytes[s][q]) why = kSCtx;
+      }
+    if (!why)
+      for (int s = 0; s < 2; ++s)
+        for (int q = 0; q < 3; ++q)
+          if (j.ctxBuf[s][q]) g_ctx->CopyResource(j.ctxBuf[s][q], now[s][q]);
+    for (auto& row : now)
+      for (auto*& p : row) SafeRel(p);
+  }
+  if (!why) {
+    uint32_t rt = 0;
+    if (!ReplayRtGuarded(j, j.segs[k], &rt)) {
+      g_faults++;
+      why = kSFault;
+    }
+    sl.st.rtReplays += rt;
+  }
+  if (!why) {
+    defrec::PassState before = {}, after = {};
+    const bool t9 = pc.verify == 2;
+    if (t9) defrec::Capture(g_ctx, &before);
+    const int64_t e0 = defrec::Qpc();
+    if (redo) {
+      g_ctx->ExecuteCommandList(j.redoCl[k], TRUE);
+      sl.st.redoExecuted++;
+    } else {
+      for (uint32_t q = j.segs[k].pieceFirst; q < j.segs[k].pieceEnd; ++q) g_ctx->ExecuteCommandList(pc.cl[q], TRUE);
+    }
+    pc.executeNs += NsSince(e0);
+    if (t9) {
+      defrec::Capture(g_ctx, &after);
+      if (!defrec::Equal(before, after)) pc.stateBad = true;
+      defrec::Release(before);
+      defrec::Release(after);
+    }
+    if (sfilt::Live()) sfilt::g_sh.ForgetAll();  // restored exactly; the filter's shadow is cheap to rebuild
+  }
+  pc.execNs += NsSince(t0);
+  return why;
+}
+
+uint64_t __fastcall ExecVt1(void* self, void* ctx) {
+  PassCtx* pc = g_pass;
+  const LoopObj* o = static_cast<LoopObj*>(self);
+  if (!pc || GetCurrentThreadId() != g_renderTid || o->slot != pc->slot || !pc->job) return 0;
+  const int k = o->seg;
+  if (k < 0 || k >= static_cast<int>(pc->job->segCount)) return 0;
+  if (pc->state == kPsLive) {
+    const int why = ExecSegment(*pc, k);
+    pc->segWhy[k] = static_cast<uint8_t>(why);
+    if (!why) {
+      pc->segDone[k] = 1;
+      return 0;
+    }
+  }
+  DrawSegmentStock(*pc->job, k, ctx);
+  return 0;
+}
+
+int64_t Locate(PassCtx& pc, void* self) {
+  const Job& j = *pc.job;
+  for (size_t k = pc.cursor; k < j.n; ++k)
+    if (j.snap[k] == self) {
+      pc.cursor = k + 1;
+      return static_cast<int64_t>(k);
+    }
+  return -1;
+}
+
+// ---- Probe call ----
+shrec::Capture g_cap;  // render thread, during one probe call
+Extra g_extra;
+const VsStatic* g_capSt = nullptr;
+
+// ---- State dump ([Suite] GBufferRecStateDump=1, for tools/fx_states.py check) ----
+// One JSON line per new (DX11Shader, technique, renderer+0xd4) seen by a probe:
+// the states DCS's draw bound, by GetDesc, in fx_states.py's dump format.
+// Lines are queued on the render thread and appended by the 10 s log to
+// gbrec_states.jsonl next to the ini in use.
+std::atomic<bool> g_dumpOn{false};
+std::mutex g_dumpMutex;
+std::string g_dumpBuf;  // complete lines, under g_dumpMutex
+std::atomic<uint64_t> g_dumpLines{0}, g_dumpDropped{0};
+constexpr size_t kDumpSeen = 8192;  // power of two
+constexpr uint64_t kDumpMaxLines = 20000;
+struct DumpSeen {
+  const void* shader;
+  uint64_t tech;
+  uint32_t flags;
+};
+DumpSeen* g_dumpSeen = nullptr;  // render thread
+uint32_t g_dumpSeenCount = 0;
+
+void JsonStr(std::string& o, const char* s) {
+  o += '"';
+  for (; *s; ++s) {
+    const unsigned char ch = static_cast<unsigned char>(*s);
+    if (ch == '"' || ch == '\\') {
+      o += '\\';
+      o += static_cast<char>(ch);
+    } else if (ch < 0x20) {
+      char b[8];
+      snprintf(b, sizeof(b), "\\u%04x", ch);
+      o += b;
+    } else {
+      o += static_cast<char>(ch);
+    }
+  }
+  o += '"';
+}
+
+void JsonNum(std::string& o, double v) {
+  char b[32];
+  snprintf(b, sizeof(b), "%.9g", v);
+  o += b;
+}
+
+void JsonUInt(std::string& o, uint32_t v) {
+  char b[16];
+  snprintf(b, sizeof(b), "%u", v);
+  o += b;
+}
+
+// The line for one probe; null state objects are D3D11's defaults (what they
+// bind). Pure (offline tested).
+std::string StateJson(const char* key, const char* tech, uint32_t pass, uint32_t flags, const D3D11_BLEND_DESC* bd,
+                      const float factor[4], UINT mask, const D3D11_DEPTH_STENCIL_DESC* dd, UINT ref,
+                      const D3D11_RASTERIZER_DESC* rd) {
+  const CD3D11_BLEND_DESC defB{CD3D11_DEFAULT()};
+  const CD3D11_DEPTH_STENCIL_DESC defD{CD3D11_DEFAULT()};
+  const CD3D11_RASTERIZER_DESC defR{CD3D11_DEFAULT()};
+  const D3D11_BLEND_DESC& b = bd ? *bd : defB;
+  const D3D11_DEPTH_STENCIL_DESC& d = dd ? *dd : defD;
+  const D3D11_RASTERIZER_DESC& r = rd ? *rd : defR;
+  std::string o;
+  o.reserve(1024);
+  o += "{\"key\":";
+  JsonStr(o, key);
+  o += ",\"tech\":";
+  JsonStr(o, tech);
+  o += ",\"pass\":";
+  JsonUInt(o, pass);
+  o += ",\"flags\":";
+  JsonUInt(o, flags);
+  o += ",\"blend\":{\"a2c\":";
+  JsonUInt(o, b.AlphaToCoverageEnable ? 1 : 0);
+  o += ",\"ind\":";
+  JsonUInt(o, b.IndependentBlendEnable ? 1 : 0);
+  o += ",\"rt\":[";
+  for (int i = 0; i < 8; ++i) {
+    const D3D11_RENDER_TARGET_BLEND_DESC& t = b.RenderTarget[i];
+    const uint32_t v[8] = {t.BlendEnable ? 1u : 0u,
+                           static_cast<uint32_t>(t.SrcBlend),
+                           static_cast<uint32_t>(t.DestBlend),
+                           static_cast<uint32_t>(t.BlendOp),
+                           static_cast<uint32_t>(t.SrcBlendAlpha),
+                           static_cast<uint32_t>(t.DestBlendAlpha),
+                           static_cast<uint32_t>(t.BlendOpAlpha),
+                           t.RenderTargetWriteMask};
+    o += i ? ",[" : "[";
+    for (int k = 0; k < 8; ++k) {
+      if (k) o += ',';
+      JsonUInt(o, v[k]);
+    }
+    o += ']';
+  }
+  o += "]},\"factor\":[";
+  for (int k = 0; k < 4; ++k) {
+    if (k) o += ',';
+    JsonNum(o, factor[k]);
+  }
+  o += "],\"mask\":";
+  JsonUInt(o, mask);
+  auto face = [&](const D3D11_DEPTH_STENCILOP_DESC& f) {
+    o += '[';
+    JsonUInt(o, f.StencilFailOp);
+    o += ',';
+    JsonUInt(o, f.StencilDepthFailOp);
+    o += ',';
+    JsonUInt(o, f.StencilPassOp);
+    o += ',';
+    JsonUInt(o, f.StencilFunc);
+    o += ']';
+  };
+  o += ",\"dss\":{\"de\":";
+  JsonUInt(o, d.DepthEnable ? 1 : 0);
+  o += ",\"dwm\":";
+  JsonUInt(o, d.DepthWriteMask);
+  o += ",\"df\":";
+  JsonUInt(o, d.DepthFunc);
+  o += ",\"se\":";
+  JsonUInt(o, d.StencilEnable ? 1 : 0);
+  o += ",\"srm\":";
+  JsonUInt(o, d.StencilReadMask);
+  o += ",\"swm\":";
+  JsonUInt(o, d.StencilWriteMask);
+  o += ",\"ff\":";
+  face(d.FrontFace);
+  o += ",\"bf\":";
+  face(d.BackFace);
+  o += "},\"ref\":";
+  JsonUInt(o, ref);
+  o += ",\"rs\":{\"fill\":";
+  JsonUInt(o, r.FillMode);
+  o += ",\"cull\":";
+  JsonUInt(o, r.CullMode);
+  o += ",\"fcc\":";
+  JsonUInt(o, r.FrontCounterClockwise ? 1 : 0);
+  o += ",\"db\":";
+  char db[16];
+  snprintf(db, sizeof(db), "%d", r.DepthBias);
+  o += db;
+  o += ",\"dbc\":";
+  JsonNum(o, r.DepthBiasClamp);
+  o += ",\"ssdb\":";
+  JsonNum(o, r.SlopeScaledDepthBias);
+  o += ",\"dce\":";
+  JsonUInt(o, r.DepthClipEnable ? 1 : 0);
+  o += ",\"se\":";
+  JsonUInt(o, r.ScissorEnable ? 1 : 0);
+  o += ",\"ms\":";
+  JsonUInt(o, r.MultisampleEnable ? 1 : 0);
+  o += ",\"aal\":";
+  JsonUInt(o, r.AntialiasedLineEnable ? 1 : 0);
+  o += "}}\n";
+  return o;
+}
+
+bool CopyKeyGuarded(const uint8_t* shader, char* out, size_t cap) {
+  __try {
+    return shadowinst::CopyStdString(shader + 0x78, out, cap);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// Render thread, after a probe whose draw was read back: queues the line once
+// per (shader, technique, flags).
+void DumpState(uint8_t* shader, uint64_t tech, const shrec::Capture& c) {
+  if (!g_dumpSeen) {
+    g_dumpSeen = static_cast<DumpSeen*>(calloc(kDumpSeen, sizeof(DumpSeen)));
+    if (!g_dumpSeen) return;
+  }
+  if (g_dumpSeenCount >= kDumpSeen / 2) return;
+  size_t h = static_cast<size_t>((reinterpret_cast<uintptr_t>(shader) >> 4) * 0x9e3779b97f4a7c15ull ^
+                                 tech * 0xff51afd7ed558ccdull ^ c.flags);
+  for (;; ++h) {
+    DumpSeen& e = g_dumpSeen[h & (kDumpSeen - 1)];
+    if (!e.shader) {
+      e.shader = shader;
+      e.tech = tech;
+      e.flags = c.flags;
+      ++g_dumpSeenCount;
+      break;
+    }
+    if (e.shader == shader && e.tech == tech && e.flags == c.flags) return;
+  }
+  char key[1024], name[128];
+  if (!CopyKeyGuarded(shader, key, sizeof(key))) snprintf(key, sizeof(key), "?shader %p", static_cast<void*>(shader));
+  if (!shrec::TechNameGuarded(shader, tech, name, sizeof(name)))
+    snprintf(name, sizeof(name), "?technique 0x%llx", static_cast<unsigned long long>(tech));
+  D3D11_BLEND_DESC bd;
+  D3D11_DEPTH_STENCIL_DESC dd;
+  D3D11_RASTERIZER_DESC rd;
+  if (c.bs) c.bs->GetDesc(&bd);
+  if (c.dss) c.dss->GetDesc(&dd);
+  if (c.rs) c.rs->GetDesc(&rd);
+  std::string line = StateJson(key, name, 0, c.flags, c.bs ? &bd : nullptr, c.blendFactor, c.sampleMask,
+                               c.dss ? &dd : nullptr, c.stencilRef, c.rs ? &rd : nullptr);
+  std::lock_guard<std::mutex> lock(g_dumpMutex);
+  if (g_dumpLines.load() >= kDumpMaxLines) {
+    g_dumpDropped++;
+    return;
+  }
+  g_dumpBuf += line;
+  g_dumpLines++;
+}
+
+// The ini in use: the deployed one, or the one its [Dev] IniPath names.
+std::wstring DumpIni() {
+  std::wstring ini = g_dir + L"DcsQvCull.ini";
+  wchar_t dev[MAX_PATH] = {};
+  GetPrivateProfileStringW(L"Dev", L"IniPath", L"", dev, MAX_PATH, ini.c_str());
+  if (dev[0] && GetFileAttributesW(dev) != INVALID_FILE_ATTRIBUTES) ini = dev;
+  return ini;
+}
+
+// Any thread but the render thread: reads the switches, appends the queued lines.
+void PollStateDump() {
+  const std::wstring ini = DumpIni();
+  const bool on = GetPrivateProfileIntW(L"Suite", L"GBufferRecStateDump", 0, ini.c_str()) != 0;
+  // Re-recording of segments whose textures changed, and swaps done ahead (both on unless set to 0).
+  const bool redo = GetPrivateProfileIntW(L"Model", L"GBufferRecorderRedo", 1, ini.c_str()) != 0;
+  const bool ahead = GetPrivateProfileIntW(L"Model", L"GBufferRecorderSwapAhead", 1, ini.c_str()) != 0;
+  if (redo != g_redoOn.load() || ahead != g_swapAhead.load()) {
+    g_redoOn = redo;
+    g_swapAhead = ahead;
+    Log("gbuffer recorder: re-recording of segments whose textures changed %s, due swaps done ahead %s",
+        redo ? "on" : "off", ahead ? "on" : "off");
+  }
+  const std::wstring out = ini.substr(0, ini.find_last_of(L"\\/") + 1) + L"gbrec_states.jsonl";
+  if (on != g_dumpOn.load()) {
+    g_dumpOn = on;
+    Log("gbuffer recorder: state dump %s (%ls)", on ? "on, one line per new key and flags" : "off", out.c_str());
+  }
+  std::string buf;
+  {
+    std::lock_guard<std::mutex> lock(g_dumpMutex);
+    buf.swap(g_dumpBuf);
+  }
+  if (buf.empty()) return;
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, out.c_str(), L"ab") != 0 || !f) {
+    Log("gbuffer recorder: state dump: cannot append to %ls", out.c_str());
+    return;
+  }
+  fwrite(buf.data(), 1, buf.size(), f);
+  fclose(f);
+}
+
+void DrawAfter(void*, int, void* shader, int prim, int a4, int a5, int instances) {
+  shrec::Capture& c = g_cap;
+  if (c.draws++) return;
+  if (shader) shrec::ReadStreamsGuarded(static_cast<const uint8_t*>(shader), c);
+  c.prim = prim;
+  c.a4 = a4;
+  c.a5 = a5;
+  c.instances = instances;
+  c.rendererOk = shrec::ReadRenderer(&c.flags, &c.dbg);
+  shrec::CaptureState(g_ctx, g_capSt->cbSlot, g_capSt->sbSlot, c);
+  CaptureExtra(g_ctx, g_extra);
+}
+
+ID3D11ShaderResourceView* PageSrvGuarded(const Env& env, uint32_t page) {
+  __try {
+    return PageSrv(env, page);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return nullptr;
+  }
+}
+
+bool ReadProbeInRaw(void* self, ProbeIn& in, const Env& env) {
+  __try {
+    in.r = static_cast<uint8_t*>(self);
+    if (*reinterpret_cast<void**>(in.r) != env.srVt) return false;
+    if (*reinterpret_cast<uint32_t*>(in.r + 0x60) != 1 || in.r[0x64]) return false;
+    in.item = *reinterpret_cast<uint8_t**>(in.r + 0x10);
+    in.mat = in.item ? *reinterpret_cast<uint8_t**>(in.item + 0x10) : nullptr;
+    if (!in.mat || *reinterpret_cast<void**>(in.mat) != env.modelVt) return false;
+    const uint8_t* props = *reinterpret_cast<uint8_t**>(in.mat + 0x28);
+    if (!props || props[0x33]) return false;
+    in.shader = *reinterpret_cast<uint8_t**>(in.mat + 0x30);
+    if (!in.shader || *reinterpret_cast<void**>(in.shader) != env.shaderVt) return false;
+    in.tech = *reinterpret_cast<uint64_t*>(in.mat + 0x1d8);
+    in.mesh = *reinterpret_cast<uint8_t**>(in.item + 0xc0);
+    in.page = *reinterpret_cast<uint32_t*>(in.item + 0xd0);
+    in.effect = *reinterpret_cast<void**>(in.shader + 0x50);
+    in.techBegin = *reinterpret_cast<void**>(in.shader + 0xb0);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// DCS's own draw of the item, read back right after its D3D draw. Every
+// change to DCS state is undone in the __finally. Plain.
+bool ProbeCallRaw(void* self, void* ctx, uint64_t* ret) {
+  bool vt = false;
+  __try {
+    shadowbatch::t_after = &DrawAfter;
+    *shadowbatch::g_rendererObj = shadowbatch::g_myVtbl;
+    vt = true;
+    *ret = gbcount::g_orig(self, ctx);
+  } __finally {
+    if (vt) *shadowbatch::g_rendererObj = shadowbatch::g_rendererVtbl;
+    shadowbatch::t_after = nullptr;
+  }
+  return true;
+}
+
+bool ProbeCall(void* self, void* ctx, uint64_t* ret) {
+  __try {
+    return ProbeCallRaw(self, ctx, ret);
+  } __except (shadowbatch::AvFilter(GetExceptionCode())) {
+    g_faults++;
+    Disable("access violation in a probed draw");
+    *ret = 0;
+    return true;
+  }
+}
+
+// Probes the item when its key or mesh is still unknown: true = drawn here
+// (DCS's own draw), false = not probed (the caller draws it as usual).
+bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
+  ProbeIn in;
+  if (!ReadProbeInRaw(self, in, g_env)) return false;
+  in.scope = g_slot[pc.slot].learn.idx;
+  in.ordinal = OrdinalOfSlot(g_scope.load(), pc.slot);
+  const GbKey* k = FindKey(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, in.scope);
+  if (k && k->state.load() <= 0) return false;
+  if (!k && KeyCooling(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, in.scope, g_entryGen, false))
+    return false;
+  if (k && shrec::FindMesh(g_tab.mesh, in.mesh, in.shader, in.tech, in.effect, in.techBegin)) return false;
+  const ReadsEntry* rd = FindReads(g_tab, in.shader, in.tech, in.effect, in.techBegin);
+  if (!rd) return false;  // resolved after the pass; probed later
+  VsStatic st;
+  if (k) {
+    st = k->st;
+  } else if (StaticFor(in.shader, in.tech, st)) {
+    // Not recordable whatever the draw binds: published without a probe.
+    shrec::Capture none;
+    none.flags = pc.flags;
+    ProcessProbe(g_tab, in, st, Facts(), none, Extra(), g_entryGen);
+    return false;
+  }
+  Facts f;
+  f.dcsVs = shrec::FxPassVsGuarded(in.shader, in.tech);
+  const shadowinst::MapEntry* me = shadowinst::FindEntry(in.shader, in.tech, 0);
+  if (!me || me->dcsVs != f.dcsVs) f.dcsVs = nullptr;
+  f.pageSrv = PageSrvGuarded(g_env, in.page);
+  f.meshWhy = shrec::ReadMeshGuarded(in.mesh, f.mesh);
+  memcpy(f.passCtx, pc.frontCtx, sizeof(f.passCtx));
+  f.reads = rd;
+  if (*shadowbatch::g_rendererApi != static_cast<void*>(shadowbatch::g_rendererObj) ||
+      *shadowbatch::g_rendererObj != static_cast<void*>(shadowbatch::g_rendererVtbl))
+    return false;
+  g_cap = shrec::Capture();
+  g_extra = Extra();
+  g_capSt = &st;
+  ProbeCall(self, ctx, ret);
+  if (rd->state > 0) ReadSetsGuarded(in, *rd, f);
+  if (g_cap.ps) {
+    const shrec::FxDeps d = shrec::FxStageDepsGuarded(in.shader, in.tech, 1, g_cap.ps, g_cap.psSamp);
+    f.psDepsOk = d.ok;
+    if (d.ok) f.psSampDeps = d.samp, f.psCbDeps = d.cb;
+  }
+  if (g_cap.vs) {
+    const shrec::FxDeps d = shrec::FxStageDepsGuarded(in.shader, in.tech, 0, g_cap.vs, g_extra.vsSamp);
+    f.vsDepsOk = d.ok;
+    if (d.ok) f.vsSampDeps = d.samp;
+  }
+  const bool poolOk = pc.front && PoolSame(reinterpret_cast<void* const*>(g_extra.vsSamp), pc.pool[0]) &&
+                      PoolSame(reinterpret_cast<void* const*>(g_cap.psSamp), pc.pool[1]);
+  if (g_cap.draws != 1 || !g_cap.rendererOk || (g_cap.dbg & kDbgBits)) {
+    g_probeOdd++;
+  } else if (!poolOk) {
+    // The lists bind the front entry's pool at s5-s15: a draw that sees other
+    // samplers there (an FX dependency on a pool slot, or the pool rebound) is
+    // not learnt from; probed again later.
+    if (g_probePool++ < 8)
+      Log("gbuffer recorder: probe of shader %p technique 0x%llx: sampler pool slots differ from the front "
+          "entry's (front entry %s); not learnt",
+          static_cast<void*>(in.shader), static_cast<unsigned long long>(in.tech), pc.front ? "seen" : "not seen");
+  } else if (!g_disabled.load()) {
+    ProcessProbe(g_tab, in, st, f, g_cap, g_extra, g_entryGen);
+  }
+  if (g_cap.draws == 1 && g_cap.rendererOk && g_dumpOn.load(std::memory_order_relaxed))
+    DumpState(in.shader, in.tech, g_cap);
+  shrec::ReleaseCapture(g_cap);
+  ReleaseExtra(g_extra);
+  g_capSt = nullptr;
+  g_probes++;
+  --pc.probesLeft;
+  return true;
+}
+
+// The 12 bytes DCS's own draw just wrote at mat+0x110 (pass 1 opaque, not
+// cockpit), for this execution's inputs. Plain.
+bool LearnRatioRaw(void* self, uint8_t out[kRatioLen]) {
+  auto* r = static_cast<uint8_t*>(self);
+  if (*reinterpret_cast<void**>(r) != g_env.srVt || *reinterpret_cast<uint32_t*>(r + 0x60) != 1 || r[0x64]) return false;
+  auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+  auto* mat = item ? *reinterpret_cast<uint8_t**>(item + 0x10) : nullptr;
+  if (!mat || *reinterpret_cast<void**>(mat) != g_env.modelVt) return false;
+  const uint8_t* props = *reinterpret_cast<uint8_t**>(mat + 0x28);
+  if (!props || props[0x33]) return false;
+  memcpy(out, mat + kCbOff + kRatioCb, kRatioLen);
+  return true;
+}
+
+bool LearnRatioGuarded(void* self, uint8_t out[kRatioLen]) {
+  __try {
+    return LearnRatioRaw(self, out);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+uint64_t CallItem(void* self, void* ctx) {
+  uint64_t r;
+  if (gbcount::OverrideFn p = g_prevOverride)
+    if (p(self, ctx, &r)) return r;
+  return gbcount::g_orig(self, ctx);
+}
+
+bool Override(void* self, void* ctx, uint64_t* ret) {
+  PassCtx* pc = g_pass;
+  if (pc && GetCurrentThreadId() == g_renderTid) {
+    if (pc->probesLeft > 0 && pc->job) {
+      const int64_t k = Locate(*pc, self);
+      if (k >= 0 && pc->job->items[k].want && TryProbe(*pc, self, ctx, ret)) return true;
+    }
+    if (!pc->ratioSeen && pc->front && pc->fb) {
+      *ret = CallItem(self, ctx);
+      uint8_t b[kRatioLen];
+      if (LearnRatioGuarded(self, b)) {
+        pc->ratioSeen = true;
+        Learned& l = g_slot[pc->slot].learn;
+        memcpy(l.ratio, b, kRatioLen);
+        l.ratioFb = pc->fb;
+        l.ratioVp[0] = pc->vpd[0];
+        l.ratioVp[1] = pc->vpd[1];
+        l.ratioOk = true;
+      }
+      return true;
+    }
+  }
+  if (gbcount::OverrideFn p = g_prevOverride) return p(self, ctx, ret);
+  return false;
+}
+
+void PrevWrap(void* pass, void* ctx, gbpass::ExecFn orig) {
+  if (gbpass::WrapFn p = g_prevWrap)
+    p(pass, ctx, orig);
+  else
+    orig(pass, ctx);
+}
+
+// DCS's loop runs over our list: {begin, end} of the vector swapped for the
+// call, restored in the __finally (read once by 0x88de0 at 0x896e1 [V]).
+struct Swap {
+  gbpass::ExecFn orig;
+  void** vec;
+  void** list;
+  size_t count;
+};
+Swap g_swap;
+
+void __fastcall SwapOrigRaw(void* pass, void* ctx) {
+  void** vec = g_swap.vec;
+  void* b0 = vec[0];
+  void* e0 = vec[1];
+  bool swapped = false;
+  __try {
+    vec[0] = g_swap.list;
+    vec[1] = g_swap.list + g_swap.count;
+    swapped = true;
+    g_swap.orig(pass, ctx);
+  } __finally {
+    if (swapped) {
+      vec[0] = b0;
+      vec[1] = e0;
+    }
+  }
+}
+
+// [front, the vector's items] for a pass drawn stock (the front still learns).
+bool StockListRaw(Slot& sl, void** vec, size_t* count) {
+  auto** b = static_cast<void**>(vec[0]);
+  auto** e = static_cast<void**>(vec[1]);
+  if (!b || e <= b || static_cast<size_t>(e - b) > kMaxItems) return false;
+  const size_t n = static_cast<size_t>(e - b);
+  sl.stockList[0] = &sl.front;
+  memcpy(sl.stockList + 1, b, n * sizeof(void*));
+  *count = n + 1;
+  return true;
+}
+bool StockListGuarded(Slot& sl, void** vec, size_t* count) {
+  __try {
+    return StockListRaw(sl, vec, count);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+void RunPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec) {
+  Slot& sl = g_slot[pc.slot];
+  g_pass = &pc;
+  size_t count = 0;
+  if (pc.state == kPsArmed) {
+    g_swap = {orig, vec, pc.job->swapList, pc.job->swapCount};
+    PrevWrap(pass, ctx, &SwapOrigRaw);
+  } else if (sl.stockList && StockListGuarded(sl, vec, &count)) {
+    g_swap = {orig, vec, sl.stockList, count};
+    PrevWrap(pass, ctx, &SwapOrigRaw);
+  } else {
+    PrevWrap(pass, ctx, orig);
+  }
+  g_pass = nullptr;
+  if (pc.state == kPsArmed) {  // the front entry did not run: DCS drew nothing of ours
+    pc.state = kPsStock;
+    pc.reason = kPNoEntry;
+  }
+  if (pc.state == kPsLive) {
+    bool any = false;
+    for (uint32_t k = 0; k < pc.job->segCount; ++k) any |= pc.segDone[k] != 0;
+    if (any) {
+      const int64_t t0 = defrec::Qpc();
+      if (!RestoreGuarded(*pc.job, pc.segDone)) {
+        g_faults++;
+        Disable("access violation restoring the materials' and FX variables' end state");
+      }
+      sl.st.restoreNs += NsSince(t0);
+    }
+  }
+}
+
+// Stock run, then recorded run (or stock again until kAaPasses consecutive
+// stock vs stock compares are equal), same frame, from the same target
+// contents; every target compared bit for bit. A stock vs stock difference
+// (a view or load transition) is logged and retried, never latched.
+constexpr uint64_t kAaPasses = 3;
+const char* g_verifyWhy = nullptr;  // why the last capture failed
+void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec) {
+  Stat& st = g_slot[pc.slot].st;
+  const bool aa = st.aaClean.load() < kAaPasses;
+  PassCtx a;
+  a.slot = pc.slot;
+  a.state = kPsStockRun;
+  a.verify = 1;
+  RunPass(a, pass, ctx, orig, vec);
+  if (!a.captured) {
+    st.verifySkipped++;
+    if (a.captureWhy) {
+      st.verifyErrors++;
+      g_verifyWhy = a.captureWhy;
+    }
+    gbverify::ReleaseViews();
+    // The recorded lists were not used: this execution was drawn stock.
+    pc.state = kPsStock;
+    pc.reason = kPVerifyCapture;
+    return;
+  }
+  gbverify::CopyAll(true, true);    // A
+  gbverify::CopyAll(false, false);  // init back into the targets
+  PassCtx b;
+  if (aa) {
+    b.slot = pc.slot;
+    b.state = kPsStockRun;
+  } else {
+    b = pc;
+  }
+  b.verify = 2;
+  b.probesLeft = 0;
+  RunPass(b, pass, ctx, orig, vec);
+  bool executed = false;
+  if (!aa && b.state == kPsLive)
+    for (uint32_t k = 0; k < b.job->segCount; ++k) executed |= b.segDone[k] != 0;
+  if (!b.sameViews || (!aa && !executed)) {
+    st.verifySkipped++;
+  } else {
+    gbverify::CopyAll(true, false);  // B
+    int64_t bad[gbverify::kMaxTargets];
+    uint64_t texels = 0;
+    const int64_t total = gbverify::CompareGuarded(bad, &texels);
+    if (total < 0) {
+      st.verifyErrors++;
+    } else {
+      (aa ? st.verifyAa : st.verifyAb)++;
+      st.verifyTexels += texels;
+      if (aa) st.aaClean = total > 0 ? 0 : st.aaClean.load() + 1;
+      if (total > 0) {
+        (aa ? st.verifyAaBad : st.verifyAbBad)++;
+        st.verifyBadTexels += static_cast<uint64_t>(total);
+        std::string per;
+        char buf[48];
+        for (int i = 0; i < gbverify::kMaxTargets; ++i) {
+          if (!gbverify::g_t[i].res) continue;
+          snprintf(buf, sizeof(buf), "%s%s%d %lld", per.empty() ? "" : ", ", i == 8 ? "DS" : "RT", i == 8 ? 0 : i,
+                   static_cast<long long>(bad[i]));
+          per += buf;
+        }
+        Log("gbuffer recorder verify: %s differs: %lld of %llu texels/samples (%s)",
+            aa ? "stock vs stock" : "stock vs recorded", static_cast<long long>(total),
+            static_cast<unsigned long long>(texels), per.c_str());
+        if (aa)
+          Log("gbuffer recorder verify: stock vs stock not reproducible in this frame (a transition?): retried, "
+              "%llu consecutive equal compares needed before stock vs recorded",
+              static_cast<unsigned long long>(kAaPasses));
+        else
+          Disable("G-buffer differs between the stock and the recorded execution");
+      }
+    }
+  }
+  if (b.stateBad) {
+    st.verifyStateBad++;
+    Disable("the immediate context's state differs after ExecuteCommandList(TRUE)");
+  }
+  if (!aa) st.verifyExecs++;
+  gbverify::ReleaseViews();
+  if (aa) {
+    pc.state = kPsStock;
+    pc.reason = kPVerifyAa;
+    return;
+  }
+  pc.state = b.state;
+  pc.reason = b.reason;
+  memcpy(pc.segDone, b.segDone, sizeof(pc.segDone));
+  memcpy(pc.segWhy, b.segWhy, sizeof(pc.segWhy));
+  pc.frontNs = b.frontNs;
+  pc.execNs = b.execNs;
+  pc.executeNs = b.executeNs;
+  pc.replays = b.replays;
+}
+
+// Waits (within [Model] GBufferRecorderWaitUs) for this render entry's job of
+// slot s; decides what the pass does with it. Not ready in time: the pass is
+// drawn stock (counted late); the job finishes on its worker and is dropped.
+void TakeJob(PassCtx& pc, void** vec) {
+  Slot& sl = g_slot[pc.slot];
+  Stat& st = sl.st;
+  Job& j = *sl.job;
+  const int64_t t0 = defrec::Qpc();
+  const double budget = static_cast<double>(g_waitUs.load());
+  const double k = defrec::QpcToUs();
+  while (SlotBusy(pc.slot) && (defrec::Qpc() - t0) * k < budget) _mm_pause();
+  const uint64_t ns = NsSince(t0);
+  st.waitNs += ns;
+  NoteMax(st.waitMaxNs, ns);
+  if (SlotBusy(pc.slot)) {
+    pc.reason = kPLate;
+    sl.lateEntry = g_entryQpc;  // its timeline is read once the workers are idle
+    sl.latePassQpc = t0;
+    return;
+  }
+  DropPoolLists(pc.slot);
+  if (j.phase.load(std::memory_order_acquire) != kJobBuilt || j.result != kBuildOk ||
+      j.recFail.load(std::memory_order_acquire)) {
+    ReleaseSegLists(j);
+    pc.reason = kPFailed;
+    return;
+  }
+  st.jobsUsed++;
+  st.buildNs += static_cast<uint64_t>(j.buildUs * 1000.0);
+  st.preNs += static_cast<uint64_t>(j.preUs * 1000.0);
+  st.commitNs += static_cast<uint64_t>(j.commitUs * 1000.0);
+  double recSum = 0, recMax = 0;
+  int64_t recDone = 0;
+  for (int r = 0; r < kThreads; ++r) {
+    recSum += j.recUs[r];
+    recMax = (std::max)(recMax, j.recUs[r]);
+    recDone = (std::max)(recDone, j.tRecDone[r]);
+  }
+  st.recordNs += static_cast<uint64_t>(recSum * 1000.0);
+  st.recMaxNs += static_cast<uint64_t>(recMax * 1000.0);
+  st.recWorkers += j.segCount ? j.recWorkers : 0;
+  st.pieces += j.pieceCount;
+  st.helpersQueued += j.helpers;
+  NoteWork(sl, JobWorkUs(j));
+  st.jobItems += j.n;
+  st.helperItems += j.n - j.preItems[0];
+  st.tlSamples++;
+  st.early += j.startedEarly;
+  st.tlPass += QpcNs(g_entryQpc, t0);
+  st.tlStart += QpcNs(g_entryQpc, j.tStart);
+  st.tlPre += QpcNs(g_entryQpc, j.tPreDone ? j.tPreDone : j.tBuilt);
+  st.tlBuilt += QpcNs(g_entryQpc, j.tBuilt);
+  st.tlRec += QpcNs(g_entryQpc, recDone ? recDone : j.tBuilt);
+  st.tlDone += QpcNs(g_entryQpc, (std::max)(j.tDone, recDone));
+  NoteSlack(sl, QpcNs((std::max)(j.tDone, recDone), t0) / 1e6);
+  if (!SameVectorGuarded(j, vec)) {
+    ReleaseSegLists(j);
+    pc.reason = kPIdentity;
+    return;
+  }
+  pc.job = &j;  // its probe requests apply to this vector
+  st.items += j.n;
+  for (int r = 0; r < kReasons; ++r) st.itemReason[r] += j.reasons[r];
+  st.misses += j.missCount;
+  st.refreshes += j.refreshCount;
+  st.segPlanned += j.segCount;
+  if (!j.segCount || !j.pieceCount) {
+    ReleaseSegLists(j);
+    pc.reason = j.segCount ? kPFailed : kPNothing;
+    return;
+  }
+  for (uint32_t q = 0; q < j.pieceCount; ++q) {
+    pc.cl[q] = j.pieces[q].cl;
+    j.pieces[q].cl = nullptr;
+  }
+  for (uint32_t q = 0; q < j.pieceCount; ++q)
+    if (!pc.cl[q]) {
+      for (auto*& c : pc.cl) SafeRel(c);
+      pc.reason = kPFailed;
+      return;
+    }
+  pc.state = kPsArmed;
+}
+
+bool Arm(int s);
+
+// Slot s's job served this entry's pass (or was late for it): once its worker
+// is idle, its leftovers are released, the texture table is maintained and
+// the next frame's job is armed.
+bool RearmIfIdle(int s) {
+  Slot& sl = g_slot[s];
+  if (SlotBusy(s)) return false;
+  DropPoolLists(s);
+  ReleaseSegLists(*sl.job);
+  sl.armed = false;
+  return Arm(s);
+}
+
+// Texture table and reads table upkeep from this pass's job (render thread).
+void Maintain(Slot& sl) {
+  if (!sl.job) return;
+  const Job& j = *sl.job;
+  const int64_t t0 = defrec::Qpc();
+  for (uint32_t k = 0; k < j.readWantCount; ++k) ResolveReads(g_tab, j.readWants[k].shader, j.readWants[k].tech);
+  if (TryAcquireSRWLockExclusive(&g_texLock)) {
+    MaintainTex(g_tex, g_env.tex, j, g_entryGen);
+    TexEvict(g_tex, g_entryGen, kEvictAge, 512);
+    ReleaseSRWLockExclusive(&g_texLock);
+  } else {
+    g_texDeferred++;
+  }
+  sl.st.maintNs += NsSince(t0);
+}
+
+bool LearnVector(Slot& sl, void** vec, void* ctx) {
+  void* rg = nullptr;
+  uint32_t idx = 0;
+  bool ok = false;
+  __try {
+    ok = shadowbatch::LearnRaw(vec, ctx, &rg, &idx);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    ok = false;
+  }
+  if (!ok) return false;
+  sl.learn.rg = rg;
+  sl.learn.idx = idx;
+  sl.learn.haveVec = true;
+  g_gbRg = rg;
+  return true;
+}
+
+void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
+  void** vec = gbpass::ItemVector(pass, ctx);
+  if (!vec) return PrevWrap(pass, ctx, orig);
+  Slot& sl = g_slot[s];
+  LearnVector(sl, vec, ctx);
+  sl.st.passes++;
+  PassCtx pc;
+  pc.slot = s;
+  const bool mine = sl.job && sl.armed && sl.job->entryGen && sl.job->entryGen == g_entryGen;
+  if (mine) TakeJob(pc, vec);
+  pc.probesLeft = pc.job && pc.job->wantCount ? kProbesPerPass : 0;
+  if (g_verify.load(std::memory_order_relaxed) && pc.state == kPsArmed)
+    VerifyPass(pc, pass, ctx, orig, vec);
+  else
+    RunPass(pc, pass, ctx, orig, vec);
+  for (auto*& c : pc.cl) SafeRel(c);
+  Stat& st = sl.st;
+  st.frontNs += pc.frontNs;
+  st.vt23 += pc.replays;
+  if (pc.state == kPsLive) {
+    uint32_t done = 0;
+    for (uint32_t k = 0; k < pc.job->segCount; ++k) {
+      st.segs++;
+      st.segReason[pc.segDone[k] ? kSExecuted : pc.segWhy[k]]++;
+      done += pc.segDone[k];
+    }
+    if (done) {
+      const Job& j = *pc.job;
+      st.recorded += j.recorded;
+      st.draws += j.draws;
+      st.cbBytes += j.cbBytes;
+      st.execNs += pc.execNs;
+      st.executeNs += pc.executeNs;
+    }
+    if (done == pc.job->segCount)
+      st.passReason[kPExecuted]++;
+    else
+      st.partial++;
+  } else {
+    st.passReason[pc.reason == kPExecuted ? kPNoEntry : pc.reason]++;
+  }
+  sl.passGen = g_entryGen;
+  g_lastPassQpc = defrec::Qpc();
+  if (mine) {
+    if (!SlotBusy(s)) Maintain(sl);
+    RearmIfIdle(s);
+  } else if (!sl.armed) {
+    Arm(s);
+  }
+}
+
+bool EnsureSlot(int s);
+
+void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
+  g_inside.fetch_add(1);
+  if (Active() && g_pool.Disabled()) Disable("worker fault (see the deferred rec line above)");
+  if (!Active()) {
+    PrevWrap(pass, ctx, orig);
+  } else {
+    if (!g_renderTid) g_renderTid = GetCurrentThreadId();
+    if (GetCurrentThreadId() != g_renderTid) {
+      PrevWrap(pass, ctx, orig);
+    } else {
+      const int ord = g_ordinal++;
+      g_gbExecs++;
+      NoteMax(g_ordMax, static_cast<uint64_t>(ord));
+      const int s = SlotOfOrdinal(g_scope.load(), ord);
+      if (s < 0 || !EnsureSlot(s))
+        PrevWrap(pass, ctx, orig);
+      else
+        WrapSlot(s, pass, ctx, orig);
+    }
+  }
+  g_inside.fetch_sub(1);
+}
+
+// ---------------------------------------------------------------------------
+// Render thread: RenderGraph::render entry; arming; stale jobs
+// ---------------------------------------------------------------------------
+size_t VectorCountGuarded(void* rg, void* renderables) {
+  __try {
+    return shadowbatch::VectorCountRaw(static_cast<uint8_t*>(rg), renderables);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+  }
+}
+
+// Arms slot s's job for its next render entry (render thread, worker idle).
+// The timeline of the slot's last late job, from the render entry it served
+// (workers idle).
+void NoteLate(Slot& sl, const Job& j) {
+  if (!sl.lateEntry) return;
+  const int64_t e = sl.lateEntry;
+  sl.lateEntry = 0;
+  if (!j.tStart) return;
+  int64_t done = j.tDone;
+  for (int r = 0; r < kThreads; ++r) done = (std::max)(done, j.tRecDone[r]);
+  if (done < j.tStart) return;  // aborted before it finished
+  Stat& st = sl.st;
+  st.lateSamples++;
+  st.latePass += QpcNs(e, sl.latePassQpc);
+  st.lateStart += QpcNs(e, j.tStart);
+  st.lateBuilt += QpcNs(e, j.tBuilt >= j.tStart ? j.tBuilt : done);
+  st.lateDone += QpcNs(e, done);
+  NoteWork(sl, JobWorkUs(j));
+}
+
+bool Arm(int s) {
+  Slot& sl = g_slot[s];
+  if (!sl.job || sl.armed) return sl.armed;
+  const Learned& l = sl.learn;
+  if (!l.haveVec || !l.target || !l.ratioOk) return false;
+  if (SlotBusy(s)) {  // a late job's primary or helper still reads it
+    sl.st.refused++;
+    return false;
+  }
+  Job& j = *sl.job;
+  NoteLate(sl, j);
+  DropPoolLists(s);
+  ReleaseSegLists(j);
+  ReleaseTargetRefs(j);
+  j.vec = nullptr;
+  j.flags = l.flags;
+  j.scope = g_scope.load();
+  j.island = g_island.load();
+  const bool slack = sl.slackMs > kSlackMs;
+  j.keyScope = l.idx;
+  j.maxSeg = g_maxSeg.load();
+  if (slack) {
+    j.island = (std::min)(j.island, kSlackIsland);
+    j.maxSeg = kMaxSegments;
+    sl.st.slackJobs++;
+  }
+  ReleaseRedo(j);
+  j.stride = g_verify.load() ? g_stride.load() : 0;
+  for (UINT k = 0; k < kRtv; ++k)
+    if ((j.rtv[k] = l.rtv[k])) j.rtv[k]->AddRef();
+  if ((j.dsv = l.dsv)) j.dsv->AddRef();
+  j.nvp = l.nvp;
+  j.nsc = l.nsc;
+  memcpy(j.vp, l.vp, sizeof(j.vp));
+  memcpy(j.sc, l.sc, sizeof(j.sc));
+  for (int st = 0; st < 2; ++st)
+    for (int k = 0; k < 3; ++k) j.ctxBuf[st][k] = l.ctxBytes[st][k] ? sl.ours[st][k] : nullptr;
+  for (int st = 0; st < 2; ++st)
+    for (UINT q = kPoolFirst; q < kSampSlots; ++q)
+      if ((j.pool[st][q] = l.pool[st][q])) j.pool[st][q]->AddRef();
+  memcpy(j.ratio, l.ratio, kRatioLen);
+  j.ratioFb = l.ratioFb;
+  j.ratioVp[0] = l.ratioVp[0];
+  j.ratioVp[1] = l.ratioVp[1];
+  j.front = &sl.front;
+  for (int k = 0; k < kMaxSegments; ++k) j.execObj[k] = &sl.exec[k];
+  j.env = &g_env;
+  j.tab = &g_tab;
+  j.tex = &g_tex;
+  j.texLock = &g_texLock;
+  j.useGen = g_entryGen + 1;
+  j.result = kBuildNone;
+  j.startedEarly = false;
+  j.entryGen = 0;
+  j.tStart = j.tDone = 0;
+  j.armRg = l.rg;
+  j.armIdx = l.idx;
+  ResetEvent(j.start);
+  ResetEvent(j.preGo);
+  ResetEvent(j.recGo);
+  j.preState.store(kGoWait, std::memory_order_relaxed);
+  j.recState.store(kGoWait, std::memory_order_relaxed);
+  j.started.store(0, std::memory_order_relaxed);
+  j.ready.store(0, std::memory_order_relaxed);
+  j.recFail.store(0, std::memory_order_relaxed);
+  j.recWorkers = 1;
+  j.pieceCount = 0;
+  j.phase.store(kJobEmpty, std::memory_order_relaxed);
+  j.startState.store(kStartArmed, std::memory_order_release);  // the sort hook may start it from here on
+  // Helpers first (they wait for stage A to open); a busy one (a late job) is left out.
+  j.helpers = 0;
+  const uint32_t helpers = HelpersFor(sl.workUs, (std::min)(g_helpers.load(), static_cast<uint32_t>(kThreads - 1)));
+  static const defrec::JobFn kHelper[kThreads - 1] = {&HelperMain<1>, &HelperMain<2>};
+  for (uint32_t h = 0; h < helpers; ++h)
+    if (g_pool.Submit(Wk(s, static_cast<int>(h) + 1), kHelper[h], &j, nullptr)) ++j.helpers;
+  if (!g_pool.Submit(s, &JobMain, &j, nullptr)) {
+    int st = kStartArmed;
+    if (!j.startState.compare_exchange_strong(st, kStartIdle)) j.startState.store(kStartIdle);
+    ReleaseHelpers(j);
+    sl.st.refused++;
+    return false;
+  }
+  sl.armed = true;
+  sl.st.jobs++;
+  return true;
+}
+
+// An armed job whose render entry passed without its pass: released once its
+// worker is idle. False while it still runs.
+bool DropStale(int s) {
+  Slot& sl = g_slot[s];
+  if (SlotBusy(s)) {
+    const int64_t t0 = defrec::Qpc();
+    while (SlotBusy(s) && (defrec::Qpc() - t0) * defrec::QpcToUs() < 200.0) _mm_pause();
+    if (SlotBusy(s)) return false;
+  }
+  DropPoolLists(s);
+  ReleaseSegLists(*sl.job);
+  sl.armed = false;
+  return true;
+}
+
+void OnRender(void* rg, void* renderables) {
+  if (shadowbatch::RenderObserverFn p = g_prevObserver) p(rg, renderables);
+  if (!g_renderTid || GetCurrentThreadId() != g_renderTid) return;
+  g_inside.fetch_add(1);
+  g_entries++;
+  if (!g_gbRg || rg == g_gbRg) {
+    g_ordinal = 0;
+    ++g_entryGen;
+    g_entryQpc = defrec::Qpc();
+  }
+  if (Active() && rg == g_gbRg) {
+    const int64_t prevEntry = g_lastPassQpc > g_gbEntryQpc ? g_lastPassQpc : g_gbEntryQpc;
+    g_gbEntryQpc = g_entryQpc;
+    size_t count = SIZE_MAX;
+    for (int s = 0; s < kSlots; ++s) {
+      Slot& sl = g_slot[s];
+      if (!sl.job || !sl.learn.haveVec || sl.learn.rg != rg) continue;
+      Job& j = *sl.job;
+      const int st = j.startState.load();
+      const bool oldStart = st == kStartRun && !j.entryGen && (!prevEntry || j.tStart < prevEntry);
+      if (oldStart) sl.st.staleStart++;
+      if (sl.armed && (j.entryGen || oldStart || st == kStartAbort) && !DropStale(s)) {
+        sl.st.refused++;
+        continue;
+      }
+      if (!sl.armed && !Arm(s)) continue;
+      if (count == SIZE_MAX) count = VectorCountGuarded(rg, renderables);
+      if (sl.learn.idx >= count) continue;
+      StartJob(j, reinterpret_cast<void**>(static_cast<uint8_t*>(renderables) + sl.learn.idx * 24), false);
+      j.entryGen = g_entryGen;
+    }
+  }
+  g_inside.fetch_sub(1);
+}
+
+// A collection's vector is final (Scene's sort, pool thread): start the armed
+// job watching it.
+void OnSorted(void** out) {
+  if (!g_on.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed) ||
+      g_shutdown.load(std::memory_order_relaxed))
+    return;
+  for (int s = 0; s < kSlots; ++s) {
+    Job* j = g_jobPub[s].load(std::memory_order_acquire);
+    if (!j || j->startState.load(std::memory_order_acquire) != kStartArmed) continue;
+    uint8_t* base = shrec::ArrayBaseGuarded(j->armRg);
+    if (base && reinterpret_cast<uint8_t*>(out) == base + static_cast<size_t>(j->armIdx) * 24) StartJob(*j, out, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Install / teardown
+// ---------------------------------------------------------------------------
+bool Compiled(void* shader, uint64_t tech) {
+  const shadowinst::MapEntry* e = shadowinst::FindEntry(shader, tech, 0);
+  return e && e->result && e->kind == shadowinst::kKindGb;
+}
+bool CbUsed(void* shader, uint64_t tech, uint64_t out[2]) { return shadowinst::CbUsedDwords(shader, tech, 0, out); }
+int BlendOf(uint8_t* shader) { return gbreccount::ReadBlendRaw(shader); }
+
+// Slot s's job and caster-list buffer, allocated on first use (the
+// installing thread, or the render thread when the scope grows).
+bool EnsureSlot(int s) {
+  Slot& sl = g_slot[s];
+  if (!sl.stockList) {
+    sl.stockList = static_cast<void**>(
+        VirtualAlloc(nullptr, (kMaxItems + 2) * sizeof(void*), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!sl.stockList) return false;
+  }
+  if (!sl.job) {
+    if (!(sl.job = NewJob())) return false;
+    g_jobPub[s].store(sl.job, std::memory_order_release);
+  }
+  return true;
+}
+
+bool EnsureSlots() {
+  const uint32_t scope = g_scope.load();
+  for (int s = 0; s < kSlots; ++s)
+    if (OrdinalOfSlot(scope, s) >= 0 && !EnsureSlot(s)) return false;
+  return true;
+}
+
+// Installed on first use; false = not now (retried every second by main.cpp)
+// or unavailable (g_state -1, logged once).
+bool Install() {
+  if (g_state.load() != 0) return g_state.load() > 0;
+  if (gbreccount::g_chained.load()) return false;  // the S0 counter phase owns the chain right now
+  if (shrec::g_sortBorrowed.load()) return false;
+  if (shadowinst::g_state.load() != 1 || !shadowinst::g_gbInstalled.load() || !shadowinst::g_device) return false;
+  auto fail = [](const char* why) {
+    Log("gbuffer recorder: %s; unavailable", why);
+    g_state = -1;
+    return false;
+  };
+  if (!gbpass::Install()) {
+    if (gbpass::g_state < 0) return fail("G-buffer pass execute not hooked (GraphicsCore build)");
+    return false;
+  }
+  if (!shadowbatch::InstallRenderer()) {
+    if (shadowbatch::g_rendererState < 0) return fail("DX11Renderer not matched");
+    return false;
+  }
+  auto* ng = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
+  auto* dx = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
+  auto* md = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"ModelDesc.dll"));
+  if (!ng || !dx || !md) return false;
+  if (const char* why = gbbatch::VerifyBuild(ng, dx, md)) return fail(why);
+  auto** rv = shadowbatch::g_rendererVtbl;
+  if (reinterpret_cast<uint8_t*>(SlotOriginal(&rv[54])) != dx + 0x15d60 ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&rv[40])) != dx + 0x17010)
+    return fail("DX11Renderer frame-buffer/viewport getters do not match this build");
+  ID3D11Device* dev = shadowinst::g_device;
+  if (shadowinst::g_deviceSingleThreaded) return fail("the D3D11 device is single-threaded");
+  const defrec::Caps caps = defrec::QueryCaps(dev);
+  if (!caps.commandLists || !caps.cbOffsetting || !caps.device1)
+    return fail("the driver lacks command lists or constant-buffer offsets");
+  if (!gbverify::Install()) return fail("the G-buffer verifier could not start");
+  if (!gbbatch::g_ctx) dev->GetImmediateContext(&gbbatch::g_ctx);  // the verifier's context (released by gb_batch)
+  if (!AllocTables(g_tab) || !AllocTex(g_tex, 1u << 14)) return fail("no memory for the tables");
+  if (!EnsureSlots()) return fail("no memory for the jobs");
+  g_env.srVt = ng + gbcount::kVtableRva;
+  g_env.modelVt = gbcount::g_modelMatVtbl;
+  g_env.shaderVt = dx + shadowtex::g_at.shader;
+  g_env.globals = reinterpret_cast<uint8_t* const*>(ng + shadowtex::g_at.globals);
+  for (int c = 0; c < gbbatch::kPropClasses; ++c) {
+    g_env.propVt[c] = md + gbbatch::kProps[c].vtbl;
+    g_env.propBytes[c] = gbbatch::kProps[c].bytes;
+  }
+  g_env.setResource = dx + gbbatch::kSetResource;
+  g_env.evalAnim = reinterpret_cast<EvalAnimFn>(ng + gbbatch::kEvalAnim);
+  g_env.compiled = &Compiled;
+  g_env.cbUsed = &CbUsed;
+  g_env.blend = &BlendOf;
+  g_env.tex.texVtbl = dx + shadowtex::g_at.tex;
+  g_env.tex.inner[0] = dx + shadowtex::g_at.innerFile;
+  g_env.tex.inner[1] = dx + shadowtex::g_at.innerArray;
+  g_env.tex.inner[2] = dx + shadowtex::g_at.innerDummy;
+  if (!shrec::InitInnerRt(dx)) Log("gbuffer recorder: render-target textures not supported (dx11backend's class not as analysed)");
+  g_env.tex.getDesc = reinterpret_cast<gbbatch::GetDescFn>(dx + shadowtex::g_at.getDesc);
+  g_env.tex.compat = reinterpret_cast<gbbatch::CompatFn>(dx + shadowtex::g_at.compat);
+  for (auto*& p : g_frontVtbl) p = reinterpret_cast<void*>(&LoopNop);
+  for (auto*& p : g_execVtbl) p = reinterpret_cast<void*>(&LoopNop);
+  g_frontVtbl[1] = reinterpret_cast<void*>(&FrontVt1);
+  g_execVtbl[1] = reinterpret_cast<void*>(&ExecVt1);
+  for (int s = 0; s < kSlots; ++s) {
+    g_slot[s].front = {g_frontVtbl, s, -1};
+    for (int k = 0; k < kMaxSegments; ++k) g_slot[s].exec[k] = {g_execVtbl, s, k};
+  }
+  defrec::PoolConfig pc;
+  pc.workers = kSlots * kThreads;
+  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.priority = THREAD_PRIORITY_NORMAL;
+  pc.name = "gbuffer recorder";
+  if (!g_pool.Start(dev, pc)) return fail("its workers did not start");
+  if (g_pool.At(0).ring.Mode() != defrec::CbMode::kOffsets) {
+    g_pool.Stop();
+    return fail("constant-buffer offsets unavailable on the worker contexts");
+  }
+  dev->GetImmediateContext(&g_ctx);
+  g_dev = dev;
+  g_dev->AddRef();
+  // RenderGraph::render entry: shadow batching's import hook, ours if absent.
+  g_ownRenderHook = false;
+  if (!shadowbatch::g_renderSlot && !shadowbatch::g_renderSlot2) g_ownRenderHook = shadowbatch::InstallRenderHook();
+  if (!shadowbatch::g_renderSlot && !shadowbatch::g_renderSlot2) {
+    g_pool.Stop();
+    return fail("RenderGraph::render entry not hooked");
+  }
+  // Jobs start when their vector is final (Scene's sort), else at render entry.
+  const bool wasPatched = shrec::g_sortPatched;
+  const bool early = shrec::EnsureSortHook();
+  g_ownSort = early && !wasPatched;
+  shrec::g_sortObserver2 = &OnSorted;
+  g_renderTid = shadowbatch::g_renderThread ? shadowbatch::g_renderThread : ptiming::g_topTid.load();
+  g_prevWrap = gbpass::g_wrap.load();
+  g_prevOverride = gbcount::g_override.load();
+  g_prevObserver = shadowbatch::g_renderObserver.load();
+  gbpass::g_wrap = &Wrap;
+  gbcount::g_override = &Override;
+  shadowbatch::g_renderObserver = &OnRender;
+  g_chained = true;
+  g_state = 1;
+  Log("gbuffer recorder: ready (scope 0x%x: executions by ordinal bits 0-15, A2C bit 16; %d workers; DCS's G-buffer "
+      "loop runs over [front, residual items, one exec entry per segment]; island %u, at most %d segments; wait "
+      "budget %u us; jobs start %s)",
+      g_scope.load(), kSlots * kThreads, g_island.load(), static_cast<int>(g_maxSeg.load()), g_waitUs.load(),
+      early ? "when Scene's sort finishes their vector" : "at RenderGraph::render entry");
+  PollStateDump();
+  return true;
+}
+
+bool Ready() { return g_state.load() == 1 && !g_disabled.load(); }
+
+void Shutdown() {
+  g_shutdown = true;
+  g_on = false;
+  if (g_chained.exchange(false)) {
+    gbpass::WrapFn w = &Wrap;
+    gbpass::g_wrap.compare_exchange_strong(w, g_prevWrap);
+    gbcount::OverrideFn o = &Override;
+    gbcount::g_override.compare_exchange_strong(o, g_prevOverride);
+    shadowbatch::RenderObserverFn ob = &OnRender;
+    shadowbatch::g_renderObserver.compare_exchange_strong(ob, g_prevObserver);
+    shrec::SortObserverFn so = &OnSorted;
+    shrec::g_sortObserver2.compare_exchange_strong(so, nullptr);
+  }
+  if (g_state.load() != 1) return;
+  for (int i = 0; i < 400 && (g_inside.load() != 0 || shrec::g_sortInside.load() != 0); ++i) Sleep(5);
+  for (Slot& sl : g_slot)
+    if (sl.job) {
+      int st = kStartArmed;
+      sl.job->startState.compare_exchange_strong(st, kStartAbort);
+      SetEvent(sl.job->start);
+      ReleaseHelpers(*sl.job);
+    }
+  const bool stopped = g_pool.Stop();
+  if (g_ownSort && shrec::g_state.load() != 1) {
+    if (!shrec::PatchSortSites(false)) Log("gbuffer recorder: WARNING could not restore Scene's sort call sites");
+    if (shrec::g_sortStub)
+      reinterpret_cast<std::atomic<void*>*>(shrec::g_sortStub + 16)->store(reinterpret_cast<void*>(shrec::g_sortOrig));
+  }
+  g_ownSort = false;
+  if (g_ownRenderHook && shadowbatch::g_state.load() != 1) {
+    if (shadowbatch::g_renderSlot)
+      UnhookSlot(shadowbatch::g_renderSlot, reinterpret_cast<void*>(shadowbatch::g_origRender));
+    if (shadowbatch::g_renderSlot2)
+      UnhookSlot(shadowbatch::g_renderSlot2, reinterpret_cast<void*>(shadowbatch::g_origRender));
+    shadowbatch::g_renderSlot = nullptr;
+    shadowbatch::g_renderSlot2 = nullptr;
+  }
+  g_ownRenderHook = false;
+  if (!stopped || g_inside.load() != 0) {
+    Log("gbuffer recorder: a pass or a worker was still running at unload; its objects are left alive");
+    return;
+  }
+  for (auto& p : g_jobPub) p.store(nullptr);
+  for (Slot& sl : g_slot) {
+    FreeJob(sl.job);
+    for (auto*& p : sl.learn.rtv) SafeRel(p);
+    SafeRel(sl.learn.dsv);
+    for (auto& row : sl.learn.pool)
+      for (auto*& p : row) SafeRel(p);
+    sl.learn = Learned();
+    for (auto& row : sl.ours)
+      for (auto*& p : row) SafeRel(p);
+    memset(sl.oursBytes, 0, sizeof(sl.oursBytes));
+    if (sl.stockList) VirtualFree(sl.stockList, 0, MEM_RELEASE);
+    sl.stockList = nullptr;
+  }
+  FreeTables(g_tab);
+  FreeTex(g_tex);
+  PollStateDump();  // the queued lines
+  free(g_dumpSeen);
+  g_dumpSeen = nullptr;
+  g_dumpSeenCount = 0;
+  SafeRel(g_ctx);
+  SafeRel(g_dev);
+  g_state = -1;
+}
+
+void ResetCounters() {
+  for (Slot& sl : g_slot) {
+    Stat& s = sl.st;
+    s.passes = s.partial = s.segs = s.items = s.recorded = s.draws = s.jobs = s.jobsUsed = s.refused = 0;
+    for (auto& a : s.passReason) a = 0;
+    for (auto& a : s.segReason) a = 0;
+    for (auto& a : s.itemReason) a = 0;
+    s.cbBytes = s.vt23 = s.segPlanned = 0;
+    s.buildNs = s.recordNs = s.waitNs = s.waitMaxNs = s.frontNs = s.execNs = s.executeNs = s.restoreNs = s.maintNs = 0;
+    s.tlSamples = s.early = s.recWorkers = s.pieces = s.helpersQueued = s.helperItems = s.jobItems = 0;
+    s.preNs = s.commitNs = s.recMaxNs = 0;
+    s.tlPass = s.tlStart = s.tlDone = s.tlPre = s.tlBuilt = s.tlRec = 0;
+    s.lateSamples = 0;
+    s.latePass = s.lateStart = s.lateBuilt = s.lateDone = 0;
+    s.staleStart = s.misses = s.refreshes = 0;
+    s.aaClean = 0;
+    s.redoPlanned = s.redoExecuted = s.redoLate = s.redoFail = s.swapsAhead = s.redoNs = s.slackJobs = 0;
+    s.rtReplays = 0;
+    s.verifyAa = s.verifyAb = s.verifyAaBad = s.verifyAbBad = s.verifyTexels = s.verifyBadTexels = 0;
+    s.verifySkipped = s.verifyErrors = s.verifyStateBad = s.verifyExecs = 0;
+  }
+  g_probes = g_probeOdd = g_probePool = 0;
+  g_entries = g_gbExecs = g_ordMax = 0;
+  g_texBuilt = g_texRefreshed = g_texFull = g_texDeferred = 0;
+  memset(g_texWhy, 0, sizeof(g_texWhy));
+}
+
+void LogCounters(const char* label, double frames) {
+  PollStateDump();
+  const double f = frames > 0 ? frames : 1.0;
+  const uint32_t scope = g_scope.load();
+  Log("  gbuffer recorder %s: scope 0x%x, %.0f frames%s; %.2f render entries and %.2f G-buffer executions/frame "
+      "(highest ordinal %llu); probes %llu (unusable %llu, inconclusive %llu, sampler pool differs %llu); keys %u (recordable %llu, not %llu, "
+      "retired for a state change %llu, relearnt %llu), meshes %u (recordable %llu, not %llu), read sets %u, table full %llu; faults %llu",
+      label, scope, frames, g_disabled.load() ? ", DISABLED" : "", g_entries.load() / f, g_gbExecs.load() / f,
+      static_cast<unsigned long long>(g_ordMax.load()), static_cast<unsigned long long>(g_probes.load()),
+      static_cast<unsigned long long>(g_probeOdd.load()), static_cast<unsigned long long>(g_probeInconclusive.load()),
+      static_cast<unsigned long long>(g_probePool.load()), g_tab.keysUsed, static_cast<unsigned long long>(g_keysOk.load()),
+      static_cast<unsigned long long>(g_keysRejected.load()), static_cast<unsigned long long>(g_keyDowngrades.load()),
+      static_cast<unsigned long long>(g_keyRelearnt.load()),
+      g_tab.mesh.meshesUsed, static_cast<unsigned long long>(g_meshesOk.load()),
+      static_cast<unsigned long long>(g_meshesRejected.load()), g_tab.readsUsed,
+      static_cast<unsigned long long>(g_tableFull.load()), static_cast<unsigned long long>(g_faults.load()));
+  Log("  gbuffer recorder %s texture table: %u entries live, %.0f built/frame, %.0f rebuilt/frame, %llu evicted, %llu "
+      "wipes, %llu table full, %llu maintenances deferred (lock busy); built as: usable %llu, class %llu, 0x678 %llu, "
+      "mip-set %llu, swap due %llu, fault %llu",
+      label, g_tex.live, g_texBuilt.load() / f, g_texRefreshed.load() / f,
+      static_cast<unsigned long long>(g_tex.evicted), static_cast<unsigned long long>(g_tex.wipes),
+      static_cast<unsigned long long>(g_texFull.load()), static_cast<unsigned long long>(g_texDeferred.load()),
+      static_cast<unsigned long long>(g_texWhy[kTwOk]), static_cast<unsigned long long>(g_texWhy[kTwClass]),
+      static_cast<unsigned long long>(g_texWhy[kTw678]), static_cast<unsigned long long>(g_texWhy[kTwMipSet]),
+      static_cast<unsigned long long>(g_texWhy[kTwSwap]), static_cast<unsigned long long>(g_texWhy[kTwFault]));
+  for (int s = 0; s < kSlots; ++s) {
+    const int ord = OrdinalOfSlot(scope, s);
+    if (ord < 0) continue;
+    const Stat& st = g_slot[s].st;
+    const uint64_t passes = st.passes.load(), exec = st.passReason[kPExecuted].load(), used = st.jobsUsed.load();
+    auto ms = [&](const std::atomic<uint64_t>& ns) { return ns.load() / 1e6 / f; };
+    Log("  gbuffer recorder %s execution #%d: %.2f passes/frame, %llu of %llu fully executed, %llu partly; items in "
+        "the jobs used %.0f/frame, drawn from command lists %.0f/frame (%.1f%%); segments %.2f per used job, %llu "
+        "executed of %llu; %llu jobs, %llu used, %llu refused (worker busy)",
+        label, ord, passes / f, static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
+        static_cast<unsigned long long>(st.partial.load()), st.items.load() / f, st.draws.load() / f,
+        st.items.load() ? 100.0 * st.draws.load() / st.items.load() : 0.0,
+        used ? static_cast<double>(st.segPlanned.load()) / used : 0.0,
+        static_cast<unsigned long long>(st.segReason[kSExecuted].load()), static_cast<unsigned long long>(st.segs.load()),
+        static_cast<unsigned long long>(st.jobs.load()), static_cast<unsigned long long>(used),
+        static_cast<unsigned long long>(st.refused.load()));
+    const double tl = st.tlSamples.load() ? 1e6 * st.tlSamples.load() : 1.0;
+    const double u = used ? static_cast<double>(used) : 1.0;
+    Log("  gbuffer recorder %s execution #%d times (ms/frame): workers build %.3f + record %.3f (per job: stage A %.3f "
+        "= reads %.3f + commit %.3f; record %.3f summed, %.3f on the slowest worker); render thread: wait %.3f (max "
+        "%.3f ms), front %.3f, replay + checks + copies + execute %.3f (execute %.3f), restore %.3f, table upkeep %.3f; "
+        "CB ring %.2f MB/frame; streaming replays %.0f/frame; texture misses %.0f/frame, unusable %.0f/frame",
+        label, ord, ms(st.buildNs), ms(st.recordNs), st.buildNs.load() / 1e6 / u, st.preNs.load() / 1e6 / u,
+        st.commitNs.load() / 1e6 / u, st.recordNs.load() / 1e6 / u, st.recMaxNs.load() / 1e6 / u, ms(st.waitNs),
+        st.waitMaxNs.load() / 1e6, ms(st.frontNs), ms(st.execNs), ms(st.executeNs), ms(st.restoreNs), ms(st.maintNs),
+        st.cbBytes.load() / 1048576.0 / f, st.vt23.load() / f, st.misses.load() / f, st.refreshes.load() / f);
+    Log("  gbuffer recorder %s execution #%d timeline from RenderGraph::render entry (ms, mean per used job, negative = "
+        "before): vector final / job start %.3f (%llu of %llu by Scene's sort, the rest at entry), stage-A reads done "
+        "%.3f, commit done %.3f, recording done %.3f, job done %.3f, pass %.3f; %.0f items per job, %.1f%% read by "
+        "helpers (%.2f helpers queued), %.2f recording workers and %.2f lists per job; stale early starts %llu",
+        label, ord, st.tlStart.load() / tl, static_cast<unsigned long long>(st.early.load()),
+        static_cast<unsigned long long>(st.tlSamples.load()), st.tlPre.load() / tl, st.tlBuilt.load() / tl,
+        st.tlRec.load() / tl, st.tlDone.load() / tl, st.tlPass.load() / tl, st.jobItems.load() / u,
+        st.jobItems.load() ? 100.0 * st.helperItems.load() / st.jobItems.load() : 0.0, st.helpersQueued.load() / u,
+        st.recWorkers.load() / u, st.pieces.load() / u, static_cast<unsigned long long>(st.staleStart.load()));
+    std::string line;
+    char buf[220];
+    for (int r = 1; r < kPassReasons; ++r) {
+      if (!st.passReason[r].load()) continue;
+      snprintf(buf, sizeof(buf), "%s%s %llu", line.empty() ? "" : "; ", kPassReasonName[r],
+               static_cast<unsigned long long>(st.passReason[r].load()));
+      line += buf;
+    }
+    Log("  gbuffer recorder %s execution #%d drawn stock: %s", label, ord, line.empty() ? "none" : line.c_str());
+    line.clear();
+    for (int r = 1; r < kSegReasons; ++r) {
+      if (!st.segReason[r].load()) continue;
+      snprintf(buf, sizeof(buf), "%s%s %llu", line.empty() ? "" : "; ", kSegReasonName[r],
+               static_cast<unsigned long long>(st.segReason[r].load()));
+      line += buf;
+    }
+    Log("  gbuffer recorder %s execution #%d segments drawn stock: %s", label, ord, line.empty() ? "none" : line.c_str());
+    line.clear();
+    for (int r = 1; r < kReasons; ++r) {
+      if (!st.itemReason[r].load()) continue;
+      snprintf(buf, sizeof(buf), "%s%s %.1f", line.empty() ? "" : "; ", kReasonName[r], st.itemReason[r].load() / f);
+      line += buf;
+    }
+    Log("  gbuffer recorder %s execution #%d residual items/frame (DCS draws them): %s", label, ord,
+        line.empty() ? "none" : line.c_str());
+    if (st.verifyAa.load() || st.verifyAb.load() || st.verifySkipped.load() || g_verify.load())
+      Log("  gbuffer recorder %s execution #%d verify: stock vs stock %llu (%llu differ), stock vs recorded %llu (%llu "
+          "differ), %llu of %llu texels/samples differ; %llu not compared, %llu errors; state after Execute differs "
+          "%llu of %llu",
+          label, ord, static_cast<unsigned long long>(st.verifyAa.load()),
+          static_cast<unsigned long long>(st.verifyAaBad.load()), static_cast<unsigned long long>(st.verifyAb.load()),
+          static_cast<unsigned long long>(st.verifyAbBad.load()),
+          static_cast<unsigned long long>(st.verifyBadTexels.load()),
+          static_cast<unsigned long long>(st.verifyTexels.load()),
+          static_cast<unsigned long long>(st.verifySkipped.load()),
+          static_cast<unsigned long long>(st.verifyErrors.load()),
+          static_cast<unsigned long long>(st.verifyStateBad.load()),
+          static_cast<unsigned long long>(st.verifyExecs.load()));
+  }
+  if (!gbverify::g_lastFormats.empty() && (g_verify.load() || g_slot[0].st.verifyAb.load()))
+    Log("  gbuffer recorder %s verify: last captured targets: %s", label, gbverify::g_lastFormats.c_str());
+  if (g_verifyWhy) Log("  gbuffer recorder %s verify: last capture failure: %s", label, g_verifyWhy);
+  uint64_t rt = 0;
+  for (int k = 0; k < kSlots; ++k) rt += g_slot[k].st.rtReplays.load();
+  Log("  gbuffer recorder %s: render-target mip replays %.2f/frame (%s); texture classes the table refused (since "
+      "start): %s",
+      label, rt / f, shrec::g_innerRt ? "class supported" : "class not supported", shrec::CensusText(g_census).c_str());
+}
+
+
+// ---------------------------------------------------------------------------
+// Drawn-stock reasons between two snapshots (view profile lines)
+// ---------------------------------------------------------------------------
+struct StockSnap {
+  uint64_t passes = 0;
+  uint64_t pass[kPassReasons] = {};
+  uint64_t seg[kSegReasons] = {};
+  uint64_t item[kReasons] = {};
+  uint64_t late[kSlots] = {};
+  uint64_t lateN[kSlots] = {};
+  int64_t latePass[kSlots] = {}, lateStart[kSlots] = {}, lateBuilt[kSlots] = {}, lateDone[kSlots] = {};
+  uint64_t tlN[kSlots] = {};
+  int64_t tlPass[kSlots] = {}, tlDone[kSlots] = {};
+  uint64_t redoPlanned = 0, redoExecuted = 0, redoLate = 0, redoFail = 0, swapsAhead = 0, redoNs = 0, slackJobs = 0;
+  shrec::LoadSnap load;
+};
+
+StockSnap TakeStock() {
+  StockSnap s;
+  const auto rl = std::memory_order_relaxed;
+  for (int k = 0; k < kSlots; ++k) {
+    const Stat& st = g_slot[k].st;
+    s.passes += st.passes.load(rl);
+    for (int r = 0; r < kPassReasons; ++r) s.pass[r] += st.passReason[r].load(rl);
+    for (int r = 0; r < kSegReasons; ++r) s.seg[r] += st.segReason[r].load(rl);
+    for (int r = 0; r < kReasons; ++r) s.item[r] += st.itemReason[r].load(rl);
+    s.late[k] = st.passReason[kPLate].load(rl);
+    s.lateN[k] = st.lateSamples.load(rl);
+    s.latePass[k] = st.latePass.load(rl);
+    s.lateStart[k] = st.lateStart.load(rl);
+    s.lateBuilt[k] = st.lateBuilt.load(rl);
+    s.lateDone[k] = st.lateDone.load(rl);
+    s.tlN[k] = st.tlSamples.load(rl);
+    s.tlPass[k] = st.tlPass.load(rl);
+    s.tlDone[k] = st.tlDone.load(rl);
+    s.redoPlanned += st.redoPlanned.load(rl);
+    s.redoExecuted += st.redoExecuted.load(rl);
+    s.redoLate += st.redoLate.load(rl);
+    s.redoFail += st.redoFail.load(rl);
+    s.swapsAhead += st.swapsAhead.load(rl);
+    s.redoNs += st.redoNs.load(rl);
+    s.slackJobs += st.slackJobs.load(rl);
+  }
+  s.load = shrec::TakeLoad(g_load);
+  return s;
+}
+
+// Per frame: scoped executions drawn stock by reason (late per slot), segments
+// drawn stock in executed passes, and the residual items' top reasons.
+std::string StockText(const StockSnap& a, const StockSnap& b, double frames) {
+  const double f = frames > 0 ? frames : 1.0;
+  char buf[256];
+  snprintf(buf, sizeof(buf), "executions %.2f/frame, executed %.2f; late by slot %.2f %.2f %.2f %.2f; stock: ",
+           (b.passes - a.passes) / f, (b.pass[kPExecuted] - a.pass[kPExecuted]) / f, (b.late[0] - a.late[0]) / f,
+           (b.late[1] - a.late[1]) / f, (b.late[2] - a.late[2]) / f, (b.late[3] - a.late[3]) / f);
+  std::string s = buf;
+  s += shrec::ReasonList(kPassReasonName, a.pass, b.pass, kPassReasons, 1, frames, 6);
+  s += "; segments stock: ";
+  s += shrec::ReasonList(kSegReasonName, a.seg, b.seg, kSegReasons, 1, frames, 4);
+  snprintf(buf, sizeof(buf),
+           "; re-recorded segments %.2f planned, %.2f executed, %.2f not ready, %.2f failed; swaps ahead %.2f; "
+           "planning %.3f ms; jobs with slack settings %.2f",
+           (b.redoPlanned - a.redoPlanned) / f, (b.redoExecuted - a.redoExecuted) / f, (b.redoLate - a.redoLate) / f,
+           (b.redoFail - a.redoFail) / f, (b.swapsAhead - a.swapsAhead) / f, (b.redoNs - a.redoNs) / (1e6 * f),
+           (b.slackJobs - a.slackJobs) / f);
+  s += buf;
+  s += "; residual items: ";
+  s += shrec::ReasonList(kReasonName, a.item, b.item, kReasons, 2, frames, 4);  // not a model item: never
+  // Per slot from the render entry (ms): jobs in time (done, pass) and late jobs (pass, start, built, done).
+  for (int k = 0; k < kSlots; ++k) {
+    const uint64_t n = b.tlN[k] - a.tlN[k], m = b.lateN[k] - a.lateN[k];
+    if (n) {
+      snprintf(buf, sizeof(buf), "; slot %d in time (%llu): done %.2f, pass %.2f", k, static_cast<unsigned long long>(n),
+               (b.tlDone[k] - a.tlDone[k]) / (1e6 * n), (b.tlPass[k] - a.tlPass[k]) / (1e6 * n));
+      s += buf;
+    }
+    if (m) {
+      const double d = 1e6 * m;
+      snprintf(buf, sizeof(buf), "; slot %d late (%llu): pass %.2f, start %.2f, built %.2f, done %.2f", k,
+               static_cast<unsigned long long>(m), (b.latePass[k] - a.latePass[k]) / d,
+               (b.lateStart[k] - a.lateStart[k]) / d, (b.lateBuilt[k] - a.lateBuilt[k]) / d,
+               (b.lateDone[k] - a.lateDone[k]) / d);
+      s += buf;
+    }
+  }
+  s += "; ";
+  s += shrec::LoadText(a.load, b.load, frames, g_tscHz);
+  return s;
+}
+}  // namespace gbrec

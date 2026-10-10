@@ -1,4 +1,4 @@
-// DCS VR Control prefetch fix.
+// DCS Control prefetch fix.
 //
 // DCS's terrain workers (edterrain4 through edCore) call PrefetchVirtualMemory in a tight loop over the same
 // ranges: about 840k calls/s, 1.7 CPU cores of kernel time in measurements. Prefetching is only a hint to the
@@ -10,10 +10,11 @@
 // data and their GetProcAddress import, never instructions. Modules outside the game's install folder (Windows,
 // runtimes, overlays, antivirus hooks) are never touched.
 //
-// Environment (set per process by DCS VR Control's launch):
-//   DCSVR_PREFETCH_MODE  off (default) | observe | skip
-//   DCSVR_PREFETCH_LOG   statistics file, appended every 10 s
-//   DCSVR_PREFETCH_WINDOW_MS  repeat window, default 1000
+// Settings, so the fix also works when DCS is started without DCS Control (Steam, a desktop shortcut):
+//   DcsControlPrefetchFix.ini next to this DLL, section [PrefetchFix], written when the profile is applied:
+//     Mode=off (default) | observe | skip,  WindowMs=repeat window (default 1000),  Log=statistics file (every 10 s)
+//   The environment of a DCS Control launch overrides each of them when set:
+//     DCSVR_PREFETCH_MODE, DCSVR_PREFETCH_WINDOW_MS, DCSVR_PREFETCH_LOG
 #include <windows.h>
 #include <psapi.h>
 
@@ -243,18 +244,36 @@ DWORD WINAPI worker(void*) {
     }
 }
 
+// One setting: the launch environment when it has it, otherwise DcsControlPrefetchFix.ini next to this DLL.
+bool setting(const wchar_t* variable, const wchar_t* key, const wchar_t* ini, wchar_t* out, DWORD size) {
+    const DWORD n = GetEnvironmentVariableW(variable, out, size);
+    if (n > 0 && n < size) return true;
+    if (!ini[0]) return false;
+    const DWORD m = GetPrivateProfileStringW(L"PrefetchFix", key, L"", out, size, ini);
+    return m > 0 && m < size - 1;
+}
+
 void configure() {
+    wchar_t ini[MAX_PATH]{};
+    HMODULE self = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&configure), &self)) {
+        const DWORD length = GetModuleFileNameW(self, ini, ARRAYSIZE(ini));
+        wchar_t* slash = length && length < ARRAYSIZE(ini) ? wcsrchr(ini, L'\\') : nullptr;
+        if (slash && wcslen(ini) + 32 < ARRAYSIZE(ini)) wcscpy_s(slash + 1, ARRAYSIZE(ini) - (slash + 1 - ini), L"DcsControlPrefetchFix.ini");
+        else ini[0] = 0;
+        if (ini[0] && GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) ini[0] = 0;
+    }
     wchar_t value[64]{};
-    if (GetEnvironmentVariableW(L"DCSVR_PREFETCH_MODE", value, ARRAYSIZE(value))) {
+    if (setting(L"DCSVR_PREFETCH_MODE", L"Mode", ini, value, ARRAYSIZE(value))) {
         if (_wcsicmp(value, L"skip") == 0) g_mode = Mode::Skip;
         else if (_wcsicmp(value, L"observe") == 0) g_mode = Mode::Observe;
     }
-    if (GetEnvironmentVariableW(L"DCSVR_PREFETCH_WINDOW_MS", value, ARRAYSIZE(value))) {
+    if (setting(L"DCSVR_PREFETCH_WINDOW_MS", L"WindowMs", ini, value, ARRAYSIZE(value))) {
         const auto ms = wcstoull(value, nullptr, 10);
         if (ms >= 1 && ms <= 60000) g_window_ms = ms;
     }
-    const DWORD n = GetEnvironmentVariableW(L"DCSVR_PREFETCH_LOG", g_log, ARRAYSIZE(g_log));
-    if (n == 0 || n >= ARRAYSIZE(g_log)) g_log[0] = 0;
+    if (!setting(L"DCSVR_PREFETCH_LOG", L"Log", ini, g_log, ARRAYSIZE(g_log))) g_log[0] = 0;
     // Install folder: the parent of the executable's folder (DCSWorld\ for DCSWorld\bin\DCS.exe).
     const DWORD length = GetModuleFileNameW(nullptr, g_install_root, ARRAYSIZE(g_install_root));
     wchar_t* slash = length && length < ARRAYSIZE(g_install_root) ? wcsrchr(g_install_root, L'\\') : nullptr;

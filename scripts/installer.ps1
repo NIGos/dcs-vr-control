@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Install','Uninstall','Verify')][string]$Action = 'Install',
-    [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Programs/DcsVrControl'),
+    [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Programs/DcsControl'),
     [switch]$NoShortcut,
     [switch]$InstallPrerequisites
 )
@@ -49,16 +49,25 @@ if ($needsCpp -and -not $InstallPrerequisites) { Write-Output 'Visual C++ x64 ru
 & (Join-Path $payloadRoot 'DcsVr.Cli.exe') $command --source $payloadRoot --destination $installRoot
 if ($LASTEXITCODE -ne 0) { throw 'Application deployment failed. Review the error above; recovery backups are retained.' }
 if ($NoShortcut -or $Action -eq 'Verify') { exit 0 }
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'DCS VR Control.lnk'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'DCS Control.lnk'
 $shell = New-Object -ComObject WScript.Shell
 if ($Action -eq 'Install') {
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = Join-Path $installRoot 'DcsVrControl.exe'
-    $shortcut.IconLocation = (Join-Path $installRoot 'DcsVrControl.exe') + ',0'
+    $shortcut.TargetPath = Join-Path $installRoot 'DcsControl.exe'
+    $shortcut.IconLocation = (Join-Path $installRoot 'DcsControl.exe') + ',0'
     $shortcut.WorkingDirectory = $installRoot
     $shortcut.Save()
-    Write-Output "Installed DCS VR Control in $installRoot. No game or VR driver settings changed."
+    Write-Output "Installed DCS Control in $installRoot. No game or VR driver settings changed."
+    # DCS Control was called DCS VR Control before 0.5.0: its default install and Start menu entry are replaced by this
+    # one. Only that app's own files go (its uninstaller checks each one); your DCS backups and profiles are kept.
+    $earlierRoot = Join-Path $env:LOCALAPPDATA 'Programs/DcsVrControl'
+    if ($installRoot -ne [IO.Path]::GetFullPath($earlierRoot).TrimEnd('\','/') -and (Test-Path -LiteralPath (Join-Path $earlierRoot 'installation.json'))) {
+        & (Join-Path $payloadRoot 'DcsVr.Cli.exe') app-uninstall --destination $earlierRoot
+        if ($LASTEXITCODE -eq 0) { Write-Output "Removed the earlier DCS VR Control installation from $earlierRoot." } else { Write-Output "The earlier DCS VR Control installation in $earlierRoot was left in place; remove it from there if you no longer need it." }
+    }
+    $earlierShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'DCS VR Control.lnk'
+    if (Test-Path -LiteralPath $earlierShortcut) { Remove-Item -LiteralPath $earlierShortcut }
 } elseif (Test-Path -LiteralPath $shortcutPath) {
-    if ($shell.CreateShortcut($shortcutPath).TargetPath -eq (Join-Path $installRoot 'DcsVrControl.exe')) { Remove-Item -LiteralPath $shortcutPath }
+    if ($shell.CreateShortcut($shortcutPath).TargetPath -eq (Join-Path $installRoot 'DcsControl.exe')) { Remove-Item -LiteralPath $shortcutPath }
     Write-Output 'Owned application files removed. Game-mod backup state is retained.'
 }

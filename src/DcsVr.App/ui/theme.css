@@ -88,6 +88,13 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 
 /* Pipeline: three status tiles at the top of Flight setup */
 .pipeline{gap:10px;margin-bottom:20px}
+/* Overview tiles in two groups, one row each: the optimizations for every pilot (2), then the VR features (3). */
+.pipeline{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.stage-group{display:grid;gap:6px;min-width:0}
+.stage-group-label{font:700 10px var(--display);letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)}
+.stage-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch}
+.stage-row.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.feature-group{font:700 10px var(--display);letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);margin:2px 0 -2px}
 .stage{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius);padding:12px 14px;transition:background .14s,border-color .14s}
 .stage:hover{background:var(--s1);border-color:var(--line-strong)}
 .stage>span{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font:600 10px var(--display);letter-spacing:1px;gap:8px}
@@ -332,9 +339,9 @@ dialog::backdrop{background:#000000b0}
 .setup-feature small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
 .setup-feature em{display:block;font-style:normal;font-size:11.5px;margin-top:6px;padding:5px 8px;border-radius:3px;background:#22313a;color:var(--soft)}
 .setup-feature em.needs{background:var(--accent-dim)}
-@media(max-width:1180px){.pipeline{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1180px){.stage-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:760px){.setup-features{grid-template-columns:1fr}}
-@media(max-width:900px){.pipeline{grid-template-columns:1fr}}
+@media(max-width:900px){.stage-row,.stage-row.two{grid-template-columns:1fr}}
 /* The version lives at the foot of the rail. Motion follows Windows' own setting (prefers-reduced-motion). */
 .rail-foot{display:flex;flex-direction:column;align-items:center;gap:8px;margin-top:8px;padding-top:10px;border-top:1px solid #ffffff10}
 .rail-foot .rail-version{margin:0;padding:0;font:10px Consolas,monospace;color:var(--faint)}

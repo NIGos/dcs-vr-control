@@ -63,7 +63,7 @@ if (-not (Test-Path -LiteralPath $openvrHeader)) {
 }
 if ((Get-FileHash -LiteralPath $openvrHeader -Algorithm SHA256).Hash -ne $openvrSha256) { throw 'openvr.h hash mismatch.' }
 # The fork fixes the DCS second-thread xrWaitFrame deadlock itself, and defer_until_submitted is not
-# ported. DCS VR Control's own changes (the in-headset diagnostic panel) are kept as source patches in
+# ported. DCS Control's own changes (the in-headset diagnostic panel) are kept as source patches in
 # patches/ofxr-djules75 (LGPL: the corresponding-source package carries them) and applied here in name
 # order to the pinned checkout. A patch that is already applied is left as it is, so re-running is safe;
 # a checkout that matches neither state stops the build. Restore a clean checkout with

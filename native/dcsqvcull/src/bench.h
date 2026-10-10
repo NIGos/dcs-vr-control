@@ -221,6 +221,7 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 26 ? "bench: mode direct upload, OFF = stock memcpy upload, ON = model data written into mapped pages"
         : mode == 27 ? "bench: mode split-path D3D11 state filter, OFF = stock (no patch or hook), ON = redundant state calls skipped at the dx11backend sites"
         : mode == 28 ? "bench: mode shadow recorder, OFF = DCS draws every caster, ON = recorded casters from a worker's command list"
+        : mode == 29 ? "bench: mode g-buffer recorder, OFF = DCS draws every item, ON = recorded G-buffer draws from command lists"
                     : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
@@ -306,6 +307,7 @@ bool RunBenchmark(int mode, bool beeps) {
   if (mode == 26) ApplyDirectUpload(g_cfg.directUpload && !g_engineOff.load());
   if (mode == 27) ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
   if (mode == 28) ApplyShadowRecorder();
+  if (mode == 29) ApplyGBufferRecorder();
   if (mode == 23) ApplyGBufferBatch();
   if (mode == 19) {
     g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
@@ -368,6 +370,7 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 26 ? "direct upload into mapped GPU pages"
             : mode == 27 ? "split-path D3D11 state filter"
             : mode == 28 ? "shadow recorder (R17 S3)"
+            : mode == 29 ? "g-buffer recorder (R18 S3)"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

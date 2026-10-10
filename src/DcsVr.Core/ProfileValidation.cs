@@ -6,7 +6,7 @@ public static class ProfileValidation
     /// helper), DCS itself, and core Windows processes: CPU Boost never moves or closes them, whatever pattern matches.</summary>
     public static IReadOnlySet<string> BoostProtectedProcesses { get; } = new HashSet<string>(
     [
-        "steam", "explorer", "EpicGamesLauncher", "DCS", "DCS_updater", "DcsVrControl", "DcsVr.Cli",
+        "steam", "explorer", "EpicGamesLauncher", "DCS", "DCS_updater", "DcsControl", "DcsVrControl", "DcsVr.Cli",
         "csrss", "winlogon", "dwm", "svchost", "lsass", "services", "wininit", "smss", "System", "Idle",
         "System Idle Process", "Registry", "Memory Compression", "fontdrvhost", "audiodg"
     ], StringComparer.OrdinalIgnoreCase);

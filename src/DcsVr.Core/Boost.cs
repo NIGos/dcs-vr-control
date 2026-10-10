@@ -3,7 +3,7 @@ namespace DcsVr.Core;
 /// <summary>Parsed <c>DcsVr.Cli boost</c> command line. Pure, so the parser is unit-testable.</summary>
 /// <param name="ProfilePath">Explicit profile JSON to boost for; when null the applied profile under the state root is used.</param>
 /// <param name="DcsPid">A specific DCS PID to attach to instead of discovering it.</param>
-/// <param name="StateRoot">Override for the DcsVrControl state root (applied profile, status folder).</param>
+/// <param name="StateRoot">Override for the DcsControl state root (applied profile, status folder).</param>
 /// <param name="DcsExecutable">The DCS.exe that was launched (launch.json). Used to find DCS again when the hinted PID
 /// exits, e.g. when the Steam edition restarts itself.</param>
 /// <param name="DcsLog">The dcs.log next to the applied options.lua, read for the CPU ranking.</param>
@@ -114,7 +114,7 @@ public sealed class BoostLedger
         string.Equals(change.Name, name, StringComparison.OrdinalIgnoreCase) && change.StartTicks == startTicks;
 }
 
-/// <summary>Status CPU Boost writes to <c>%LOCALAPPDATA%\DcsVrControl\boost\status.json</c> for the app to read later.</summary>
+/// <summary>Status CPU Boost writes to <c>%LOCALAPPDATA%\DcsControl\boost\status.json</c> for the app to read later.</summary>
 public sealed record BoostStatus
 {
     public int SchemaVersion { get; init; } = 1;

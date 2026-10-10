@@ -1,4 +1,4 @@
-// DCS VR Control: the bundled Quad Views composition, as built by
+// DCS Control: the bundled Quad Views composition, as built by
 // scripts/build-quadviews.ps1, against the same shaders without our
 // performance edits (the early out of the composition and the sharpening's
 // skipped tiles). Every pixel of the composited image must be identical, for

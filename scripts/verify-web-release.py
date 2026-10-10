@@ -14,13 +14,13 @@ parser.add_argument('--manager', required=True)
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
 version = product_version()
-release = root / f'artifacts/release/DcsVrControl-{version}-win-x64'
+release = root / f'artifacts/release/DcsControl-{version}-win-x64'
 result = {'version': version, 'passed': True, 'actualDcsLaunched': False}
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
-for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'artifacts/release/DcsVrControl-{version}-sources.zip')]:
+for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'artifacts/release/DcsControl-{version}-sources.zip')]:
     with zipfile.ZipFile(archive) as z:
         assert z.testzip() is None, 'Archive CRC failed'
         assert not any(n.lower().endswith('nvngx_dlssnr.dll') for n in z.namelist()), 'Neural runtime must not be bundled'

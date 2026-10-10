@@ -240,6 +240,10 @@ public sealed record VrProfile
     /// contexts) instead of DCS's render thread; cascade 1 stays as DCS draws it. Verified texel-identical live;
     /// measured +3 to +5 % FPS, p95 −4 to −7 %, at 4-7 % more total CPU and about 30 MB of memory.</summary>
     public bool EngineShadowRecorder { get; init; } = true;
+    /// <summary>[Model] GBufferRecorder: DCS's G-buffer model draws are recorded on worker threads (D3D11 deferred
+    /// contexts) in DCS's exact order and replayed by DCS; segments whose textures changed are recorded again. Verified
+    /// pixel-identical live; measured +22 to +24 % FPS on its own, at about 12 more worker threads.</summary>
+    public bool EngineGBufferRecorder { get; init; } = true;
     /// <summary>[Model] PlainTriangleCounter: a statistics-only triangle counter updated without a locked instruction.</summary>
     public bool EnginePlainCounter { get; init; } = true;
     /// <summary>[Timing] CacheUs: how often the cached time is refreshed, in microseconds.</summary>

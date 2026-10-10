@@ -41,6 +41,17 @@ int DcsQv_ContextSlot(const char* name) {
       {"SwapDeviceContextState", SLOT(SwapDeviceContextState)},
       {"SOSetTargets", SLOT(SOSetTargets)},
       {"FinishCommandList", SLOT(FinishCommandList)},
+      {"CopyResource", SLOT(CopyResource)},
+      {"CopySubresourceRegion", SLOT(CopySubresourceRegion)},
+      {"ResolveSubresource", SLOT(ResolveSubresource)},
+      {"UpdateSubresource", SLOT(UpdateSubresource)},
+      {"ClearRenderTargetView", SLOT(ClearRenderTargetView)},
+      {"ClearDepthStencilView", SLOT(ClearDepthStencilView)},
+      {"ClearUnorderedAccessViewUint", SLOT(ClearUnorderedAccessViewUint)},
+      {"ClearUnorderedAccessViewFloat", SLOT(ClearUnorderedAccessViewFloat)},
+      {"GenerateMips", SLOT(GenerateMips)},
+      {"Dispatch", SLOT(Dispatch)},
+      {"DispatchIndirect", SLOT(DispatchIndirect)},
   };
   for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     const char* a = table[i].n;

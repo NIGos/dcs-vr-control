@@ -107,11 +107,19 @@ inline uint32_t FastTick() {
   return g_tscPerMs > 0 ? static_cast<uint32_t>(__rdtsc() / g_tscPerMs) : 0;
 }
 
+// Requests that reached dx11backend through the fast path (not skipped as a
+// repeat): a plain add on the render thread, read as differences by the
+// suite's YawProfile / RotationProfile (view_profile.h).
+uint64_t g_passed = 0;
+
 uint64_t __fastcall Hook(void* tex, uint64_t packedSize) {
   if (g_measure.load(std::memory_order_relaxed)) return HookMeasured(tex, packedSize);
   const int32_t w = static_cast<int32_t>(packedSize);
   const int32_t h = static_cast<int32_t>(packedSize >> 32);
-  if (static_cast<int16_t>(w) != w || static_cast<int16_t>(h) != h) return g_orig(tex, packedSize);
+  if (static_cast<int16_t>(w) != w || static_cast<int16_t>(h) != h) {
+    ++g_passed;
+    return g_orig(tex, packedSize);
+  }
   const uint32_t size = static_cast<uint16_t>(w) | static_cast<uint32_t>(static_cast<uint16_t>(h)) << 16;
   const uint32_t tick = FastTick();
   FastEntry& e = g_fast[((reinterpret_cast<uint64_t>(tex) >> 4) ^ (size * 0x9E3779B1u)) & 4095];
@@ -119,6 +127,7 @@ uint64_t __fastcall Hook(void* tex, uint64_t packedSize) {
   e.tex = tex;
   e.size = size;
   e.tick = tick;
+  ++g_passed;
   return g_orig(tex, packedSize);
 }
 

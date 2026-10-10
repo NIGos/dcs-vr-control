@@ -56,7 +56,7 @@ public static class Readiness
         try
         {
             if (inventory.DcsExecutable is { } exe && File.Exists(exe)) LaunchSafety.EnsureNotElevated(exe);
-            else if (LaunchSafety.CurrentProcessElevated) throw new InvalidOperationException("DCS VR Control is running as administrator. Reopen it without administrator rights.");
+            else if (LaunchSafety.CurrentProcessElevated) throw new InvalidOperationException("DCS Control is running as administrator. Reopen it without administrator rights.");
             Add("elevation", CheckState.Pass, "Standard user launch", "DCS starts without administrator rights, so the OpenXR loader honours the profile runtime and layers.");
         }
         catch (InvalidOperationException e) { Add("elevation", CheckState.Error, "Standard user launch", e.Message); }

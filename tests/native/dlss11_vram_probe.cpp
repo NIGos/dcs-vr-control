@@ -1,5 +1,5 @@
 // Measures the VRAM of one DX11 DLSS SR feature exactly as DCS creates it for a
-// Quad Views view (DCS VR Control "Feature ledger" / deferred DX11 feature).
+// Quad Views view (DCS Control "Feature ledger" / deferred DX11 feature).
 // Offscreen: NVIDIA hardware D3D11 device, the installed NGX core, the game's
 // DLSS snippet directory as feature path. Process-local VRAM (QueryVideoMemoryInfo
 // CurrentUsage) is sampled around create, first evaluate and release.

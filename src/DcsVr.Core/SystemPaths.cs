@@ -109,7 +109,7 @@ internal static class SystemPaths
 
 /// <summary>
 /// Detects a process whose writes under %LOCALAPPDATA% Windows redirects to a packaged app's private folder
-/// (%LOCALAPPDATA%\Packages\&lt;package&gt;\LocalCache\Local): DCS VR Control started from inside such an app (or its
+/// (%LOCALAPPDATA%\Packages\&lt;package&gt;\LocalCache\Local): DCS Control started from inside such an app (or its
 /// sandboxed shell) would keep its originals in a private copy that the normal app never sees, while the DCS files
 /// themselves are shared. That split is how two "applied" profiles and files "already existing" without an owner came
 /// about. The check writes and removes one empty probe file.
@@ -140,5 +140,5 @@ public static class AppDataRedirection
         finally { try { File.Delete(probe); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } }
     }
 
-    public const string Message = "DCS VR Control was started inside another app's sandbox (Windows redirects its %LOCALAPPDATA% to {0}). Its record of original files would go to a private copy that the normal app never sees, while the DCS files are shared. Start DCS VR Control from the Start menu or Explorer instead.";
+    public const string Message = "DCS Control was started inside another app's sandbox (Windows redirects its %LOCALAPPDATA% to {0}). Its record of original files would go to a private copy that the normal app never sees, while the DCS files are shared. Start DCS Control from the Start menu or Explorer instead.";
 }

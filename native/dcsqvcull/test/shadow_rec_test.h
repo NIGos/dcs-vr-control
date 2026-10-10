@@ -1269,6 +1269,8 @@ void DeviceTests(Compiler& comp) {
     j->vp[0] = kVpFull;
     j->nsc = 0;
     j->b7 = d.ourB7;
+    j->pool[15] = d.samp;  // DCS's pool: the textured PS's sampler at s15
+    j->pool[15]->AddRef();
     j->startState.store(kStartArmed);
     const bool sub = pool.Submit(0, &JobMain, j, nullptr);
     const bool started = StartJob(*j, j->vec, false) && !StartJob(*j, j->vec, false);  // the first start wins
@@ -1383,6 +1385,9 @@ uint32_t CountReason(const Job& j, int r) {
   for (size_t i = 0; i < j.n; ++i) n += j.reason[i] == r;
   return n;
 }
+
+int g_vt18Calls = 0;
+void __fastcall FakeVt18(void*) { ++g_vt18Calls; }
 
 void TextureJobTests() {
   TexFakes fakes;
@@ -1567,6 +1572,71 @@ void TextureJobTests() {
   FinishJob(*j, false);
   Check(CountReason(*j, kRTexView) == tex && j->recorded > 0 && j->texRecorded == 0,
         "shadow rec S4: no snapshot -> textured casters residual");
+  // Texture table (production): stage A takes the read views from the table's
+  // entries (no snapshot); misses are built by the render thread after the
+  // pass; the exec check compares the entries with the live textures.
+  {
+    TexTable tab;
+    AllocTex(tab, 64);
+    j->tex = &tab;
+    j->useGen = 5;
+    BuildJob(*j);
+    ResolveTexKeys(*j);
+    bool tb = j->resolved && j->missCount == 3;  // the three Diffuse textures; Specular needs no view
+    for (uint32_t k = 0; k < j->missCount; ++k) {
+      bool fresh = false;
+      TexEntry* e = TexInsert(tab, j->misses[k].tex, j->misses[k].aux, j->misses[k].type, &fresh);
+      tb = tb && e && fresh && TexBuildRaw(w->env.tex, *e) == kTwOk;
+      if (e) e->dirty.store(0);
+    }
+    BuildJob(*j);
+    ResolveTexKeys(*j);
+    FinishJob(*j, true);
+    tb = tb && j->missCount == 0 && j->refreshCount == 0 && j->texRecorded == tex;
+    for (uint32_t r = 0; r < j->recCount; ++r) {
+      const Rec& rc = j->recs[r];
+      if (!rc.setCount || !rc.alive) continue;
+      tb = tb && static_cast<void*>(rc.psView[0]) ==
+                     static_cast<void*>(static_cast<IUnknown*>(&fv[World::DiffuseOf(static_cast<int>(rc.caster))]));
+    }
+    for (int tt = 0; tt < 3; ++tt) tb = tb && fv[tt].refs == 2;  // the table's references only
+    tb = tb && CheckTexturesRaw(*j) == kPExecuted;
+    w->SetView(1, static_cast<IUnknown*>(&fv[4]));
+    const TexEntry* e1 = TexFind(tab, w->tex[1], 0, j->texKeys[0].type);
+    tb = tb && CheckTexturesRaw(*j) == kPTexture && e1 && e1->dirty.load() == 1;
+    w->SetView(1, static_cast<IUnknown*>(&fv[1]));
+    if (e1) const_cast<TexEntry*>(e1)->dirty.store(0);  // as its rebuild would leave it
+    // A render-target texture (unread Specular here): accepted once its class is
+    // known; slot 26's vt[18] is replayed at the exec entry.
+    void* rtVt[12] = {};
+    g_vt18Calls = 0;
+    w->texVt[18] = reinterpret_cast<void*>(&FakeVt18);
+    void* inner3 = *reinterpret_cast<void**>(w->inner[3]);
+    *reinterpret_cast<void**>(w->inner[3]) = rtVt;
+    const bool refused = !TexClassOk(w->env.tex, w->tex[3]);
+    const void* was = g_innerRt;
+    g_innerRt = rtVt;
+    BuildJob(*j);
+    ResolveTexKeys(*j);
+    FinishJob(*j, true);
+    uint32_t calls = 0;
+    tb = tb && refused && TexClassOk(w->env.tex, w->tex[3]) && j->texRecorded == tex &&
+         ReplayRtGuarded(*j, &calls) && calls == 1 && g_vt18Calls == 1;
+    TexEntry probe;
+    probe.tex = w->tex[3];
+    probe.aux = 0;
+    probe.type = j->texKeys[0].type;
+    tb = tb && TexBuildRaw(w->env.tex, probe) == kTwOk && probe.rt == 1;
+    TexReleaseViews(probe);
+    g_innerRt = was;
+    *reinterpret_cast<void**>(w->inner[3]) = inner3;
+    w->texVt[18] = nullptr;
+    j->tex = nullptr;
+    FreeTex(tab);
+    for (int tt = 0; tt < kTex; ++tt) tb = tb && fv[tt].refs == 1;
+    Check(tb, "shadow rec texture table: read views from the table without a snapshot, misses built after the pass, "
+              "a changed view caught at exec; a render-target texture accepted with its vt[18] replayed");
+  }
   FreeJob(j);
   FreeTables(t);  // releases the fake PS
   delete w;
@@ -1629,13 +1699,25 @@ void DeviceMultiTests(Compiler& comp) {
   ExecObj exec[4] = {};
   bool started = pool.Start(d.dev, pc) && pool.At(0).ring.Mode() == defrec::CbMode::kOffsets;
   for (int c = 0; c < 4 && started; ++c) started = (jobs[c] = NewJob()) != nullptr;
+  TexTable stab;
+  SRWLOCK stabLock = SRWLOCK_INIT;
+  AllocTex(stab, 64);
   if (!started) {
     printf("SKIP shadow rec S5 device: no workers with constant-buffer offsets on this device\n");
   } else {
     bool sub = true;
+    // The texture table as the render thread leaves it (production path: no snapshot).
+    for (int tx = 0; tx < kTex; ++tx) {
+      bool fresh = false;
+      TexEntry* e = TexInsert(stab, w->tex[tx], 0, 7, &fresh);
+      if (e) TexBuildRaw(w->env.tex, *e);
+      if (e) e->dirty.store(0);
+    }
     for (int c = 0; c < 4; ++c) {
       Job& j = *jobs[c];
       InitJob(j, *w, t);
+      j.tex = &stab;
+      j.texLock = &stabLock;
       j.vec = nullptr;  // given by the sort hook below
       j.armRg = fakeRg;
       j.armIdx = c;
@@ -1647,13 +1729,16 @@ void DeviceMultiTests(Compiler& comp) {
       j.nvp = 1;
       j.vp[0] = kVpFull;
       j.b7 = d.ourB7C[c];
+      ReleasePool(j.pool);  // DCS's pool: the textured PS's sampler at s15
+      j.pool[15] = d.samp;
+      j.pool[15]->AddRef();
       exec[c] = {nullptr, c};
       j.execObj = &exec[c];
       j.offBuf[0] = d.offBuf[c];
       j.offSrv[0] = d.offSrv[c];
       j.offBuf[1] = d.offBuf[c + 4];
       j.offSrv[1] = d.offSrv[c + 4];
-      j.splitAllowed = c >= 2;  // cascades 2, 3 may split their textured groups (only 3 has any)
+      j.splitAllowed = c >= 2;  // cascades 2, 3 share their groups with a helper (only 3 has textured ones)
       j.minSplit = 2;
       ResetEvent(j.start);
       ResetEvent(j.go);
@@ -1662,6 +1747,7 @@ void DeviceMultiTests(Compiler& comp) {
       if (j.splitAllowed) sub &= pool.Submit(c + 4, &HelperMain, &j, nullptr);
       sub &= pool.Submit(c, &JobMain, &j, nullptr);
     }
+    g_testP1Wait = true;  // the helpers take a share of the untextured groups (deterministic)
     // Scene's sort finishing each collection (pass order c3..c0) starts its job;
     // another collection's vector starts nothing.
     g_on = false;  // off: Scene's sorts start nothing
@@ -1684,6 +1770,7 @@ void DeviceMultiTests(Compiler& comp) {
       if (j.stageA.load() && j.needGo) TakeSnapshot(j);
     }
     pool.Wait(10000);  // false when a helper had nothing to record: check the workers instead
+    g_testP1Wait = false;
     bool waited = sub;
     for (int c = 0; c < 8; ++c) waited &= !pool.Busy(c);
     ID3D11CommandList* cl[4] = {};
@@ -1752,10 +1839,13 @@ void DeviceMultiTests(Compiler& comp) {
     printf("     4 cascades: %u casters recorded (%u textured) in %u draws, %u split over a helper, %zu texels "
            "written, %zu differ\n",
            recorded, texRecorded, draws, split, written, diffs);
-    Check(allOk && texRecorded > 0 && draws < recorded && split == 1 && diffs == 0 &&
+    const bool p1 = jobs[2]->helperDrew && jobs[2]->drawsHelper > 0 && jobs[2]->texTo == jobs[2]->groupsTex &&
+                    jobs[3]->resolved && !jobs[3]->snapped;  // views from the table, no snapshot
+    Check(allOk && texRecorded > 0 && draws < recorded && split == 2 && p1 && diffs == 0 &&
               written > 4u * kDepth * kDepth / 100 && restored,
-          "shadow rec S5 device: four cascades on four workers, textured and untextured, DCS's loop over the exec "
-          "list: depth equals stock bit for bit; state restored");
+          "shadow rec S5 device: four cascades on four workers, textured and untextured (cascade 2's untextured and "
+          "cascade 3's groups shared with a helper), DCS's loop over the exec list: depth equals stock bit for bit; "
+          "state restored");
     Check(replayOk, "shadow rec S4 device: streaming requests reach the same textures as stock");
     for (auto*& l : cl) SafeRel(l);
     for (auto*& l : cl2) SafeRel(l);
@@ -1763,6 +1853,7 @@ void DeviceMultiTests(Compiler& comp) {
   g_instDev = nullptr;
   pool.Stop();
   for (Job*& j : jobs) FreeJob(j);
+  FreeTex(stab);
   FreeTables(t);
   Destroy(d);
   delete w;

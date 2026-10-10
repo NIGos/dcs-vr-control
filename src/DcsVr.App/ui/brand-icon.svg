@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DCS VR Control: aircraft in a focus reticle">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DCS Control: aircraft in a focus reticle">
   <defs><linearGradient id="tile" gradientUnits="userSpaceOnUse" x2="0" y2="512"><stop stop-color="#343434"/><stop offset="1" stop-color="#191919"/></linearGradient><linearGradient id="aircraft" gradientUnits="userSpaceOnUse" x2="0" y2="512"><stop stop-color="#ffbe55"/><stop offset="1" stop-color="#f5a01a"/></linearGradient></defs>
   
   <g fill="none" stroke="#ba7b25" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"><path d="M168 104H132Q104 104 104 132V168"/><path d="M344 104H380Q408 104 408 132V168"/><path d="M104 344V380Q104 408 132 408H168"/><path d="M408 344V380Q408 408 380 408H344"/></g>

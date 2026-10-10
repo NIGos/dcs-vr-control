@@ -200,6 +200,8 @@ struct Config {
   bool suiteSrvSpanCount = false;        // [Suite] SrvSpanCount (R15 F2: setShaderResources identical-tail counter)
   bool suiteJoinTailCount = false;       // [Suite] JoinTailCount (R15 F3: render-thread chunk tail at the culling join)
   bool suiteShadowRecCount = false;      // [Suite] ShadowRecCount (R17 S0: shadow recorder counters)
+  bool suiteGBufferRecCount = false;     // [Suite] GBufferRecCount (R18 S0: G-buffer recorder counters and gates)
+  bool suiteGpuPassTiming = false;       // [Suite] GpuPassTiming (gpu_pass_timing.h: GPU ms and context ops per pass)
   bool splitFilter = false;              // [D3D] SplitFilter (split_filter.h, R15 F5)
   uint32_t splitFilterOps = 0x4ff;       // [D3D] SplitFilterOps (sfilt::kDefaultOps: no blend, no depth)
   bool suiteSplitFilterVerify = false;   // [Suite] SplitFilterVerify
@@ -221,8 +223,23 @@ struct Config {
   bool gbufferBatch = false;            // [Model] GBufferBatching (gb_batch.h; needs ShadowInstancing)
   bool suiteGBufferInstVerify = false;  // [Suite] GBufferInstVerify
   bool suiteBenchGBufferInst = false;   // [Suite] BenchGBufferInst
+  bool gbufferRecorder = false;            // [Model] GBufferRecorder (gb_rec.h, R18 S1-S3)
+  uint32_t gbufferRecorderScope = 0x10004; // [Model] GBufferRecorderScope: bits 0-15 executions by ordinal, 16 A2C
+  int gbufferRecorderWaitUs = 300;         // [Model] GBufferRecorderWaitUs: render-thread wait for a job at the pass
+  int gbufferRecorderIsland = 30;          // [Model] GBufferRecorderIsland: shortest recorded run
+  int gbufferRecorderMaxSegments = 12;     // [Model] GBufferRecorderMaxSegments: lists per execution (1-16)
+  int gbufferRecorderHelpers = 2;          // [Model] GBufferRecorderHelpers: helper workers per job (0-2)
+  bool suiteGBufferRecVerify = false;      // [Suite] GBufferRecVerify
+  int suiteGBufferRecVerifySec = 6;        // [Suite] GBufferRecVerifySec
+  int suiteGBufferRecVerifyStride = 0;     // [Suite] GBufferRecVerifyStride: every N-th draw residual (R18 T10)
+  bool suiteBenchGBufferRecorder = false;  // [Suite] BenchGBufferRecorder (bench mode 29)
   int holdYawDeg = -1;               // [Suite] HoldYawDeg: constant view yaw for unattended runs (-1 = off)
   bool suiteYawScan = false;         // [Suite] YawScan: fps per held yaw, 0..345 in 15 deg steps
+  bool suiteYawProfile = false;      // [Suite] YawProfile: cost split and bound per held yaw (view_profile.h)
+  int suiteYawProfileStep = 30;      // [Suite] YawProfileStep: degrees between profiled yaws
+  bool suiteRotationProfile = false;  // [Suite] RotationProfile: cost split, transients and spikes while turning
+  int suiteRotationDegPerSec = 60;    // [Suite] RotationDegPerSec
+  int suiteRotationSeconds = 20;      // [Suite] RotationSeconds
   uint32_t bigPageBytes = 4u << 20;  // [Model] BigPageBytes
   bool suiteBenchFrameHeap = false;     // [Suite] MotionProfile: CPU profile of the sweep's translation phase        // [Suite] Quick: configuration check + A/B only
   int suiteBenchFilter = 1;  // 1 = end-to-end A/B, 2 = also filter vs hooks
@@ -264,6 +281,7 @@ void ApplyShadowInst();
 void ApplyShadowBatch();
 void ApplyGBufferBatch();
 void ApplyShadowRecorder();
+void ApplyGBufferRecorder();
 void ApplyHoldYaw(int deg);
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
@@ -462,6 +480,8 @@ void LoadConfig(bool initial) {
   c.suiteSrvSpanCount = GetPrivateProfileIntW(L"Suite", L"SrvSpanCount", 0, ini.c_str()) != 0;
   c.suiteJoinTailCount = GetPrivateProfileIntW(L"Suite", L"JoinTailCount", 0, ini.c_str()) != 0;
   c.suiteShadowRecCount = GetPrivateProfileIntW(L"Suite", L"ShadowRecCount", 0, ini.c_str()) != 0;
+  c.suiteGBufferRecCount = GetPrivateProfileIntW(L"Suite", L"GBufferRecCount", 0, ini.c_str()) != 0;
+  c.suiteGpuPassTiming = GetPrivateProfileIntW(L"Suite", L"GpuPassTiming", 0, ini.c_str()) != 0;
   c.splitFilter = GetPrivateProfileIntW(L"D3D", L"SplitFilter", 0, ini.c_str()) != 0;
   {
     wchar_t ops[32];
@@ -501,8 +521,38 @@ void LoadConfig(bool initial) {
   c.gbufferBatch = GetPrivateProfileIntW(L"Model", L"GBufferBatching", 0, ini.c_str()) != 0;
   c.suiteGBufferInstVerify = GetPrivateProfileIntW(L"Suite", L"GBufferInstVerify", 0, ini.c_str()) != 0;
   c.suiteBenchGBufferInst = GetPrivateProfileIntW(L"Suite", L"BenchGBufferInst", 0, ini.c_str()) != 0;
+  c.gbufferRecorder = GetPrivateProfileIntW(L"Model", L"GBufferRecorder", 0, ini.c_str()) != 0;
+  {
+    wchar_t scope[32];
+    GetPrivateProfileStringW(L"Model", L"GBufferRecorderScope", L"0x10004", scope, 32, ini.c_str());
+    c.gbufferRecorderScope = static_cast<uint32_t>(wcstoul(scope, nullptr, 0)) & 0x1ffff;  // decimal or 0x hex
+  }
+  c.gbufferRecorderWaitUs = GetPrivateProfileIntW(L"Model", L"GBufferRecorderWaitUs", 300, ini.c_str());
+  if (c.gbufferRecorderWaitUs < 0) c.gbufferRecorderWaitUs = 0;
+  if (c.gbufferRecorderWaitUs > 20000) c.gbufferRecorderWaitUs = 20000;
+  c.gbufferRecorderIsland = GetPrivateProfileIntW(L"Model", L"GBufferRecorderIsland", 30, ini.c_str());
+  if (c.gbufferRecorderIsland < 1) c.gbufferRecorderIsland = 1;
+  if (c.gbufferRecorderIsland > 100000) c.gbufferRecorderIsland = 100000;
+  c.gbufferRecorderMaxSegments = GetPrivateProfileIntW(L"Model", L"GBufferRecorderMaxSegments", 12, ini.c_str());
+  if (c.gbufferRecorderMaxSegments < 1) c.gbufferRecorderMaxSegments = 1;
+  if (c.gbufferRecorderMaxSegments > 16) c.gbufferRecorderMaxSegments = 16;
+  c.gbufferRecorderHelpers = GetPrivateProfileIntW(L"Model", L"GBufferRecorderHelpers", 2, ini.c_str());
+  if (c.gbufferRecorderHelpers < 0) c.gbufferRecorderHelpers = 0;
+  if (c.gbufferRecorderHelpers > 2) c.gbufferRecorderHelpers = 2;
+  c.suiteGBufferRecVerify = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerify", 0, ini.c_str()) != 0;
+  c.suiteGBufferRecVerifySec = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifySec", 6, ini.c_str());
+  if (c.suiteGBufferRecVerifySec < 1) c.suiteGBufferRecVerifySec = 1;
+  if (c.suiteGBufferRecVerifySec > 120) c.suiteGBufferRecVerifySec = 120;
+  c.suiteGBufferRecVerifyStride = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyStride", 0, ini.c_str());
+  if (c.suiteGBufferRecVerifyStride < 0 || c.suiteGBufferRecVerifyStride == 1) c.suiteGBufferRecVerifyStride = 0;
+  c.suiteBenchGBufferRecorder = GetPrivateProfileIntW(L"Suite", L"BenchGBufferRecorder", 0, ini.c_str()) != 0;
   c.holdYawDeg = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"HoldYawDeg", -1, ini.c_str()));
   c.suiteYawScan = GetPrivateProfileIntW(L"Suite", L"YawScan", 0, ini.c_str()) != 0;
+  c.suiteYawProfile = GetPrivateProfileIntW(L"Suite", L"YawProfile", 0, ini.c_str()) != 0;
+  c.suiteYawProfileStep = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"YawProfileStep", 30, ini.c_str()));
+  c.suiteRotationProfile = GetPrivateProfileIntW(L"Suite", L"RotationProfile", 0, ini.c_str()) != 0;
+  c.suiteRotationDegPerSec = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"RotationDegPerSec", 60, ini.c_str()));
+  c.suiteRotationSeconds = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"RotationSeconds", 20, ini.c_str()));
   {
     const uint32_t v = GetPrivateProfileIntW(L"Model", L"BigPageBytes", 4 << 20, ini.c_str());
     c.bigPageBytes = v < (1u << 20) ? (1u << 20) : v > (64u << 20) ? (64u << 20) : v;
@@ -555,6 +605,7 @@ void LoadConfig(bool initial) {
   ApplyShadowBatch();
   ApplyGBufferBatch();
   ApplyShadowRecorder();
+  ApplyGBufferRecorder();
   ApplyHoldYaw(c.holdYawDeg);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
@@ -1126,6 +1177,9 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "shadow_rec_count.h"
 #include "split_filter.h"
 #include "shadow_rec.h"
+#include "gb_rec_count.h"
+#include "gb_rec.h"
+#include "gpu_pass_timing.h"
 #include "frame_heap.h"
 #include "big_pages.h"
 #include "par_upload.h"
@@ -1133,6 +1187,7 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "direct_upload.h"
 #include "motion_probes.h"
 #include "motion.h"
+#include "view_profile.h"
 
 void ApplyThreadsMax(void* scene) {
   if (g_cfg.collectThreadsMax <= 0 || g_threadsApplied.exchange(true)) return;
@@ -1360,6 +1415,7 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
     g_shadowStats.shadowRend += sr;
     g_frameShadowRend = sr;
     motion::OnFrame(views, t1.QuadPart, us, pr, fr, sr);
+    vprof::OnFrame(t1.QuadPart, us, pr, fr, sr);
     int64_t zero = 0;
     g_firstQuadQpc.compare_exchange_strong(zero, t1.QuadPart);
     BenchOnFrame(t1.QuadPart, pr, fr, us);
@@ -1545,9 +1601,14 @@ void ApplyShadowBatch() {
 
 // G-buffer stage 2: the G-buffer keys are collected and compiled while on;
 // batching starts once the hooks are ready (retried every second).
+// The G-buffer keys are collected and compiled for G-buffer batching and for
+// the G-buffer recorder (off while batching is on).
+bool GbKeysWanted() { return g_cfg.shadowInst && !g_engineOff.load() && (g_cfg.gbufferBatch || g_cfg.gbufferRecorder); }
+
 void ApplyGBufferBatch() {
   const bool on = g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load();
-  if (on != shadowinst::g_onGb.load() || (on && !shadowinst::g_gbInstalled.load())) shadowinst::SetOnGb(on);
+  const bool keys = GbKeysWanted();
+  if (keys != shadowinst::g_onGb.load() || (keys && !shadowinst::g_gbInstalled.load())) shadowinst::SetOnGb(keys);
   if (on && !(gbbatch::Install() && gbverify::Install())) {
     gbbatch::g_on = false;
     return;
@@ -1570,6 +1631,25 @@ void ApplyShadowRecorder() {
     return;
   }
   shrec::g_on = on;
+}
+
+// R18 S1-S3 G-buffer recorder: installed on first use (needs shadow_inst's
+// G-buffer keys: collected while it is on, retried every second); off =
+// pass-through. Off while G-buffer batching is on.
+void ApplyGBufferRecorder() {
+  gbrec::g_scope = g_cfg.gbufferRecorderScope;
+  gbrec::g_waitUs = static_cast<uint32_t>(g_cfg.gbufferRecorderWaitUs);
+  gbrec::g_island = static_cast<uint32_t>(g_cfg.gbufferRecorderIsland);
+  gbrec::g_stride = static_cast<uint32_t>(g_cfg.suiteGBufferRecVerifyStride);
+  gbrec::g_maxSeg = static_cast<uint32_t>(g_cfg.gbufferRecorderMaxSegments);
+  gbrec::g_helpers = static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers);
+  const bool on = g_cfg.gbufferRecorder && g_cfg.shadowInst && !g_engineOff.load() && !g_cfg.gbufferBatch;
+  if (on && (!shadowinst::g_onGb.load() || !shadowinst::g_gbInstalled.load())) shadowinst::SetOnGb(true);
+  if (on && !gbrec::Install()) {
+    gbrec::g_on = false;
+    return;
+  }
+  gbrec::g_on = on;
 }
 
 // Installed on first use; detached (DCS's own slot 5) while off. Its masks
@@ -1616,6 +1696,7 @@ void SetEngineOff(bool off) {
   ApplyShadowBatch();
   ApplyGBufferBatch();
   ApplyShadowRecorder();
+  ApplyGBufferRecorder();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
@@ -1932,6 +2013,65 @@ bool ShadowRecPhase(bool verify) {
   return true;
 }
 
+// Suite: the G-buffer recorder installed and warmed up (the G-buffer keys
+// collected and compiled, then 3 s on: reads, probes, texture table). verify:
+// then the same-frame compare and 2 s recorded, and the configured state back.
+// False (logged) when it cannot run.
+bool GBufferRecPhase(bool verify) {
+  gbrec::g_scope = g_cfg.gbufferRecorderScope;
+  gbrec::g_waitUs = static_cast<uint32_t>(g_cfg.gbufferRecorderWaitUs);
+  gbrec::g_island = static_cast<uint32_t>(g_cfg.gbufferRecorderIsland);
+  gbrec::g_stride = static_cast<uint32_t>(g_cfg.suiteGBufferRecVerifyStride);
+  gbrec::g_maxSeg = static_cast<uint32_t>(g_cfg.gbufferRecorderMaxSegments);
+  gbrec::g_helpers = static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers);
+  if (g_cfg.gbufferBatch && g_cfg.shadowInst) {
+    Log("  gbuffer recorder: off while [Model] GBufferBatching=1");
+    return false;
+  }
+  if (!g_cfg.shadowInst) {
+    Log("  gbuffer recorder: needs [Model] ShadowInstancing=1 (the G-buffer key compiles)");
+    return false;
+  }
+  const bool wasCollecting = shadowinst::g_onGb.load();
+  shadowinst::SetOnGb(true);
+  for (int i = 0; i < 20 && gbrec::g_state.load() == 0 && !gbrec::Install(); ++i) Sleep(250);
+  if (!gbrec::Ready()) {
+    Log("  gbuffer recorder not available (state %d%s; see the log above)", gbrec::g_state.load(),
+        gbrec::g_disabled.load() ? ", latched off" : "");
+    if (!wasCollecting) ApplyGBufferBatch();
+    return false;
+  }
+  const bool was = gbrec::g_on.load();
+  gbrec::g_on = true;
+  Sleep(2000);
+  const double waitS = shadowinst::WaitCompiles(g_benchAbort);
+  const shadowinst::Totals keys = shadowinst::Snap(shadowinst::kKindGb);
+  Log("  g-buffer keys: %u OK of %u (waited %.1f s)", keys.ok, keys.keys, waitS);
+  Sleep(3000);
+  if (!verify) return true;  // the A/B toggles it per block, then ApplyGBufferRecorder
+  gbrec::ResetCounters();
+  uint64_t f0 = g_quadFrame.load();
+  gbrec::g_verify = true;
+  for (int t = 0; t < g_cfg.suiteGBufferRecVerifySec * 10 && !g_benchAbort && !gbrec::g_disabled.load(); ++t)
+    Sleep(100);
+  gbrec::g_verify = false;
+  Sleep(100);
+  gbrec::LogCounters("verify", static_cast<double>(g_quadFrame.load() - f0));
+  if (gbrec::g_disabled.load()) {
+    Log("  verify: differences found or a fault -> G-buffer recorder NOT SAFE, latched off for this session");
+  } else {
+    Sleep(300);
+    gbrec::ResetCounters();
+    f0 = g_quadFrame.load();
+    Sleep(2000);
+    gbrec::LogCounters("2 s recorded", static_cast<double>(g_quadFrame.load() - f0));
+  }
+  gbrec::g_on = was;
+  ApplyGBufferRecorder();
+  if (!wasCollecting) ApplyGBufferBatch();
+  return true;
+}
+
 DWORD WINAPI SuiteThread(void*) {
   InstallDiagnostics();
   g_benchRunningFlag = true;
@@ -2134,6 +2274,19 @@ DWORD WINAPI SuiteThread(void*) {
     shadowrec::Measure(5000, g_quadFrame, g_tscHz);
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteGBufferRecCount && !g_benchAbort) {
+    Log("-- g-buffer recorder S0 counters: item mix and loop time per execution, segments per candidate set and "
+        "island, RDEF census, pass setup stability, material bytes, Execute(TRUE) cost, textures (R18, 1 s discovery, "
+        "key compiles, 5 s) --");
+    gbreccount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGpuPassTiming && !g_benchAbort) {
+    Log("-- render passes, GPU time (D3D11 timestamps) and context copies/clears/dispatches per pass kind, with "
+        "render-thread CPU for comparison (5 s) --");
+    gpt::Measure(5000, g_quadFrame);
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteYawScan && !g_benchAbort) {
     Log("-- yaw scan: fps per held view yaw (2 s settle + 2 s each) --");
     int best = 0;
@@ -2158,6 +2311,19 @@ DWORD WINAPI SuiteThread(void*) {
       posesweep::Hold(true, g_cfg.holdYawDeg);
     else
       posesweep::Hold(false, 0);
+  }
+  if (ok && g_cfg.suiteYawProfile && !g_benchAbort) {
+    Log("-- yaw profile: cost split and limit per held view yaw, every %d deg (2 s settle + 2.5 s each) --",
+        std::max(5, std::min(180, g_cfg.suiteYawProfileStep)));
+    vprof::RunYawProfile(g_cfg.suiteYawProfileStep, g_quadFrame, g_benchAbort, g_tscHz);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteRotationProfile && !g_benchAbort) {
+    Log("-- rotation profile: 3 s still, then a %d deg/s turn for %d s: cost split, transients, spikes --",
+        g_cfg.suiteRotationDegPerSec, g_cfg.suiteRotationSeconds);
+    vprof::RunRotationProfile(g_cfg.suiteRotationDegPerSec, g_cfg.suiteRotationSeconds, g_quadFrame, g_benchAbort,
+                              g_tscHz);
+    Chime(1000, 60);
   }
   if (ok && g_cfg.suiteShadowInstVerify && !g_benchAbort) {
     Log("-- shadow instancing stage 2: same-frame depth compare, stock vs batched (3 s) --");
@@ -2293,6 +2459,26 @@ DWORD WINAPI SuiteThread(void*) {
       const uint64_t f0 = g_quadFrame.load();
       ok = RunBenchmark(28, false);
       shrec::LogCounters("A/B, whole run (recorder in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGBufferRecVerify && !g_benchAbort) {
+    Log("-- g-buffer recorder (R18 S3, scope 0x%x): key compiles, 3 s warm-up (reads, probes, texture table), then "
+        "same-frame compare of all G-buffer targets per scoped execution, stock vs stock then stock vs recorded (%d "
+        "s), then 2 s recorded --",
+        g_cfg.gbufferRecorderScope, g_cfg.suiteGBufferRecVerifySec);
+    GBufferRecPhase(true);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchGBufferRecorder && !g_benchAbort) {
+    Log("-- A/B: g-buffer recorder (OFF = DCS draws every item, ON = the recorded draws from command lists; scope "
+        "0x%x) --",
+        g_cfg.gbufferRecorderScope);
+    if (GBufferRecPhase(false)) {
+      gbrec::ResetCounters();
+      const uint64_t f0 = g_quadFrame.load();
+      ok = RunBenchmark(29, false);
+      gbrec::LogCounters("A/B, whole run (recorder in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
     }
     Chime(1000, 60);
   }
@@ -2636,6 +2822,8 @@ DWORD WINAPI WorkerThread(void*) {
         ApplyGBufferBatch();
       if (g_cfg.shadowRecorder && !g_engineOff.load() && shrec::g_state.load() == 0 && !g_benchRunningFlag.load())
         ApplyShadowRecorder();
+      if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
+        ApplyGBufferRecorder();
       // Split filter: waits for dx11backend and the first draw; detaches after a verify mismatch.
       if (!g_benchRunningFlag.load() &&
           ((g_cfg.splitFilter && !g_engineOff.load() && sfilt::g_state.load() >= 0 && !sfilt::Live()) ||
@@ -2686,7 +2874,8 @@ DWORD WINAPI WorkerThread(void*) {
         Chime(1200, 90);
       }
     }
-    // Optional CPU profile of the translation phase of the synthetic sweep.
+    // Optional CPU profile during the synthetic sweep: from 8 s with MotionTaxi=1 (the
+    // forward slide), else at 69 s (after the yaw phases; the sweep no longer slides).
     static ULONGLONG motionStart = 0;
     static bool motionProfiled = false;
     if (motionEnd && !motionStart) {
@@ -2760,6 +2949,10 @@ DWORD WINAPI WorkerThread(void*) {
       if (shrec::g_on.load() && shrec::Ready() && !g_benchRunningFlag.load()) {
         shrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
         shrec::ResetCounters();
+      }
+      if (gbrec::g_on.load() && gbrec::Ready() && !g_benchRunningFlag.load()) {
+        gbrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
+        gbrec::ResetCounters();
       }
       censusFrames0 = fr;
     }
@@ -2845,6 +3038,10 @@ void SetBenchVariant(bool on) {
   }
   if (g_benchActiveMode.load() == 28) {
     shrec::g_on = on;
+    return;
+  }
+  if (g_benchActiveMode.load() == 29) {
+    gbrec::g_on = on;
     return;
   }
   if (g_benchActiveMode.load() == 25) {
@@ -2962,12 +3159,15 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   g_stop = true;
   threadtune::Restore();
   allocslab::Invalidate();
-  posesweep::Stop();
+  posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through
   d3ds::Uninstall();
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
+  gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
   sfilt::Shutdown();    // call sites, FX call-table entries and context table back to stock
   jointail::Shutdown();
   shadowrec::Shutdown();  // chained pointers and class slots back before batching's own shutdown
+  gbreccount::Shutdown();  // G-buffer S0 chain, class slots, sort observer (and its own sort patch) out
+  gbrec::Shutdown();      // G-buffer recorder chain out, its workers joined (before the shadow recorder's sort sites)
   shrec::Shutdown();      // recorder chain out, its worker joined, before batching's shutdown
   timercache::g_on = false;  // until the new payload re-patches, pass through
   timercache::g_stopUpdater = true;

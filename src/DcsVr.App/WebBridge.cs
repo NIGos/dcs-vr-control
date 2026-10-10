@@ -252,10 +252,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     _status = synced.Message + " Start DCS with Launch DCS so it receives the profile's OpenXR environment.";
                     _report = SyncReport(synced); break;
                 case "restore":
-                    // Back to stock DCS: every path DCS VR Control changed goes back to what was there before.
+                    // Back to stock DCS: every path DCS Control changed goes back to what was there before.
                     Invalidate(); var restored = await Task.Run(service.RestoreOriginals);
-                    _status = restored.Complete ? "Back to stock DCS: every file and setting DCS VR Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed in Recovery.";
-                    _report = restored.Complete ? "Every file DCS VR Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
+                    _status = restored.Complete ? "Back to stock DCS: every file and setting DCS Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed in Recovery.";
+                    _report = restored.Complete ? "Every file DCS Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
                 case "engineStatus":
                     // Read-only: the DCS engine optimizations' own log, the newest test report and DCS's log.
                     var engineOptions = EngineOptionsPath();

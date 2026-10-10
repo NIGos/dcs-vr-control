@@ -200,6 +200,10 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "split_filter_test.h"
 #include "deferred_rec_test.h"
 #include "shadow_rec_test.h"
+#include "gpu_pass_timing_test.h"
+#include "gb_rec_count_test.h"
+#include "gb_rec_test.h"
+#include "view_profile_test.h"
 
 int main() {
   g_log = stdout;
@@ -224,6 +228,18 @@ int main() {
   // QV_SHREC_ONLY=1: only the shadow recorder tests (R17 S1-S3).
   if (getenv("QV_SHREC_ONLY")) {
     srtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_GBREC_ONLY=1: only the G-buffer recorder tests (R18 S1-S3).
+  if (getenv("QV_GBREC_ONLY")) {
+    grtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_VPROF_ONLY=1: only the synthetic pose and view profile tests.
+  if (getenv("QV_VPROF_ONLY")) {
+    vptest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -401,9 +417,11 @@ int main() {
     QueryPerformanceFrequency(&f);
     g_qpcToUs = 1e6 / static_cast<double>(f.QuadPart);
     posesweep::g_t0 = now.QuadPart - static_cast<int64_t>(7.0 * f.QuadPart);
+    posesweep::g_sweep = true;  // what Start() sets with g_on
     posesweep::g_on = true;
     posesweep::Hook(nullptr, nullptr, nullptr, 2, &count, views);
     posesweep::g_on = false;
+    posesweep::g_sweep = false;
     double yaw = posesweep::g_yawDeg.load() * 3.14159265358979 / 180.0;
     double len = std::sqrt(q0[0] * q0[0] + q0[1] * q0[1] + q0[2] * q0[2] + q0[3] * q0[3]);
     double expectY = std::sin(yaw / 2), expectW = std::cos(yaw / 2);
@@ -1314,6 +1332,14 @@ int main() {
   drtest::Run();
   // Shadow recorder (R17 S1-S3): mesh fields, tables, reflection, probe checks, jobs, device record vs stock.
   srtest::Run();
+  // GPU pass timing: analysis on synthetic ticks, then ring readback and op counts on a real device.
+  gpttest::Run();
+  // G-buffer recorder S0 counters (R18): segments, gates, item walk, guard masks, setup probe and Execute(TRUE).
+  grctest::Run();
+  // G-buffer recorder (R18 S1-S3): texture table, keys, jobs, restores, device segments vs stock.
+  grtest::Run();
+  // Synthetic pose (sweep with hold/taxi) and the view profile (bounds, spikes, aggregation, GPU light mode).
+  vptest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

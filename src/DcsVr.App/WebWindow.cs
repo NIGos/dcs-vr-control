@@ -17,7 +17,7 @@ internal sealed class WebWindow : Window
     private readonly WebView2 _view = new();
     public WebWindow()
     {
-        Title = "DCS VR Control"; Width = 1320; Height = 920; MinWidth = 850; MinHeight = 620;
+        Title = "DCS Control"; Width = 1320; Height = 920; MinWidth = 850; MinHeight = 620;
         Icon = BitmapFrame.Create(new Uri("pack://application:,,,/Assets/app-icon.ico", UriKind.Absolute));
         WindowStartupLocation = WindowStartupLocation.CenterScreen; Background = new SolidColorBrush(Color.FromRgb(11, 14, 17));
         Width = Math.Min(Width, SystemParameters.WorkArea.Width - 40); Height = Math.Min(Height, SystemParameters.WorkArea.Height - 40);
@@ -46,7 +46,7 @@ internal sealed class WebWindow : Window
             }
             catch (Exception e)
             {
-                Content = new TextBox { Text = "The web interface could not start.\n\n" + e.Message + "\n\nInstall Microsoft Edge WebView2 Evergreen Runtime, then reopen DCS VR Control.\nhttps://developer.microsoft.com/microsoft-edge/webview2/", IsReadOnly = true, TextWrapping = TextWrapping.Wrap, Foreground = Brushes.White, Background = Background, Margin = new Thickness(32) };
+                Content = new TextBox { Text = "The web interface could not start.\n\n" + e.Message + "\n\nInstall Microsoft Edge WebView2 Evergreen Runtime, then reopen DCS Control.\nhttps://developer.microsoft.com/microsoft-edge/webview2/", IsReadOnly = true, TextWrapping = TextWrapping.Wrap, Foreground = Brushes.White, Background = Background, Margin = new Thickness(32) };
             }
         };
         StateChanged += async (_, _) =>

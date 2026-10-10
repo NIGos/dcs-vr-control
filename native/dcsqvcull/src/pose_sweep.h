@@ -2,8 +2,10 @@
 // xrLocateViews (the function DCS calls) and rotates every returned view pose
 // about the vertical axis by a time-varying yaw, so DCS renders exactly as if
 // the head were turning: same culling, LOD and streaming work. Used only
-// while a motion profile records with [Suite] MotionSweep=1; off otherwise.
-// The headset shows a swinging image while it runs.
+// while a motion profile records with [Suite] MotionSweep=1, by the suite's
+// YawScan / YawProfile (held yaw) and RotationProfile (constant-rate turn),
+// and by [Suite] HoldYawDeg; off otherwise. The headset shows a swinging image
+// while it runs.
 //
 // The detour follows the allocator detour's rules: code and target pointer on
 // separate pages, and the 14-byte patch is written with every other thread of
@@ -28,16 +30,25 @@ std::atomic<int> g_state{0};
 std::atomic<int64_t> g_t0{0};
 std::atomic<double> g_yawDeg{0};
 
-// Phases (seconds): still, slow, medium, fast, still. Yaw = A*sin(2*pi*t/T).
-std::atomic<bool> g_taxi{false};  // [Suite] MotionTaxi: slow straight taxi instead of the yaw sweep
+// Why the sweep did not rotate (2026-10-09 runs): YawAt returned the held yaw
+// whenever a hold was active and 0 whenever [Suite] MotionTaxi=1, so with
+// MotionTaxi=1 (the dev ini) every frame was "still" while the head pose slid
+// forward at 15 m/s; and the sine sweep also slid the pose 1.5 km forward after
+// 67 s. Now the time-varying yaw is independent of both: it is added to the
+// held yaw (0 when not holding), and the pose moves only with MotionTaxi=1.
+std::atomic<bool> g_taxi{false};    // [Suite] MotionTaxi: also slide the pose forward (15 m/s from t = 5 s)
+std::atomic<bool> g_sweep{false};   // a time-varying yaw is running (Start .. Stop)
+std::atomic<double> g_rateDps{0};   // > 0: constant-rate rotation (RotationProfile) instead of the sine sweep
 
-// Held yaw ([Suite] HoldYawDeg / YawScan): a constant view rotation, no
-// translation; < -1000 = not holding. Used to aim an unattended benchmark view.
+// Held yaw ([Suite] HoldYawDeg / YawScan / YawProfile): a constant view
+// rotation, no translation; < -1000 = not holding. Used to aim an unattended
+// benchmark view, and the base the sweep rotates about.
 std::atomic<double> g_hold{-2000.0};
 bool Holding() { return g_hold.load(std::memory_order_relaxed) > -1000.0; }
-double YawAt(double t) {
-  if (Holding()) return g_hold.load(std::memory_order_relaxed);
-  if (g_taxi.load()) return 0;
+
+// Pure parts (offline tested). Sine sweep phases (seconds): still, slow,
+// medium, fast, still. Yaw = A*sin(2*pi*t/T).
+inline double SweepYaw(double t) {
   const double A = 60.0;
   auto sweep = [&](double tt, double period) { return A * std::sin(2.0 * 3.14159265358979 * tt / period); };
   if (t < 5) return 0;
@@ -46,19 +57,26 @@ double YawAt(double t) {
   if (t < 65) return sweep(t - 45, 2.0);  // peak about 188 deg/s
   return 0;
 }
+// Yaw in degrees: hold base (0 when not holding) plus the running sweep:
+// rate > 0 = a constant-rate turn (wrapped to [0, 360)), else the sine sweep.
+inline double ComposeYaw(bool holding, double hold, bool sweeping, double rateDps, double t) {
+  const double base = holding ? hold : 0.0;
+  if (!sweeping) return base;
+  if (rateDps > 0) return base + std::fmod(rateDps * (t > 0 ? t : 0.0), 360.0);
+  return base + SweepYaw(t);
+}
+// Forward slide in metres (-Z of the view): only a running sweep with MotionTaxi.
+inline double ComposeForward(bool sweeping, bool taxi, double t) {
+  if (!sweeping || !taxi) return 0;
+  return t < 5 ? 0 : (t - 5) * 15.0;
+}
 
-// Translation phase after the yaw phases: the head moves forward (-Z in the
-// view's local space) at 100 m/s for 15 s, like a low pass, so DCS streams
-// new terrain if it follows the head position that far.
+double YawAt(double t) {
+  return ComposeYaw(Holding(), g_hold.load(std::memory_order_relaxed), g_sweep.load(std::memory_order_relaxed),
+                    g_rateDps.load(std::memory_order_relaxed), t);
+}
 double ForwardAt(double t) {
-  if (Holding()) return 0;
-  if (g_taxi.load()) {
-    // Taxi: 15 m/s forward from t = 5 s, through whatever is ahead.
-    return t < 5 ? 0 : (t - 5) * 15.0;
-  }
-  if (t < 67) return 0;
-  if (t < 82) return (t - 67) * 100.0;
-  return 1500.0;
+  return ComposeForward(g_sweep.load(std::memory_order_relaxed), g_taxi.load(std::memory_order_relaxed), t);
 }
 
 int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t cap, uint32_t* count, uint8_t* views) {
@@ -67,9 +85,10 @@ int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t c
   LARGE_INTEGER now;
   QueryPerformanceCounter(&now);
   double t = (now.QuadPart - g_t0.load()) * g_qpcToUs / 1e6;
-  double yaw = YawAt(t) * 3.14159265358979 / 180.0;
+  const double yawDeg = YawAt(t);
+  double yaw = yawDeg * 3.14159265358979 / 180.0;
   const double fwd = ForwardAt(t);
-  g_yawDeg = YawAt(t);
+  g_yawDeg = yawDeg;
   const float s = static_cast<float>(std::sin(yaw / 2)), c = static_cast<float>(std::cos(yaw / 2));
   const uint32_t n = std::min(*count, cap);
   for (uint32_t i = 0; i < n; ++i) {
@@ -194,28 +213,48 @@ bool Install() {
   return true;
 }
 
-void Start() {
-  if (!Install()) return;
+// Starts the time-varying yaw about the held yaw (or 0): rateDps > 0 = a
+// constant-rate turn, else the sine sweep. False when the hook is unavailable.
+bool Start(double rateDps = 0) {
+  if (!Install()) return false;
   LARGE_INTEGER now;
   QueryPerformanceCounter(&now);
+  g_rateDps = rateDps > 0 ? rateDps : 0.0;
   g_t0 = now.QuadPart;
+  g_sweep = true;
   g_on = true;
+  return true;
 }
 
+// Ends the time-varying yaw; a hold stays.
 void Stop() {
-  if (!Holding()) g_on = false;
+  g_sweep = false;
+  g_rateDps = 0.0;
+  g_on = Holding();
 }
 
-// Holds a constant yaw (degrees), or releases it (hold = false).
+// Holds a constant yaw (degrees), or releases it (hold = false); a running
+// sweep keeps running about the new base.
 void Hold(bool hold, double deg) {
   if (!hold) {
     g_hold = -2000.0;
-    g_on = false;
+    g_on = g_sweep.load();
     return;
   }
   if (!Install()) return;
   g_hold = deg;
   g_on = true;
+}
+
+// Payload stop: hold and sweep off and the stub's slot back to the trampoline
+// (pass-through). The old payload's hook stays loaded but is no longer called,
+// so a hold of an older payload generation cannot outlive it (the new payload
+// re-applies [Suite] HoldYawDeg from its ini).
+void Release() {
+  g_sweep = false;
+  g_hold = -2000.0;
+  g_on = false;
+  if (g_state.load() > 0 && g_slot && g_tramp) InterlockedExchangePointer(g_slot, reinterpret_cast<void*>(g_tramp));
 }
 
 }  // namespace posesweep

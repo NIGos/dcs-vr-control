@@ -35,7 +35,7 @@ public static class LaunchSafety
     public static void EnsureNotElevated(string executable)
     {
         if (CurrentProcessElevated)
-            throw new InvalidOperationException("DCS VR Control is running as administrator. The OpenXR loader ignores the profile runtime and layers in elevated processes. Reopen the app without administrator rights.");
+            throw new InvalidOperationException("DCS Control is running as administrator. The OpenXR loader ignores the profile runtime and layers in elevated processes. Reopen the app without administrator rights.");
         if (ForcedElevation(executable) is { } flag)
             throw new InvalidOperationException($"DCS.exe is set to run as administrator ({flag}). Elevated DCS ignores the profile runtime and layers. Clear 'Run this program as an administrator' in DCS.exe Properties → Compatibility.");
     }
@@ -59,7 +59,7 @@ public static class LaunchSafety
         public bool BlocksBreakaway => InJob && !Unknown && (LimitFlags & (BreakawayOk | SilentBreakawayOk)) == 0;
     }
 
-    public const string LauncherUnknownMessage = "DCS VR Control runs inside a Windows job whose limits could not be read, so it is unknown whether the DCS launcher can start the game here. If DCS does not open after the launcher, close DCS VR Control and open it from the Start menu or Explorer, or turn off Show the DCS launcher.";
+    public const string LauncherUnknownMessage = "DCS Control runs inside a Windows job whose limits could not be read, so it is unknown whether the DCS launcher can start the game here. If DCS does not open after the launcher, close DCS Control and open it from the Start menu or Explorer, or turn off Show the DCS launcher.";
 
     /// <summary>True when the app runs in a job whose breakaway limit could not be read (a warning, never a block).</summary>
     public static bool LauncherRestartUnknown
@@ -67,7 +67,7 @@ public static class LaunchSafety
         get { try { return CurrentJob() is { InJob: true, Unknown: true }; } catch (Exception e) when (e is System.ComponentModel.Win32Exception or EntryPointNotFoundException or DllNotFoundException) { return true; } }
     }
 
-    public const string LauncherBlockedMessage = "DCS VR Control was started inside a Windows job (by another program, such as a script runner or sandbox), so the DCS launcher cannot start the game: Windows refuses its restart with access denied (error 5). Close DCS VR Control and open it from the Start menu or Explorer, or turn off Show the DCS launcher.";
+    public const string LauncherBlockedMessage = "DCS Control was started inside a Windows job (by another program, such as a script runner or sandbox), so the DCS launcher cannot start the game: Windows refuses its restart with access denied (error 5). Close DCS Control and open it from the Start menu or Explorer, or turn off Show the DCS launcher.";
 
     /// <summary>True when the DCS launcher's restart into the game would be refused (see <see cref="CurrentJob"/>).</summary>
     public static bool LauncherRestartBlocked

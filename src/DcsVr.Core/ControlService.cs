@@ -7,13 +7,23 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
 {
     public string DistributionRoot { get; } = Path.GetFullPath(distributionRoot);
     public string StateRoot { get; } = Path.GetFullPath(stateRoot);
-    /// <summary>Originals of every path DCS VR Control wrote, and the applied profile. Journals of earlier versions
+    /// <summary>Originals of every path DCS Control wrote, and the applied profile. Journals of earlier versions
     /// (state root\transactions, and copies Windows kept for the app when it ran inside another app's package) are
     /// converted on first use.</summary>
     public OriginalsStore Originals => new(Path.Combine(StateRoot, "originals"), LegacyJournalFolders, OwnHashes);
     public string ManagedRoot => Path.Combine(StateRoot, "managed");
     public string PackageRoot => Path.Combine(DistributionRoot, "packages");
-    public static string DefaultStateRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DcsVrControl");
+    /// <summary>%LOCALAPPDATA%\DcsControl; an installation that already keeps its state in the folder of the app's earlier
+    /// name (%LOCALAPPDATA%\DcsVrControl, before it was renamed DCS Control) goes on using it, so its record of original
+    /// files and its applied profile stay exactly where Back to stock DCS expects them.</summary>
+    public static string DefaultStateRoot => StateRootIn(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+    public static string StateRootIn(string localAppData)
+    {
+        var current = Path.Combine(localAppData, "DcsControl"); var earlier = Path.Combine(localAppData, LegacyStateFolder);
+        return !Directory.Exists(current) && Directory.Exists(earlier) ? earlier : current;
+    }
+    /// <summary>The state folder's name before the app was renamed DCS Control.</summary>
+    public const string LegacyStateFolder = "DcsVrControl";
     /// <summary>The app's saved copy of the user's DLSS 5 runtime (state root\runtimes).</summary>
     public NeuralRuntimeStore SavedRuntime => new(Path.Combine(StateRoot, "runtimes"));
 
@@ -33,13 +43,16 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { yield break; }
         foreach (var package in candidates)
         {
-            var copy = Path.Combine(package, "LocalCache", "Local", "DcsVrControl", "transactions");
-            if (Directory.Exists(copy)) yield return copy;
+            foreach (var name in new[] { "DcsControl", LegacyStateFolder })
+            {
+                var copy = Path.Combine(package, "LocalCache", "Local", name, "transactions");
+                if (Directory.Exists(copy)) yield return copy;
+            }
         }
     }
 
     /// <summary>Hashes of the components this distribution installs and of the saved DLSS 5 runtime: an existing file
-    /// with these bytes is DCS VR Control's own, never another program's.</summary>
+    /// with these bytes is DCS Control's own, never another program's.</summary>
     private IReadOnlySet<string> OwnHashes()
     {
         var hashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -215,7 +228,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         EnsureDcsClosed(plan.Files.Select(f => f.Path).Append(plan.Executable).Concat(originals.Read().Files.Select(f => f.Path)));
         return originals.Apply(plan);
     }
-    /// <summary>Back to stock DCS: every path DCS VR Control changed goes back to what was there before it first wrote
+    /// <summary>Back to stock DCS: every path DCS Control changed goes back to what was there before it first wrote
     /// it, whatever it holds now (owned options.lua settings only, other edits kept). Refused only while DCS runs.</summary>
     public RestoreResult RestoreOriginals()
     {
@@ -327,8 +340,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var originals = Originals;
         var baseline = originals.Read();
         var applied = baseline.State == "applied" ? ReadAppliedProfile() : null;
-        draft ??= applied?.Profile ?? throw new InvalidOperationException("No profile is applied yet. Open DCS VR Control and launch from there once.");
-        // Every file involved: everything DCS VR Control wrote, the selected DCS install and options, the managed folder.
+        draft ??= applied?.Profile ?? throw new InvalidOperationException("No profile is applied yet. Open DCS Control and launch from there once.");
+        // Every file involved: everything DCS Control wrote, the selected DCS install and options, the managed folder.
         EnsureDcsClosed(baseline.Files.Select(f => f.Path).Concat(new[] { inventory.DcsExecutable, inventory.OptionsPath, ManagedRoot }.OfType<string>()));
         string? reason = null;
         if (applied is not null && SameDraft(draft, applied.Profile) && SamePaths(inventory, applied))
@@ -499,7 +512,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     {
         var current = Originals.Read() is { State: "applied", Current: { } applied } ? applied : null;
         EnsureDcsClosed(current?.Entries.Select(e => e.Path));
-        if (current is null) throw new InvalidOperationException("No profile is applied. Launch DCS from DCS VR Control to apply one.");
+        if (current is null) throw new InvalidOperationException("No profile is applied. Launch DCS from DCS Control to apply one.");
         var launch = VerifyInstalled(current);
         if (!File.Exists(launch.Executable)) throw new IOException("DCS executable is missing: " + launch.Executable);
         if (LaunchSafety.LauncherRestartBlocked && KeepsLauncher(current)) throw new InvalidOperationException(LaunchSafety.LauncherBlockedMessage);

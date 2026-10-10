@@ -38,7 +38,7 @@ The manager chooses the OpenXR runtime for its DCS process; it does not activate
 
 ## Readiness and recovery
 
-Checks → **Run preflight** checks the current draft. **Export report** refreshes inventory and includes readiness plus the original files DCS VR Control changed. Recovery → **Back to stock DCS** puts every one of them back in one step (`DcsVr.Cli.exe status` and `DcsVr.Cli.exe restore` do the same from a console). A fresh report is also available without opening the GUI:
+Checks → **Run preflight** checks the current draft. **Export report** refreshes inventory and includes readiness plus the original files DCS Control changed. Recovery → **Back to stock DCS** puts every one of them back in one step (`DcsVr.Cli.exe status` and `DcsVr.Cli.exe restore` do the same from a console). A fresh report is also available without opening the GUI:
 
 ```powershell
 ./DcsVr.Cli.exe readiness --profile profile.json --out readiness.json

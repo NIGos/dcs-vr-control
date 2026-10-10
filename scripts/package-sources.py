@@ -8,7 +8,7 @@ import zipfile
 from product_version import product_version
 
 root = Path(__file__).resolve().parent.parent
-destination = root / f'artifacts/release/DcsVrControl-{product_version()}-sources.zip'
+destination = root / f'artifacts/release/DcsControl-{product_version()}-sources.zip'
 destination.parent.mkdir(parents=True, exist_ok=True)
 revisions = {}
 added = set()

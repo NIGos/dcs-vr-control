@@ -37,8 +37,16 @@ int main(int argc, char** argv) {
     char self[MAX_PATH]{};
     GetModuleFileNameA(nullptr, self, MAX_PATH);
     int failures = 0;
-    for (const char* mode : {"off", "observe", "skip"}) {
-        SetEnvironmentVariableA("DCSVR_PREFETCH_MODE", mode);
+    // The settings file next to the DLL (a DCS start without DCS Control) and the launch environment overriding it.
+    std::string ini = self;
+    ini = ini.substr(0, ini.find_last_of('\\') + 1) + "DcsControlPrefetchFix.ini";
+    struct Case { const char* env; const char* expect; bool file; };
+    const Case cases[] = {{"off", "off", false}, {"observe", "observe", false}, {"skip", "skip", false},
+                          {nullptr, "skip", true}, {"off", "off", true}};
+    for (const auto& c : cases) {
+        const char* mode = c.expect;
+        SetEnvironmentVariableA("DCSVR_PREFETCH_MODE", c.env);
+        if (c.file) WritePrivateProfileStringA("PrefetchFix", "Mode", "skip", ini.c_str()); else DeleteFileA(ini.c_str());
         std::string command = std::string("\"") + self + "\" --case " + mode;
         STARTUPINFOA si{sizeof(si)};
         PROCESS_INFORMATION pi{};
@@ -47,9 +55,10 @@ int main(int argc, char** argv) {
         DWORD code = 1;
         GetExitCodeProcess(pi.hProcess, &code);
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-        std::printf("case %s: %s\n", mode, code == 0 ? "PASS" : "FAIL");
+        std::printf("case %s%s: %s\n", mode, c.file ? (c.env ? " (settings file, environment overrides)" : " (settings file only)") : "", code == 0 ? "PASS" : "FAIL");
         failures += code != 0;
     }
+    DeleteFileA(ini.c_str());
     std::printf(failures ? "FAILED\n" : "PASS: prefetch fix\n");
     return failures ? 1 : 0;
 }

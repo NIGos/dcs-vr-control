@@ -9,7 +9,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        // Unexpected errors are logged (%LOCALAPPDATA%\DcsVrControl\app.log) and reported without closing the app where
+        // Unexpected errors are logged (%LOCALAPPDATA%\DcsControl\app.log) and reported without closing the app where
         // that is safe: a failed UI event or an unobserved background task leaves the profile and the game files as the
         // record of original files describes them.
         DispatcherUnhandledException += OnDispatcherUnhandledException;
@@ -32,7 +32,7 @@ public partial class App : Application
             catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
             {
                 AppLog.Error("Restart outside the sandbox", error);
-                MessageBox.Show(string.Format(System.Globalization.CultureInfo.InvariantCulture, DcsVr.Core.AppDataRedirection.Message, redirected), "DCS VR Control", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(string.Format(System.Globalization.CultureInfo.InvariantCulture, DcsVr.Core.AppDataRedirection.Message, redirected), "DCS Control", MessageBoxButton.OK, MessageBoxImage.Warning);
                 Shutdown(1); return;
             }
         }
@@ -50,8 +50,8 @@ public partial class App : Application
         e.Handled = true;
         if (ShutdownMode == ShutdownMode.OnExplicitShutdown || DateTime.UtcNow - _lastErrorShown < TimeSpan.FromSeconds(10)) return;
         _lastErrorShown = DateTime.UtcNow;
-        MessageBox.Show("DCS VR Control hit an unexpected error and kept running:\n\n" + e.Exception.Message + "\n\nDetails were saved to " + AppLog.Path + ".",
-            "DCS VR Control", MessageBoxButton.OK, MessageBoxImage.Warning);
+        MessageBox.Show("DCS Control hit an unexpected error and kept running:\n\n" + e.Exception.Message + "\n\nDetails were saved to " + AppLog.Path + ".",
+            "DCS Control", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
     private async Task RunWebSmoke(string path)
     {

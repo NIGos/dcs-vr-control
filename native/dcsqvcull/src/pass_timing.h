@@ -35,22 +35,32 @@ std::atomic<AfterTopFn> g_afterTop{nullptr};
 // a texture snapshot as soon as a job's keys are final); nullptr when unused.
 using EachFn = void (*)();
 std::atomic<EachFn> g_eachPass{nullptr};
+// Optional callback at the start and the end of every pass, nested ones too,
+// with the pass object and its nesting depth (gpu_pass_timing.h: timestamps
+// around each pass); nullptr when unused. Loaded once per execute, so a pass
+// sees both calls or neither.
+using BoundaryFn = void (*)(void* pass, bool begin, int depth);
+std::atomic<BoundaryFn> g_boundary{nullptr};
 
 void __fastcall Hook(void* pass, uint64_t frame) {
   if (t_depth == 0) g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
   EachFn each = g_eachPass.load(std::memory_order_relaxed);
+  BoundaryFn bnd = g_boundary.load(std::memory_order_relaxed);
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each) return g_orig(pass, frame);
+    if (!after && !each && !bnd) return g_orig(pass, frame);
     if (each) each();
+    if (bnd) bnd(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
+    if (bnd) bnd(pass, false, t_depth);
     if (each) each();
     if (top && after) after();
     return;
   }
   if (each) each();
+  if (bnd) bnd(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
   LARGE_INTEGER a, b;
@@ -69,6 +79,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     s.exclUs += excl;
     if (d == 0) g_topLevelUs += us;
   }
+  if (bnd) bnd(pass, false, d);
   if (each) each();
   if (d == 0)
     if (AfterTopFn after = g_afterTop.load(std::memory_order_relaxed)) after();
@@ -143,32 +154,22 @@ void Install() {
   Log("pass timing: %d references to BaseRenderingPass::execute redirected", n);
 }
 
-void Measure(int ms, std::atomic<uint64_t>& frameCounter) {
-  if (!g_orig) {
-    Log("  pass timing not installed");
-    return;
-  }
-  {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    g_stats.clear();
-    g_topLevelUs = 0;
-  }
-  uint64_t f0 = frameCounter.load();
-  g_recording = true;
-  Sleep(ms);
-  g_recording = false;
-  Sleep(50);
-  uint64_t frames = frameCounter.load() - f0;
+// Clears the statistics (before g_recording is set).
+void Reset() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_stats.clear();
+  g_topLevelUs = 0;
+}
+
+// Takes the statistics since Reset, pass objects with the same name merged.
+std::map<std::string, Stat> TakeByName(double* topUs, size_t* objects) {
   std::unordered_map<void*, Stat> snap;
-  double top;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     snap.swap(g_stats);
-    top = g_topLevelUs;
+    if (topUs) *topUs = g_topLevelUs;
   }
-  if (!frames) return;
-  double f = static_cast<double>(frames);
-  // Merge pass objects with the same name.
+  if (objects) *objects = snap.size();
   std::map<std::string, Stat> byName;
   for (auto& kv : snap) {
     Stat& s = byName[RttiName(kv.first)];
@@ -176,10 +177,30 @@ void Measure(int ms, std::atomic<uint64_t>& frameCounter) {
     s.exclUs += kv.second.exclUs;
     s.inclUs += kv.second.inclUs;
   }
+  return byName;
+}
+
+void Measure(int ms, std::atomic<uint64_t>& frameCounter) {
+  if (!g_orig) {
+    Log("  pass timing not installed");
+    return;
+  }
+  Reset();
+  uint64_t f0 = frameCounter.load();
+  g_recording = true;
+  Sleep(ms);
+  g_recording = false;
+  Sleep(50);
+  uint64_t frames = frameCounter.load() - f0;
+  double top = 0;
+  size_t objects = 0;
+  std::map<std::string, Stat> byName = TakeByName(&top, &objects);
+  if (!frames) return;
+  double f = static_cast<double>(frames);
   std::vector<std::pair<std::string, Stat>> v(byName.begin(), byName.end());
   std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.exclUs > b.second.exclUs; });
   Log("  render passes: %.2f ms/frame of pass execution (%zu pass objects, %zu kinds)", top / 1000.0 / f,
-      snap.size(), v.size());
+      objects, v.size());
   for (size_t i = 0; i < v.size() && i < 30; ++i)
     Log("    %-48.48s %6.3f ms excl  %6.3f ms incl  calls/frame %.1f", v[i].first.c_str(), v[i].second.exclUs / 1000.0 / f,
         v[i].second.inclUs / 1000.0 / f, v[i].second.calls / f);

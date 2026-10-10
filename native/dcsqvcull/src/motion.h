@@ -37,6 +37,7 @@ texbind::Totals g_prevTex;
 allocslab::Totals g_prevAlloc;
 mprobe::Snap g_prevProbe{};
 double g_tscHz = 1;
+int64_t g_csvT0 = 0;  // first frame of the current recording (CSV time origin)
 
 // [Suite] MotionCounters: 0 = record frame times only, without the texture,
 // allocator, pass-timing and probe counters (for clean CPU profiles in motion).
@@ -46,6 +47,7 @@ void Start(double tscHz) {
   std::lock_guard<std::mutex> lock(g_mutex);
   for (auto& b : g_b) b = Bucket{};
   g_havePrev = false;
+  g_csvT0 = 0;
   g_tscHz = tscHz;
   if (g_counters) {
     mprobe::Install();
@@ -118,10 +120,9 @@ void OnFrame(const std::vector<ViewInfo>& views, int64_t qpcNow, uint64_t collec
     b.allocKB += (al.bytes - g_prevAlloc.bytes) / 1024.0;
     b.linSpeed += lin;
     if (g_csv) {
-      static int64_t csvT0 = 0;
-      if (!csvT0) csvT0 = qpcNow;
+      if (!g_csvT0) g_csvT0 = qpcNow;
       fprintf(g_csv, "%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.0f,%.3f,%llu,%.1f,%.3f,%.3f\n",
-              (qpcNow - csvT0) * g_qpcToUs / 1e6, ang, dt * 1000.0, collectUs / 1000.0,
+              (qpcNow - g_csvT0) * g_qpcToUs / 1e6, ang, dt * 1000.0, collectUs / 1000.0,
               (passUs - g_prevPassUs) / 1000.0, (cyc - g_prevRtCycles) / g_tscHz * 1000.0,
               static_cast<unsigned long long>(periph), static_cast<unsigned long long>(focus),
               static_cast<unsigned long long>(shadow), static_cast<unsigned long long>(tex.calls - g_prevTex.calls),

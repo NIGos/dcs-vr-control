@@ -2,7 +2,7 @@ using System.Text;
 
 namespace DcsVr.Core;
 
-/// <summary>One path DCS VR Control has written, with what was there before it first touched it.</summary>
+/// <summary>One path DCS Control has written, with what was there before it first touched it.</summary>
 public sealed record OriginalFile
 {
     public required string Path { get; init; }
@@ -14,7 +14,7 @@ public sealed record OriginalFile
     public string? BackupFile { get; init; }
     /// <summary>The original belonged to another program (another mod's dxgi.dll, ReShade): backed up and replaced.</summary>
     public bool Foreign { get; init; }
-    /// <summary>A file identical to one of DCS VR Control's own components was there (left by an earlier install or
+    /// <summary>A file identical to one of DCS Control's own components was there (left by an earlier install or
     /// another copy of the app's state): it counts as absent, so Back to stock DCS removes it.</summary>
     public bool Leftover { get; init; }
     /// <summary>options.lua: only these settings are owned. Setting path to its original literal (null: it was absent).
@@ -25,7 +25,7 @@ public sealed record OriginalFile
     public DateTimeOffset Since { get; init; } = DateTimeOffset.UtcNow;
 }
 
-/// <summary>The state of DCS VR Control's writes: the original of every path it changed, and the profile written last.</summary>
+/// <summary>The state of DCS Control's writes: the original of every path it changed, and the profile written last.</summary>
 public sealed record OriginalsBaseline
 {
     public int SchemaVersion { get; init; } = 2;
@@ -38,7 +38,7 @@ public sealed record OriginalsBaseline
     public string? LastAction { get; set; }
 }
 
-/// <param name="Action">restore (the backup is put back), remove (DCS VR Control created it) or settings (owned
+/// <param name="Action">restore (the backup is put back), remove (DCS Control created it) or settings (owned
 /// options.lua settings are set back, other edits kept).</param>
 public sealed record OriginalItem(string Path, string Action, bool Foreign, string? Detail);
 public sealed record OriginalsStatus(int Count, IReadOnlyList<OriginalItem> Files, string? ProfileId, string State, DateTimeOffset? LastActionAt, string? LastAction, string Folder, TransactionJournal? Current);
@@ -47,14 +47,14 @@ public sealed record OriginalsStatus(int Count, IReadOnlyList<OriginalItem> File
 public sealed record OriginalsApply(TransactionJournal Current, IReadOnlyList<string> ReplacedForeign, IReadOnlyList<string> PutBack);
 
 /// <summary>
-/// One mental model for DCS VR Control's writes. The first time a path is written its original is backed up (or
+/// One mental model for DCS Control's writes. The first time a path is written its original is backed up (or
 /// recorded as absent); later applies simply overwrite whatever is there, including files of an earlier profile,
 /// leftovers and other programs' files (backed up first). Back to stock DCS puts every path back to its original
 /// whatever it holds now; options.lua is handled setting by setting. Replaces the per-apply journals (folder
 /// "transactions"), which are converted once on first use.
 /// </summary>
 /// <param name="legacyFolders">Journal folders of earlier versions, oldest data first; read once to build the originals.</param>
-/// <param name="ownHashes">Hashes of DCS VR Control's own components: an existing file with these bytes counts as absent.</param>
+/// <param name="ownHashes">Hashes of DCS Control's own components: an existing file with these bytes counts as absent.</param>
 public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? legacyFolders = null, Func<IReadOnlySet<string>>? ownHashes = null)
 {
     public const int Schema = 2;
@@ -83,7 +83,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         var items = baseline.Files.AsEnumerable().Reverse().Select(f => new OriginalItem(f.Path,
             f.Settings is not null ? "settings" : f.BackupFile is not null ? "restore" : "remove", f.Foreign,
             f.Settings is { Count: > 0 } settings ? string.Join(", ", settings.Keys) : f.Settings is not null ? "no settings changed now"
-            : f.Foreign ? "another program's file, backed up" : f.Leftover ? "left by DCS VR Control earlier" : null)).ToArray();
+            : f.Foreign ? "another program's file, backed up" : f.Leftover ? "left by DCS Control earlier" : null)).ToArray();
         return new(items.Length, items, baseline.Current?.ProfileId, baseline.State, baseline.LastActionAt, baseline.LastAction, Directory, baseline.Current);
     }
 
@@ -121,7 +121,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 original = Capture(file, full, own);
                 baseline.Files.Add(original);
                 if (original.Foreign) replaced.Add(full);
-                Log($"First write of {full}: " + (original.Foreign ? "another program's file, backed up as " + original.BackupFile : original.BackupFile is not null ? "original backed up as " + original.BackupFile : original.Leftover ? "a file identical to a DCS VR Control component, counted as absent" : "absent before"));
+                Log($"First write of {full}: " + (original.Foreign ? "another program's file, backed up as " + original.BackupFile : original.BackupFile is not null ? "original backed up as " + original.BackupFile : original.Leftover ? "a file identical to a DCS Control component, counted as absent" : "absent before"));
             }
             if (file.LuaChanges is { } changes)
             {
@@ -276,7 +276,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         if (!File.Exists(full)) return new() { Path = full, Root = root, Settings = settings };
         var bytes = File.ReadAllBytes(full);
         var hash = Hashing.BytesSha256(bytes);
-        // Bytes DCS VR Control installs (this plan's or any of its components) are ours, whoever left them: absent.
+        // Bytes DCS Control installs (this plan's or any of its components) are ours, whoever left them: absent.
         if (settings is null && (file.OwnedLocation || hash == Hashing.BytesSha256(file.Content) || own.Contains(hash) || file.OwnHashes?.Contains(hash) == true))
             return new() { Path = full, Root = root, Leftover = true };
         var backup = NextBackupName();
@@ -329,7 +329,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             {
                 var current = File.ReadAllBytes(original.Path); var text = utf8.GetString(current);
                 // Nothing but the owned settings differs from the original: the original bytes go back exactly (a
-                // setting DCS VR Control inserted leaves no trace of its line).
+                // setting DCS Control inserted leaves no trace of its line).
                 if (OnlyOwnedSettingsDiffer(original, text) is { } exact) { AtomicFile.Write(original.Path, exact); return; }
                 foreach (var (key, value) in original.Settings) text = SetBack(text, key, value);
                 _ = new LuaOptions(text);
@@ -376,7 +376,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or DecoderFallbackException or ArgumentException) { return null; }
     }
 
-    /// <summary>A file DCS VR Control created was removed: an empty folder left behind below the authorized root (for
+    /// <summary>A file DCS Control created was removed: an empty folder left behind below the authorized root (for
     /// example bin\CheekyFoveatedDLSS) goes too. The root itself is never removed.</summary>
     private static void RemoveEmptyCreatedFolder(OriginalFile original)
     {
@@ -425,7 +425,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// <summary>
     /// Builds the originals from the journals of earlier versions (once). For each path the original is the backup (or
     /// absence) recorded by the oldest journal that touched it and was not restored; each owned options.lua setting
-    /// likewise takes the oldest recorded value. Bytes another journal installed, or identical to a DCS VR Control
+    /// likewise takes the oldest recorded value. Bytes another journal installed, or identical to a DCS Control
     /// component, count as absent. The newest applied journal becomes the applied profile. Backups are copied and
     /// checked before the baseline is written; only then is the old folder renamed (kept, never deleted).
     /// </summary>
@@ -452,7 +452,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         if (journals.Count == 0 && notes.Count == 0) return baseline;
         System.IO.Directory.CreateDirectory(Directory);
         var own = new HashSet<string>(ownHashes?.Invoke() ?? new HashSet<string>(), StringComparer.OrdinalIgnoreCase);
-        // Whole files any journal installed are DCS VR Control's own bytes (an earlier profile's dxgi.dll, for example).
+        // Whole files any journal installed are DCS Control's own bytes (an earlier profile's dxgi.dll, for example).
         foreach (var (journal, _) in journals.Values)
             foreach (var entry in journal.Entries.Where(e => e.LuaChanges is null && e.IniValues is null && !e.Deleted)) own.Add(entry.InstalledSha256);
         var active = journals.Values.Where(j => j.Journal.Status != "restored").OrderBy(j => j.Journal.CreatedAt).ToArray();
@@ -478,7 +478,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 if (previous is not null && settings is null && own.Contains(previous))
                 {
                     baseline.Files.Add(new() { Path = entry.Path, Root = entry.Root, Leftover = true, RuntimeLogs = entry.RuntimeLogs?.ToList(), Since = journal.CreatedAt });
-                    notes.Add($"  {entry.Path}: its backup is a DCS VR Control file; original counted as absent.");
+                    notes.Add($"  {entry.Path}: its backup is a DCS Control file; original counted as absent.");
                     continue;
                 }
                 string? backup = null;
@@ -497,7 +497,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 }
                 baseline.Files.Add(new() { Path = entry.Path, Root = entry.Root, OriginalSha256 = previous, BackupFile = backup, Foreign = previous is not null && settings is null, Settings = settings, RuntimeLogs = entry.RuntimeLogs?.ToList(), Since = journal.CreatedAt });
                 notes.Add($"  {entry.Path}: " + (settings is not null ? "settings " + string.Join(", ", settings.Select(s => s.Key + "=" + (s.Value ?? "absent"))) + (backup is null ? "" : ", whole file backed up as " + backup)
-                    : backup is not null ? "original backed up as " + backup : "created by DCS VR Control (removed on restore)") + ".");
+                    : backup is not null ? "original backed up as " + backup : "created by DCS Control (removed on restore)") + ".");
             }
         }
         var applied = active.Where(j => j.Journal.Status == "applied").ToArray();

@@ -21,7 +21,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
     /// <param name="savedProfile">Written to profile.json instead of <paramref name="profile"/>: the user's own draft when
     /// <paramref name="profile"/> carries values converted from Pimax Play.</param>
     /// <param name="appliedFovea">The converted Pimax Play values, saved as pimax-fovea.json in the profile folder.</param>
-    /// <param name="ownedSettings">options.lua settings DCS VR Control already changed, with their original values: the
+    /// <param name="ownedSettings">options.lua settings DCS Control already changed, with their original values: the
     /// plan starts from options.lua with these set back, so a setting the new profile no longer needs returns to the
     /// user's value and the recorded "before" values are the user's own.</param>
     /// <param name="neuralSha256">The hash recorded for the app's saved DLSS 5 runtime copy when the profile uses it; the
@@ -157,7 +157,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var layerDll = components.CheekyLayerDll ?? throw new InvalidDataException("Cheeky OpenXR layer unavailable.");
             var deployedDll = PathPolicy.UnderRoot(profileRoot, "cheeky/CheekyOpenXRLayer.dll");
             Add(deployedDll, File.ReadAllBytes(layerDll), "Cheeky OpenXR layer");
-            AddText(PathPolicy.UnderRoot(layersRoot, "cheeky.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_CHEEKY_foveated_dlss", deployedDll, 1, "DCS VR Control · Cheeky gaze"), "Profile Cheeky manifest");
+            AddText(PathPolicy.UnderRoot(layersRoot, "cheeky.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_CHEEKY_foveated_dlss", deployedDll, 1, "DCS Control · Cheeky gaze"), "Profile Cheeky manifest");
             layerNames.Add("XR_APILAYER_CHEEKY_foveated_dlss");
             environment["CHEEKY_OPENXR_LAYER_DISABLE"] = "1";
             if (profile.NeuralRendering)
@@ -234,7 +234,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var dll = PathPolicy.UnderRoot(profileRoot, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll");
             Add(dll, File.ReadAllBytes(forkDll ?? PathPolicy.UnderRoot(ofxr!, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll")), "OFXR framegen");
             AddText(PathPolicy.UnderRoot(profileRoot, "ofxr/ofxr_bridge.ini"), ConfigurationWriters.Ofxr(profile, Path.GetDirectoryName(exe)), "Framegen settings");
-            AddText(PathPolicy.UnderRoot(layersRoot, "ofxr.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_XRFrameBridge_diagnostic", dll, forkDll is null ? 116 : 401, "DCS VR Control · OFXR Bridge"), "Profile OFXR manifest");
+            AddText(PathPolicy.UnderRoot(layersRoot, "ofxr.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_XRFrameBridge_diagnostic", dll, forkDll is null ? 116 : 401, "DCS Control · OFXR Bridge"), "Profile OFXR manifest");
             layerNames.Add("XR_APILAYER_XRFrameBridge_diagnostic");
         }
         if (!profile.Desktop) environment["XRFG_DISABLE_OFXR_BRIDGE"] = "1";
@@ -286,6 +286,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             // The loader chains to bin\dxgi2.dll; another chained DXGI mod there is backed up and replaced likewise.
             var fix = components.PrefetchFixDll is { } dll && File.Exists(dll) ? File.ReadAllBytes(dll) : throw new InvalidDataException("The CPU Boost prefetch fix is unavailable.");
             Add(Path.Combine(bin, "dxgi2.dll"), fix, "CPU Boost prefetch fix", runtimeLogs: [PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log")]);
+            // Its settings next to it, so it also works when DCS is started without DCS Control (Steam, a shortcut).
+            AddText(Path.Combine(bin, "DcsControlPrefetchFix.ini"), "; Written by DCS Control for the applied profile (CPU Boost prefetch fix). Back to stock DCS removes it.\r\n[PrefetchFix]\r\n"
+                + "Mode=" + profile.BoostPrefetch.ToString().ToLowerInvariant() + "\r\nWindowMs=5000\r\nLog=" + PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log") + "\r\n", "CPU Boost prefetch fix settings");
         }
         void Add(string path, byte[] content, string purpose, IReadOnlyList<LuaValueChange>? luaChanges = null, IReadOnlyDictionary<string, string>? iniValues = null, IReadOnlyList<string>? runtimeLogs = null, IReadOnlyCollection<string>? ownHashes = null)
         {

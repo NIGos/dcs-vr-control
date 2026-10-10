@@ -168,7 +168,7 @@ Test("Originals: another program's file is backed up once, replaced, reported an
     Require(store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader v2", bin))).ReplacedForeign.Count == 0, "Reported once");
     Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade");
 });
-Test("Originals: bytes of DCS VR Control's own components already there count as absent", () =>
+Test("Originals: bytes of DCS Control's own components already there count as absent", () =>
 {
     var bin = Path.Combine(root, "originals/leftover/bin"); var managed = Path.Combine(root, "originals/leftover/managed");
     var loader = Make("originals/leftover/bin/dxgi.dll", "focus loader"); var host = Make("originals/leftover/bin/Cheeky/Host.dll", "cheeky host");
@@ -243,7 +243,7 @@ Test("Originals: an in-place update records the new bytes and Back to stock DCS 
     Require(store.RestoreOriginals().Complete && File.ReadAllText(settings) == "original" && new LuaOptions(File.ReadAllText(lua)).Get("VR", "enable") == "false");
 });
 // This PC on 2026-10-05: an app started inside another app's sandbox kept its journals in a private copy of
-// %LOCALAPPDATA% (Packages\<package>\LocalCache\Local\DcsVrControl). Its profile (journal A, applied) owned the DCS files;
+// %LOCALAPPDATA% (Packages\<package>\LocalCache\Local\DcsControl). Its profile (journal A, applied) owned the DCS files;
 // the normally started app could not see A, so its own apply (journal B) found A's files: Cheeky's host, runtime and INI
 // and the managed files were gone (removed in between, recorded nowhere), dxgi.dll, dxgi2.dll and nvngx_dlssnr.dll were
 // A's bytes and were "backed up" as originals, and options.lua already held A's settings. Both journals say "applied".
@@ -267,7 +267,7 @@ Test("Conversion: two applied journals (this PC's state) give the true originals
         var text = File.ReadAllText(options); foreach (var c in changes) text = new LuaOptions(text).SetLiteral(c.Key.Split('.'), c.After);
         return new(options, Hashing.FileSha256(options), Encoding.UTF8.GetBytes(text), "options", changes.Select(c => new LuaValueChange(c.Key, c.Before, c.After)).ToArray(), Root: config);
     }
-    var sandboxCopy = new TransactionStore(Path.Combine(dir, "Packages/Claude_fixture/LocalCache/Local/DcsVrControl/transactions"));
+    var sandboxCopy = new TransactionStore(Path.Combine(dir, "Packages/Claude_fixture/LocalCache/Local/DcsControl/transactions"));
     var realStore = new TransactionStore(Path.Combine(dir, "state/transactions"));
     // Older history in the real store, fully restored: ignored.
     var old = realStore.Apply(Plan("pimax-qv-dlss5-fg-boost", Bin(dxgi, "loader v0"), Managed(profileJson, "{\"v\":0}")));
@@ -289,14 +289,14 @@ Test("Conversion: two applied journals (this PC's state) give the true originals
     Require(status.Count == 10 && status.State == "applied" && status.ProfileId == "pimax-qv-dlss5-fg-boost" && status.Current!.Id == b.Id, "Ten paths, the newest applied journal is the applied profile");
     var lua = status.Files.Single(f => f.Path == options);
     Require(lua.Action == "settings" && lua.Detail == "miscellaneous.launcher, graphics.sync", "options.lua: launcher from A (true), sync from B: " + lua.Detail);
-    Require(status.Files.Where(f => f.Path != options).All(f => f.Action == "remove" && !f.Foreign), "Every other path was absent before DCS VR Control: " + string.Join(", ", status.Files.Where(f => f.Action != "remove").Select(f => f.Path)));
+    Require(status.Files.Where(f => f.Path != options).All(f => f.Action == "remove" && !f.Foreign), "Every other path was absent before DCS Control: " + string.Join(", ", status.Files.Where(f => f.Action != "remove").Select(f => f.Path)));
     Require(Directory.Exists(realStore.StateDirectory + ".converted") && !Directory.Exists(realStore.StateDirectory) && Directory.Exists(sandboxCopy.StateDirectory), "The old folder is kept renamed; the sandbox copy is left as it is");
     Require(File.ReadAllText(store.LogPath).Contains("2 journals were marked applied at once"), "The conversion is logged");
     // The launch contract reads the applied profile; Back to stock DCS puts back the true originals.
     Require(store.ReadCurrent()!.Entries.Count == 10);
     Require(store.RestoreOriginals().Complete, "Back to stock DCS completes");
     Require(File.ReadAllText(options) == original, "options.lua is the true original");
-    Require(!File.Exists(dxgi) && !File.Exists(dxgi2) && !Directory.Exists(cheekyDir) && !File.Exists(loaderLog) && !Directory.Exists(profileDir + "/cheeky") && !File.Exists(profileJson), "DCS VR Control's files are gone, A's leftovers included");
+    Require(!File.Exists(dxgi) && !File.Exists(dxgi2) && !Directory.Exists(cheekyDir) && !File.Exists(loaderLog) && !Directory.Exists(profileDir + "/cheeky") && !File.Exists(profileJson), "DCS Control's files are gone, A's leftovers included");
     Require(File.ReadAllText(userFile) == "not ours" && Directory.Exists(bin), "Nothing else touched");
     // A new apply works on the clean state and is restorable again.
     var again = store.Apply(Plan("next", Options(("miscellaneous.launcher", "true", "false")), Bin(dxgi, "focus loader"), Managed(profileJson, "{\"v\":3}")));
@@ -669,6 +669,15 @@ Test("options.lua is changed only where the pipeline needs a different value", (
     var changes = planner.Build(stereo, new() { DcsExecutable = exe, OptionsPath = off, PimaxRuntime = runtime }, Path.Combine(root, "minimal-lua/managed2")).Files.Single(f => f.Path == off).LuaChanges!;
     Require(changes.Select(c => c.Path).SequenceEqual(["VR.enable"])); // eye gaze and other options are never touched
 });
+Test("An installation from before the rename keeps its state folder; a new one uses DcsControl", () =>
+{
+    var fresh = Path.Combine(root, "rename/fresh"); Directory.CreateDirectory(fresh);
+    Require(ControlService.StateRootIn(fresh) == Path.Combine(fresh, "DcsControl"));
+    var earlier = Path.Combine(root, "rename/earlier"); Directory.CreateDirectory(Path.Combine(earlier, "DcsVrControl"));
+    Require(ControlService.StateRootIn(earlier) == Path.Combine(earlier, "DcsVrControl"), "the backups of an existing install stay where they are");
+    Directory.CreateDirectory(Path.Combine(earlier, "DcsControl"));
+    Require(ControlService.StateRootIn(earlier) == Path.Combine(earlier, "DcsControl"));
+});
 Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the user has them, and adds only the optimizations", () =>
 {
     var exe = Make("desktop/bin/DCS.exe", "fixture");
@@ -729,8 +738,11 @@ Test("CPU Boost prefetch fix deploys as the loader's dxgi2.dll, only when enable
     var loaderIndex = plan.Files.ToList().FindIndex(f => f.Path == Path.Combine(bin, "dxgi.dll")); var fixIndex = plan.Files.ToList().FindIndex(f => f.Path == Path.Combine(bin, "dxgi2.dll"));
     Require(loaderIndex >= 0 && fixIndex > loaderIndex); // restored first, before its loader
     Require(plan.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "skip" && plan.LaunchEnvironment["DCSVR_PREFETCH_LOG"] == Path.Combine(bin, "DcsVrPrefetchFix.log") && plan.LaunchEnvironment["DCSVR_PREFETCH_WINDOW_MS"] == "5000");
+    // The same settings next to the fix, so it also works when DCS starts from Steam or a shortcut.
+    var settings = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path == Path.Combine(bin, "DcsControlPrefetchFix.ini")).Content);
+    Require(settings.Contains("[PrefetchFix]") && settings.Contains("Mode=skip") && settings.Contains("WindowMs=5000") && settings.Contains("Log=" + Path.Combine(bin, "DcsVrPrefetchFix.log")), settings);
     var off = planner.Build(boost with { BoostPrefetch = PrefetchFix.Off }, inventory, Path.Combine(root, "prefetch/managed-off"));
-    Require(off.Files.All(f => !f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase)) && off.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "off");
+    Require(off.Files.All(f => !f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("PrefetchFix.ini", StringComparison.OrdinalIgnoreCase)) && off.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "off");
     Require(planner.Build(boost with { CpuBoost = false }, inventory, Path.Combine(root, "prefetch/managed-noboost")).LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "off");
     // Another chained DXGI mod already there is listed as replaced (Apply backs it up), never refused.
     Make("prefetch/bin/dxgi2.dll", "other-mod");
@@ -765,10 +777,10 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0x3", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0" })
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
-    var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false });
-    Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
+    var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false, EngineGBufferRecorder = false });
+    Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
         && ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false }).Contains("TaskQueueClock=0"));
     // Developer mode: [Dev] paths only while it is on; full paths to existing files, otherwise refused or flagged.
     Require(ini.Contains("PayloadPath=\r\n") || ini.Contains("PayloadPath=\n"));
@@ -837,7 +849,7 @@ string ReleaseFixture(string name, string version, string content)
     var source = Path.Combine(root, "app-sources/" + name);
     Directory.CreateDirectory(source); AtomicFile.WriteText(Path.Combine(source, "app.bin"), content); AtomicFile.WriteText(Path.Combine(source, "readme.txt"), "fixture");
     var files = new[] { "app.bin", "readme.txt" }.Select(f => new ReleaseFile(f, Hashing.FileSha256(Path.Combine(source, f)), new FileInfo(Path.Combine(source, f)).Length)).ToList();
-    AtomicFile.WriteText(Path.Combine(source, "release-manifest.json"), JsonData.Serialize(new ReleaseManifest(1, "DcsVrControl", version, files))); return source;
+    AtomicFile.WriteText(Path.Combine(source, "release-manifest.json"), JsonData.Serialize(new ReleaseManifest(1, "DcsControl", version, files))); return source;
 }
 Test("Application install, upgrade, uninstall preserve unowned files", () =>
 {
@@ -1543,7 +1555,7 @@ Test("CPU Boost lists reject empty names and processes that start DCS", () =>
     var p = new VrProfile { CpuBoost = true };
     Require(!ProfileValidation.Validate(p).Any(i => i.Code.StartsWith("boost")), "Default Boost lists are valid");
     Require(ProfileValidation.Validate(p with { BoostCloseApps = ["notepad", " "] }).Any(i => i.Code == "boost-app-name" && i.Severity == IssueSeverity.Error));
-    foreach (var name in new[] { "steam", "Steam.exe", "explorer", "EpicGamesLauncher", "DCS", "DcsVrControl" })
+    foreach (var name in new[] { "steam", "Steam.exe", "explorer", "EpicGamesLauncher", "DCS", "DcsControl" })
         Require(ProfileValidation.Validate(p with { BoostCloseApps = [name] }).Any(i => i.Code == "boost-launcher" && i.Severity == IssueSeverity.Error), name);
     Require(ProfileValidation.Validate(p with { BoostBackgroundApps = ["msedge", "explorer"] }).Any(i => i.Code == "boost-launcher"));
     Require(!ProfileValidation.Validate(p with { BoostBackgroundApps = ["explorer"], BoostMoveBackgroundApps = false }).Any(i => i.Code == "boost-launcher"), "An unused move list is not checked");
