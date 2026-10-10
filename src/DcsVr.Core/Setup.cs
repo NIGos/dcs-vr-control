@@ -45,7 +45,7 @@ public static class Readiness
     {
         // A draft without its own DLSS 5 runtime file is checked with the app's saved copy, exactly as Preview deploys it.
         // What will run: the VR settings Optimizations only keeps for later are not checked.
-        profile = service.ResolveNeuralRuntime(profile).ForLaunch();
+        profile = HeadsetRefresh.Resolve(service.ResolveNeuralRuntime(profile).ForLaunch());
         var checks = new List<ReadinessCheck>();
         void Add(string id, CheckState state, string title, string detail, string? guide = null) => checks.Add(new(id, state, title, detail, guide));
         foreach (var issue in ProfileValidation.Validate(profile, inventory))

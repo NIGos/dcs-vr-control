@@ -1,0 +1,70 @@
+{
+ "source": "pi_server.exe live memory (read-only), Pimax Crystal Super micro-OLED, lens type 5, 2026-10-10",
+ "model": "DistortionEqnCatmullRom<18> (radial, Oculus-style), identical for both eyes",
+ "catmullRom_K": [
+  1.00016,
+  1.01739,
+  1.03625,
+  1.05658,
+  1.07842,
+  1.102,
+  1.12748,
+  1.15512,
+  1.18504,
+  1.21739,
+  1.25225,
+  1.28983,
+  1.3304,
+  1.37529,
+  1.42702,
+  1.49145,
+  1.57788,
+  1.69782
+ ],
+ "unused_in_this_lens": [
+  "DistortionEqnXOutterOff (nasal/temporal)",
+  "DistortionEqnFixDegree/2 (eye relief)",
+  "PeripheryExtendedLensDistortion"
+ ],
+ "catmullRom_maxR_tan": 0.7513983845710754,
+ "metersPerTanAngleAtCenter": 0.0168,
+ "chroma_oculus_style": {
+  "red": [
+   -0.004996,
+   -0.002793
+  ],
+  "blue": [
+   0.005907,
+   0.003212
+  ],
+  "note": "scale = 1 + c0 + c1*r^2 (Oculus ChromaticAberration[4] layout)"
+ },
+ "panel": {
+  "model": "Sony ECX344A (likely)",
+  "pitch_um": 6.3,
+  "pixels": [
+   3840,
+   3552
+  ]
+ },
+ "derived": {
+  "half_fov_h_deg": 47.97,
+  "half_fov_v_deg": 42.85,
+  "maxR_deg": 51.91,
+  "ppd": {
+   "0": 46.5,
+   "10": 45.8,
+   "20": 43.2,
+   "30": 38.7,
+   "40": 33.7
+  },
+  "check": "half FOV matches Sboys 'like Pimax' capture (98.2 x 87.1 incl. optical-centre offset)"
+ },
+ "not_available": [
+  "virtual image distance",
+  "eye relief / design eye point",
+  "lens surface prescription",
+  "optical centre offset (in an object not decoded)",
+  "Tobii eye-tracker config files are encrypted"
+ ]
+}

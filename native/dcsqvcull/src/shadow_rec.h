@@ -3293,6 +3293,9 @@ std::atomic<bool> g_verify{false};  // [Suite] ShadowRecVerify
 std::atomic<uint32_t> g_scope{kDefaultScope};
 std::atomic<int> g_state{0};        // 0 = not tried (retried), 1 = ready, -1 = unavailable
 std::atomic<bool> g_disabled{false};
+// Passes drawn from a command list (monotonic; the status word reads it to
+// tell a working recorder from an idle one).
+std::atomic<uint64_t> g_workPasses{0};
 std::atomic<bool> g_shutdown{false};
 std::atomic<int> g_inside{0};
 bool g_chained = false;
@@ -4346,6 +4349,7 @@ void WrapTarget(int s, void* pass, void* ctx, shadowpass::ExecFn orig) {
     cs.st.executeNs += pc.executeNs;
   }
   cs.st.passReason[pc.state == kPsExecuted ? kPExecuted : pc.reason]++;
+  if (pc.state == kPsExecuted) g_workPasses.fetch_add(1, std::memory_order_relaxed);
   if (mine && job.resolved && !SlotBusy(s)) QueueMaint(job);
   TryMaintain();
   // Consumed: arm the next frame's job now, so the sort hook can start it as

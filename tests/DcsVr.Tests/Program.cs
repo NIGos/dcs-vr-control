@@ -9,6 +9,7 @@ var root = Path.Combine(workspace, "artifacts/tests/" + Guid.NewGuid().ToString(
 var tests = new List<(string Name, Action Test)>();
 Readiness.ActiveRouteProvider = () => new(null, "Test fixture: no running headset route.", TrackingKind.Unknown);
 PimaxFovea.SettingsPath = Path.Combine(root, "no-pimax-play/global.json"); // never the build machine's Pimax Play settings
+HeadsetRefresh.PimaxLogFolder = Path.Combine(root, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(root, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(root, "no-steamvr.vrsettings");
 LaunchSafety.CurrentJob = () => default; // never the job object the test runner itself may run in
 void Test(string name, Action action) => tests.Add((name, action));
 void Require(bool value, string message = "Assertion failed") { if (!value) throw new Exception(message); }
@@ -669,6 +670,52 @@ Test("options.lua is changed only where the pipeline needs a different value", (
     var changes = planner.Build(stereo, new() { DcsExecutable = exe, OptionsPath = off, PimaxRuntime = runtime }, Path.Combine(root, "minimal-lua/managed2")).Files.Single(f => f.Path == off).LuaChanges!;
     Require(changes.Select(c => c.Path).SequenceEqual(["VR.enable"])); // eye gaze and other options are never touched
 });
+Test("The refresh rate is read from Pimax Play's newest session report (fps_target), and follows the headset unless set by hand", () =>
+{
+    var logs = Path.Combine(root, "pimax-logs"); Directory.CreateDirectory(logs);
+    var older = Path.Combine(logs, "PiService__2026-10-09-20.log");
+    // Pimax Play's real report: fps_target is the headset's rate (72.4 at 72 Hz); refresh_rate is 120 whatever it is.
+    File.WriteAllText(older, "x [rformanceSessionData] Performance body to send: {\"game_info\":{\"fps_analysis\":{\"fps_target\":72.40000000000001}},\"refresh_rate\":120}\n");
+    File.SetLastWriteTimeUtc(older, DateTime.UtcNow.AddHours(-2));
+    Require(HeadsetRefresh.ReadPimax(logs) is { Hz: 72.4 }, "fps_target, not refresh_rate");
+    var newer = Path.Combine(logs, "PiService__2026-10-10-20.log");
+    File.WriteAllText(newer, "a line without it\nx Performance body to send: {\"fps_analysis\":{\"fps_target\":72.40000000000001},\"refresh_rate\":120}\nx Performance body to send: {\"fps_analysis\":{\"fps_target\":90},\"refresh_rate\":120}\nx other: {\"fps_target\":60}\n");
+    Require(HeadsetRefresh.ReadPimax(logs) is { Hz: 90 }, "newest file, last report");
+    var previous = HeadsetRefresh.PimaxLogFolder; HeadsetRefresh.PimaxLogFolder = logs;
+    try
+    {
+        Require(HeadsetRefresh.Resolve(new VrProfile { HeadsetRefreshHz = 72 }).HeadsetRefreshHz == 90, "follows the headset");
+        Require(HeadsetRefresh.Resolve(new VrProfile { HeadsetRefreshHz = 72, RefreshFromHeadset = false }).HeadsetRefreshHz == 72, "set by hand");
+        var read = HeadsetRefresh.Resolve(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2, FpsLimit = FpsLimitMode.MatchRefresh });
+        Require(FramePacing.RequestedCap(read) == 45, "the DCS cap follows 90 Hz");
+        Require(FramePacing.Checks(read, new InventorySnapshot()).Single(c => c.Id == "refresh-rate").State == CheckState.Pass, "a read rate needs no confirmation");
+        Require(FramePacing.Checks(read with { RefreshFromHeadset = false }, new InventorySnapshot()).Single(c => c.Id == "refresh-rate").State == CheckState.Manual, "a rate set by hand is confirmed in the headset software");
+    }
+    finally { HeadsetRefresh.PimaxLogFolder = previous; }
+    Require(HeadsetRefresh.ReadPimax(Path.Combine(root, "no-such-folder")) is null);
+});
+Test("The live Pimax compositor rate wins over the last session's report", () =>
+{
+    var runtime = Path.Combine(root, "pimax-runtime"); Directory.CreateDirectory(runtime);
+    var older = Path.Combine(runtime, "pvr_srv_log_26-10-09-20-19-29.txt");
+    File.WriteAllText(older, "[PSRV] 0 Normal rendering fps:(a:89.9,c:89.996436) Missed:(a:0)\n");
+    File.SetLastWriteTimeUtc(older, DateTime.UtcNow.AddHours(-2));
+    // Pimax Play switched from 90 to 72 Hz (display_timing_selection 0 to 1) in the newest log.
+    File.WriteAllText(Path.Combine(runtime, "pvr_srv_log_26-10-10-14-12-32.txt"), new string('x', 300 * 1024) + "\n[PSRV] 0 Normal rendering fps:(a:90.02,c:89.996436) Missed:(a:0)\n[PSRV] set display_timing_selection:1\n[PSRV] 31556 Warning rendering fps:(a:36.1,c:72.402376) Missed:(a:2)\n[PSRV] hmd: 493.15 FPS\n");
+    Require(HeadsetRefresh.ReadPimaxRuntime(runtime) is { Hz: 72.4, Source: "Pimax Play" }, "last compositor rate of the newest log");
+    Require(HeadsetRefresh.ReadPimaxRuntime(Path.Combine(root, "no-such-runtime")) is null);
+    var logs = Path.Combine(root, "pimax-session-logs"); Directory.CreateDirectory(logs);
+    File.WriteAllText(Path.Combine(logs, "PiService__2026-10-10-14.log"), "x Performance body to send: {\"fps_analysis\":{\"fps_target\":90}}\n");
+    var (previousRuntime, previousLogs) = (HeadsetRefresh.PimaxRuntimeFolder, HeadsetRefresh.PimaxLogFolder);
+    HeadsetRefresh.PimaxRuntimeFolder = runtime; HeadsetRefresh.PimaxLogFolder = logs;
+    try
+    {
+        Require(HeadsetRefresh.Detect(RuntimeKind.Pimax) is { Hz: 72.4 }, "live rate first");
+        HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(root, "no-such-runtime");
+        Require(HeadsetRefresh.Detect(RuntimeKind.Pimax) is { Hz: 90 }, "session report when the runtime log is missing");
+    }
+    finally { (HeadsetRefresh.PimaxRuntimeFolder, HeadsetRefresh.PimaxLogFolder) = (previousRuntime, previousLogs); }
+});
 Test("An installation from before the rename keeps its state folder; a new one uses DcsControl", () =>
 {
     var fresh = Path.Combine(root, "rename/fresh"); Directory.CreateDirectory(fresh);
@@ -756,6 +803,59 @@ Test("CPU Boost prefetch fix deploys as the loader's dxgi2.dll, only when enable
     Make("prefetch/bin/dxgi2.dll", "other-mod");
     Require(planner.Build(boost, inventory, Path.Combine(root, "prefetch/managed-other")).Files.Single(f => f.Path == Path.Combine(bin, "dxgi2.dll")).ExpectedSha256 == Hashing.BytesSha256(Encoding.UTF8.GetBytes("other-mod")));
 });
+Test("Pupil shift is deployed first in the layer chain with its ini, only for eye-tracked Quad Views", () =>
+{
+    var exe = Make("pupil/game/bin/DCS.exe", "fixture"); var options = Make("pupil/sg/DCS/Config/options.lua", Lua);
+    var runtime = Make("pupil/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("pupil/runtime.dll", "fixture");
+    var dll = Make("pupil/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
+    var planner = new DeploymentPlanner(new(null, null, null, PupilShiftDll: dll));
+    var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, PupilShift = true, PupilShiftEyeRadiusMm = 11, PupilShiftVirtualImageM = 1.2 };
+    var plan = planner.Build(on, inventory, Path.Combine(root, "pupil/managed"));
+    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Split(';')[0] == "XR_APILAYER_DCSVR_pupil_shift");
+    var ini = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
+    Require(ini.Contains("[PupilShift]\nEnabled=1") && ini.Contains("EyeRadiusMm=11") && ini.Contains("VirtualImageM=1.2") && ini.Contains("SimulateGaze=0"));
+    var manifest = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("pupil-shift.json")).Content);
+    Require(manifest.Contains("XR_APILAYER_DCSVR_pupil_shift") && manifest.Contains("XR_APILAYER_DCSVR_pupil_shift.dll"));
+    // Without a gaze (fixed focus, no Quad Views, desktop) the layer is not installed and the profile says why.
+    foreach (var off in new[] { on with { Gaze = GazeMode.Fixed }, on with { QuadViews = QuadProvider.None }, on with { PupilShift = false } })
+        Require(!planner.Build(off, inventory, Path.Combine(root, "pupil/managed-off")).Files.Any(f => f.Path.Contains("pupilshift")));
+    Require(ProfileValidation.Validate(on with { Gaze = GazeMode.Fixed }).Any(i => i.Code == "pupil-gaze" && i.Severity == IssueSeverity.Warning));
+    Require(ProfileValidation.Validate(on with { PupilShiftEyeRadiusMm = 30 }).Any(i => i.Code == "pupil-radius" && i.Severity == IssueSeverity.Error));
+    Require(ProfileValidation.Validate(on with { PupilShiftVirtualImageM = 0.1 }).Any(i => i.Code == "pupil-image"));
+    Require(!ProfileValidation.Validate(on).Any(i => i.Code.StartsWith("pupil")));
+    Throws<InvalidDataException>(() => new DeploymentPlanner(new(null, null, null)).Build(on, inventory, Path.Combine(root, "pupil/managed-missing")));
+    // The in-flight switch: written to the ini, named for the diagnostic panel, and kept apart from the other keys.
+    Require(ini.Contains("Toggle=121:5"));
+    Require(ConfigurationWriters.PupilShift(on with { PupilShiftToggleKey = "Off" }).Contains("Toggle=0:0") && plan.LaunchEnvironment["DCSVR_PUPIL_HOTKEY"] == "0:0");
+    Require(ProfileValidation.Validate(on with { EngineOptimizations = true, PupilShiftToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"));
+    Require(ProfileValidation.Validate(on with { EngineOptimizations = true, PupilShiftToggleKey = "120:3" }).Any(i => i.Code == "pupil-hotkey"));
+    Require(!ProfileValidation.Validate(on with { PupilShift = false, EngineOptimizations = true, PupilShiftToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"));
+});
+Test("The Pupil shift page reads the layer's log: working, no gaze, switched off, not installed", () =>
+{
+    var folder = Path.Combine(root, "pupil-status"); Directory.CreateDirectory(folder);
+    Require(PupilShiftStatus.Read(folder, false).State == "not-installed" && PupilShiftStatus.Read(null, true).State == "not-installed");
+    File.WriteAllText(Path.Combine(folder, PupilShiftStatus.LayerDll), "layer");
+    Require(PupilShiftStatus.Read(folder, false).State == "waiting");
+    var log = Path.Combine(folder, PupilShiftStatus.LogName);
+    File.WriteAllText(log, string.Join("\n",
+        "10:00:00.000 XR_APILAYER_DCSVR_pupil_shift loaded",
+        "10:00:00.100 settings: enabled=1 eye_radius=10.5mm virtual_image=1.50m max_gaze=35deg simulate=0 (0.0, 0.0) toggle=121:5",
+        "10:00:01.000 end_frame: restored 4 projection views",
+        "10:00:02.000 stats: frames=90 shifted=90 restored=360 gaze x[-12.4..18.0] y[-6.0..4.1] deg, max shift 3.21 mm; runtime left eye vs head x[-31.20..-31.20] z[0.00..0.00] mm",
+        "10:00:03.000 stats: frames=90 shifted=90 restored=360 gaze x[-20.0..5.0] y[-2.0..9.5] deg, max shift 3.80 mm; runtime left eye vs head x[-31.20..-31.20] z[0.00..0.00] mm") + "\n");
+    var working = PupilShiftStatus.Read(folder, false);
+    Require(working.State == "working" && working.SessionGazeX == new PupilRange(-20, 18) && working.SessionGazeY == new PupilRange(-6, 9.5) && working.SessionMaxShiftMm == 3.8, "session ranges");
+    Require(working.SecondsWithGaze == 2 && working.Seconds == 2 && working.RestoredViews == 360 && working.Hotkey == "121:5" && working.Warnings.Count == 0 && !working.Live);
+    File.AppendAllText(log, "10:00:04.000 stats: frames=90 shifted=0 (no gaze source); runtime left eye vs head x[-31.20..-31.20] mm\n");
+    Require(PupilShiftStatus.Read(folder, false).State == "no-gaze");
+    File.AppendAllText(log, "10:00:05.000 stats: frames=90 shifted=0 (correction off); runtime left eye vs head x[-31.20..-31.20] mm\n");
+    Require(PupilShiftStatus.Read(folder, false).State == "off");
+    // A runtime that already moves the eye with the gaze would get the correction twice.
+    File.AppendAllText(log, "10:00:06.000 stats: frames=90 shifted=90 restored=360 gaze x[-1.0..1.0] y[0.0..0.0] deg, max shift 0.20 mm; runtime left eye vs head x[-33.00..-30.00] z[0.00..0.00] mm\n");
+    Require(PupilShiftStatus.Read(folder, false).Warnings.Any(w => w.Contains("twice")));
+});
 Test("DCS engine optimizations install in Saved Games Scripts with every ini key explicit, and restore removes them and what they wrote", () =>
 {
     var exe = Make("engine/game/bin/DCS.exe", "fixture"); var options = Make("engine/sg/DCS/Config/options.lua", Lua);
@@ -785,7 +885,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", "ShadowRecorderHelpers=3", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=0", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0" })
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", "ShadowRecorderHelpers=3", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
     var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false, EngineGBufferRecorder = false });
     Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")

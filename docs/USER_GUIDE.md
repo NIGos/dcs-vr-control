@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.5.1-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.5.2-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -61,7 +61,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-Download `DcsControl-0.5.1-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
+Download `DcsControl-0.5.2-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
 
 The folder contains only three things: **`DcsControl.exe`** (the app), **`Install DCS Control.cmd`** and a **`files`** folder with everything else (keep it next to `DcsControl.exe`), plus a short `README.txt`. The folder can be anywhere: Desktop, Downloads, another drive. The app keeps its own data (backups, profiles) in `%LOCALAPPDATA%`, so moving the folder loses nothing.
 
@@ -254,11 +254,12 @@ Good to know:
 | **Ctrl+Shift+F12** | DLSS 5 on/off for this session (compare with and without) | DLSS 5 → In-flight toggle key |
 | **Alt+Shift+F12** | Show/hide the in-headset diagnostic panel | Framegen → In-headset diagnostics → Diagnostic panel key |
 | **Alt+Shift+F11** | DCS engine optimizations off/on (one beep off, two on) | Engine Optimizations → In-flight switch |
+| **Ctrl+Shift+F10** | Pupil shift off/on (low beep off, high beep on) | Pupil shift → In-flight switch |
 | **Ctrl+Alt+F11** | Start or stop the DCS engine optimizations' test suite | Fixed |
 
 To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
-The **diagnostic panel** (frame-generation profiles) is drawn in the headset and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. Options under **In-headset diagnostics** (Framegen page):
+The **diagnostic panel** (frame-generation profiles) is drawn in the headset and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine: all 17 on", green), only some ("Engine: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine: none on", red) or that you switched them off ("Engine: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF". Options under **In-headset diagnostics** (Framegen page):
 
 - **Panel visible at start**
 - **VRAM counter** — adds the video memory in use to the panel (off by default). Use it when you suspect VRAM is full.

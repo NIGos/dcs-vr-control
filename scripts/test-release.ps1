@@ -49,7 +49,7 @@ if($gui.ExitCode -ne 0){throw 'Installed GUI offscreen smoke failed.'}
 $gui.Dispose()
 foreach($index in 0..47){if(-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "gui-$index.png"))){throw 'Missing offscreen GUI view.'}}
 $guiChecks=Get-Content -LiteralPath (Join-Path $fixtureRoot 'gui-checks.json') -Raw | ConvertFrom-Json
-if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){275}else{261})){throw 'Installed WebView2 control and bridge verification failed.'}
+if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){286}else{272})){throw 'Installed WebView2 control and bridge verification failed.'}
 # Exercise the actual packaged service against isolated game/runtime fixtures.
 # Optional real user-supplied NR deployment is tested only in these game fixtures.
 $presets = & $installedCli presets | ConvertFrom-Json
@@ -77,7 +77,7 @@ foreach($case in $cases){
     $profile.neuralRendering=$case.neural; $profile.foveatedDlss=-not $case.neural
     $profile.foveaSource='Profile'; $profile.quadFocusScale=1.25; $profile.quadSharpening=.45; $profile.quadEdgeBlend=.15
     $profile.flowPreset='Slow'; $profile.bidirectionalFlow=$true; $profile.nvidiaFlowScale=100
-    $profile.fpsLimit='MatchRefresh'; $profile.headsetRefreshHz=90; $profile.disableDcsVSync=$true
+    $profile.fpsLimit='MatchRefresh'; $profile.headsetRefreshHz=90; $profile | Add-Member -Force refreshFromHeadset $false; $profile.disableDcsVSync=$true
     if($case.neural){$profile.neuralRuntimePath=$NeuralRuntime; $profile.neuralLocalTone=1.1; $profile.neuralColorStrength=.8; $profile.neuralUiCorrection=$true}
     $profile.experimentalAcknowledged=$true; $profile.runtimeManifestPath=$runtimeManifest
     $profile | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $profileFile -Encoding utf8

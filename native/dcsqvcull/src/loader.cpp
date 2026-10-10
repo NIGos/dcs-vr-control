@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <share.h>
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <map>
@@ -96,6 +97,9 @@ DcsQvLoaderApi g_api;
 // ---- payload management ----
 DcsQvPayloadStopFn g_stopActive = nullptr;
 FILETIME g_payloadTime{};
+// Status word (layout in status_word.h): written only by the active payload,
+// read by DcsQvCull_Status. Owned here so it outlives every payload.
+std::atomic<uint64_t> g_status{0};
 
 bool LoadPayload(const std::wstring& src) {
   // Load a uniquely named copy so the deployed file is never locked.
@@ -117,16 +121,22 @@ bool LoadPayload(const std::wstring& src) {
     Logf("loader: payload exports missing");
     return false;  // module stays loaded but inert
   }
+  // Optional (payloads built before the status word lack it: status stays 0).
+  auto setStatus = reinterpret_cast<DcsQvPayloadSetStatusWordFn>(GetProcAddress(m, "DcsQvPayload_SetStatusWord"));
+  g_status.store(0, std::memory_order_release);  // not ready during the swap
   DcsQvPayloadStopFn previous = g_stopActive;
   if (previous) {
     Logf("loader: stopping previous payload");
     previous();  // its worker threads exit; its hooks stay valid until repointed
+    // Its Stop detached it from the status word: it never writes again.
+    g_status.store(0, std::memory_order_release);
   }
   {
     std::lock_guard<std::mutex> lock(g_regMutex);
     ++g_generation;
   }
   Logf("loader: starting payload %ls (generation %u)", name, g_generation);
+  if (setStatus) setStatus(&g_status);
   if (start(&g_api) != 0) Logf("loader: payload start reported an error");
   g_stopActive = stop;
   // The new payload patches from its own worker thread; slots it does not
@@ -180,6 +190,12 @@ DWORD WINAPI Watcher(void*) {
 }  // namespace
 
 extern "C" __declspec(dllexport) int luaopen_DcsQvCull(void* /*lua_State*/) { return 0; }
+
+// Status for the DCS Control app's in-headset panel (bit layout in
+// status_word.h); lock-free, callable from any thread. 0 = not running.
+extern "C" __declspec(dllexport) unsigned long long DcsQvCull_Status() {
+  return g_status.load(std::memory_order_acquire);
+}
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {

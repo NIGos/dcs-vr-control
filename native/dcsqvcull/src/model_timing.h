@@ -83,9 +83,11 @@ void EndWindow(double windowMs, DWORD callerTid) {
   g_windowUs.clear();
 }
 
+constexpr uint32_t kMaxPer = 1024;  // views per call (was 64: an F-4 scene has 68, R24 12)
+
 size_t SumOutputs(uint32_t count, void** outs) {
   size_t n = 0;
-  if (!outs || count > 64) return 0;
+  if (!outs || count > kMaxPer) return 0;
   for (uint32_t i = 0; i < count; ++i) {
     auto v = static_cast<uint8_t**>(outs[i]);
     if (v && v[0] && v[1] > v[0]) n += static_cast<size_t>(v[1] - v[0]) / sizeof(void*);
@@ -97,8 +99,8 @@ void __fastcall Hook(void* self, void* inst, uint32_t count, void** infos, const
                      void* sampler, void* pos) {
   if (!g_recording.load(std::memory_order_relaxed)) return g_orig(self, inst, count, infos, mask, outs, sampler, pos);
   size_t before = SumOutputs(count, outs);
-  size_t per[64];
-  bool perOk = outs && infos && count <= 64;
+  size_t per[kMaxPer];
+  bool perOk = outs && infos && count <= kMaxPer;
   if (perOk)
     for (uint32_t i = 0; i < count; ++i) per[i] = VecSize(outs[i]);
   LARGE_INTEGER a, b;

@@ -132,6 +132,9 @@ public sealed record VrProfile
     public bool ShowOverlay { get; init; }
     public FpsLimitMode FpsLimit { get; init; }
     public double HeadsetRefreshHz { get; init; } = 90;
+    /// <summary>The refresh rate is read from the headset software (<see cref="HeadsetRefresh"/>) whenever it can be;
+    /// <see cref="HeadsetRefreshHz"/> is then only the fallback. Off: <see cref="HeadsetRefreshHz"/> as set.</summary>
+    public bool RefreshFromHeadset { get; init; } = true;
     public double RenderedFpsCap { get; init; } = 45;
     public bool DisableDcsVSync { get; init; }
     /// <summary>Keep the DCS launcher window when launching from the app. Off: the profile sets
@@ -266,6 +269,22 @@ public sealed record VrProfile
     /// Eye Tracker 5/4C runtime), which otherwise hold the Pimax headset's Tobii tracker, and starts them again when DCS
     /// exits (<see cref="TobiiDesktop"/>). Needs administrator rights (UAC at launch).</summary>
     public bool PauseTobiiDesktop { get; init; }
+
+    /// <summary>Pupil shift (native/pupil_shift, an OpenXR layer at the top of the chain): each eye is rendered from where
+    /// its pupil is for the current gaze instead of from one fixed eye point, which removes the perspective error on the
+    /// cockpit and the image shift against the lens when the eyes turn. The gaze comes from the focus views of a
+    /// foveated quad-view configuration, so it needs eye-tracked Quad Views.</summary>
+    public bool PupilShift { get; init; }
+    /// <summary>Distance from the pupil to the eye's rotation centre (anatomy: about 10 to 11 mm).</summary>
+    public double PupilShiftEyeRadiusMm { get; init; } = 10.5;
+    /// <summary>Distance of the lens's virtual image. Not published by Pimax; pancake designs for 1.3" micro-OLED
+    /// panels sit at 1 to 2 m. Only affects distant objects, and by less than 0.1 degree across that range.</summary>
+    public double PupilShiftVirtualImageM { get; init; } = 1.5;
+    /// <summary>Turns the correction off and on in flight, to compare (PupilShift.ini Toggle; the panel names it).</summary>
+    public string PupilShiftToggleKey { get; init; } = NeuralHotkeys.PupilDefault;
+    public const double PupilShiftEyeRadiusMin = 5, PupilShiftEyeRadiusMax = 15, PupilShiftVirtualImageMin = 0.5, PupilShiftVirtualImageMax = 5;
+    /// <summary>The pupil shift layer is deployed: only for a VR flight with eye-tracked Quad Views.</summary>
+    public bool UsesPupilShift => PupilShift && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
 
     /// <summary>The prefetch fix is deployed (bin\dxgi2.dll) and enabled through the launch environment.</summary>
     public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;

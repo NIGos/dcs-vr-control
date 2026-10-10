@@ -11,7 +11,8 @@ namespace DcsVr.Core;
 /// defer-until-submitted patch for Quad Views.</param>
 /// <param name="PrefetchFixDll">CPU Boost prefetch fix (native/prefetch_fix), loaded by DCS as bin\dxgi2.dll through Cheeky's dxgi.dll loader.</param>
 /// <param name="EngineDirectory">DCS engine optimizations (native/dcsqvcull): DcsQvCull.dll, DcsQvCullPayload.dll and DcsQvCull.lua.</param>
-public sealed record ComponentLocations(string? OfxrDirectory, string? CheekyDirectory, string? CheekyLayerDll, string? QuadViewsDirectory = null, string? QuadFocusDirectory = null, string? OfxrLayerDll = null, string? PrefetchFixDll = null, string? EngineDirectory = null);
+/// <param name="PupilShiftDll">Pupil shift OpenXR layer (native/pupil_shift): XR_APILAYER_DCSVR_pupil_shift.dll.</param>
+public sealed record ComponentLocations(string? OfxrDirectory, string? CheekyDirectory, string? CheekyLayerDll, string? QuadViewsDirectory = null, string? QuadFocusDirectory = null, string? OfxrLayerDll = null, string? PrefetchFixDll = null, string? EngineDirectory = null, string? PupilShiftDll = null);
 
 public sealed class DeploymentPlanner(ComponentLocations components)
 {
@@ -67,6 +68,10 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         var framegen = profile.FrameGen != FrameGeneration.Off;
         environment["DCSVR_DIAG_HOTKEY"] = framegen ? NeuralHotkeys.Environment(profile.DiagnosticOverlayKey, NeuralHotkeys.DiagnosticDefault) : "0:0";
         environment["DCSVR_DIAG_OVERLAY"] = framegen && profile.DiagnosticOverlayAtStart ? "1" : "0";
+        // The panel's Engine line names the in-flight switch of the engine optimizations (OFXR fork patch 0013).
+        environment["DCSVR_ENGINE_HOTKEY"] = framegen && profile.EngineOptimizations ? NeuralHotkeys.Environment(profile.EngineToggleKey, NeuralHotkeys.EngineDefault) : "0:0";
+        // And its Pupil shift line names the layer's switch (patch 0015).
+        environment["DCSVR_PUPIL_HOTKEY"] = framegen && profile.UsesPupilShift ? NeuralHotkeys.Environment(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault) : "0:0";
         // The prefetch fix reads its mode from the DCS process environment; absent (a Steam or launcher start) it stays off.
         environment["DCSVR_PREFETCH_MODE"] = profile.UsesPrefetchFix ? profile.BoostPrefetch.ToString().ToLowerInvariant() : "off";
         if (profile.UsesPrefetchFix)
@@ -259,6 +264,19 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             dependencies[Path.GetFullPath(gaze.ManifestPath)] = Hashing.FileSha256(gaze.ManifestPath);
             environment[disable] = "1";
             layerNames.Add(gaze.Name!);
+        }
+        // Pupil shift sits first, next to DCS: it changes only what DCS renders and puts the runtime's own poses and
+        // FOVs back on the submitted views, so every layer below sees the frame as if it were not there.
+        if (profile.UsesPupilShift)
+        {
+            var source = components.PupilShiftDll is { } built && File.Exists(built) ? built : throw new InvalidDataException("The pupil shift layer is unavailable.");
+            var folder = PathPolicy.UnderRoot(profileRoot, "pupilshift");
+            var dll = PathPolicy.UnderRoot(folder, "XR_APILAYER_DCSVR_pupil_shift.dll");
+            Add(dll, File.ReadAllBytes(source), "Pupil shift OpenXR layer", runtimeLogs: [PathPolicy.UnderRoot(folder, "PupilShift.log")]);
+            var pupilIni = ConfigurationWriters.PupilShift(profile);
+            Add(PathPolicy.UnderRoot(folder, "PupilShift.ini"), new UTF8Encoding(false).GetBytes(pupilIni), "Pupil shift settings", iniValues: IniFile.Parse(pupilIni));
+            AddText(PathPolicy.UnderRoot(layersRoot, "pupil-shift.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_DCSVR_pupil_shift", dll, 1, "DCS Control · pupil shift"), "Profile pupil shift manifest");
+            layerNames.Insert(0, "XR_APILAYER_DCSVR_pupil_shift");
         }
         if (layerNames.Count > 0)
         {

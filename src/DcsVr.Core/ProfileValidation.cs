@@ -110,6 +110,12 @@ public static class ProfileValidation
             if (profile.BoostDcsPriority == BoostPriority.High)
                 issues.Add(new("boost-high-priority", IssueSeverity.Warning, "High priority lets DCS take CPU time ahead of the VR compositor, headset services, audio and input handling. When DCS saturates the CPU this can cause stutter, tracking or input lag, or audio dropouts. Above normal is recommended; use High only if you have tested it."));
         }
+        if (profile.PupilShift && profile.PupilShiftEyeRadiusMm is < VrProfile.PupilShiftEyeRadiusMin or > VrProfile.PupilShiftEyeRadiusMax)
+            Error("pupil-radius", $"Eye rotation radius must be {VrProfile.PupilShiftEyeRadiusMin}–{VrProfile.PupilShiftEyeRadiusMax} mm.");
+        if (profile.PupilShift && profile.PupilShiftVirtualImageM is < VrProfile.PupilShiftVirtualImageMin or > VrProfile.PupilShiftVirtualImageMax)
+            Error("pupil-image", $"Virtual image distance must be {VrProfile.PupilShiftVirtualImageMin}–{VrProfile.PupilShiftVirtualImageMax} m.");
+        if (profile.PupilShift && !profile.Desktop && !profile.UsesPupilShift)
+            issues.Add(new("pupil-gaze", IssueSeverity.Warning, "Pupil shift needs eye-tracked Quad Views: it reads the gaze from the focus views. With this profile it is not installed."));
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
         if (profile.EngineOptimizations && profile.EngineDevMode)
@@ -154,6 +160,18 @@ public static class ProfileValidation
             if ((profile.NeuralRendering && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault)))
                 Error("hotkey-conflict", "The engine optimizations switch needs a key of its own (the DLSS 5 toggle or the diagnostic panel uses it).");
+        }
+        // Pupil shift's switch must differ from every other in-flight key in use.
+        Key(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault, profile.UsesPupilShift, "pupil-hotkey", "pupil shift switch");
+        if (profile.UsesPupilShift && NeuralHotkeys.TryParse(profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault, out var pupilKey) && !pupilKey.IsOff)
+        {
+            var pupil = profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault;
+            if (profile.EngineOptimizations && pupilKey.Modifiers == 3 && pupilKey.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22)
+                Error("pupil-hotkey", $"{NeuralHotkeys.Label(pupilKey)} is used by the engine optimizations' test suite. Choose another key.");
+            if ((profile.NeuralRendering && NeuralHotkeys.Same(pupil, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                || (profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.Same(pupil, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                || (profile.EngineOptimizations && NeuralHotkeys.Same(pupil, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault)))
+                Error("hotkey-conflict", "The pupil shift switch needs a key of its own (DLSS 5, the diagnostic panel or the engine optimizations use it).");
         }
         if (profile.NeuralRendering && string.IsNullOrWhiteSpace(profile.NeuralRuntimePath))
             Error("neural-runtime", "Select a compatible NVIDIA nvngx_dlssnr.dll for DLSS 5. The app keeps a verified copy, so it is asked for once.");

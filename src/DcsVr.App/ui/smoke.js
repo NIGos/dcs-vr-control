@@ -16,7 +16,7 @@ window.runWebSmoke = async function() {
   try {
     check('Real WebView2 bridge bootstrap with the feature checklist',document.querySelectorAll('#featureList input[type=checkbox]').length === 5 && !$('profilePreset'));
     check('One primary action: Launch DCS, with Review files, Apply without launching and Back to stock DCS as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
-    check('All editable profile controls available',ui.fields.length === 96 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
+    check('All editable profile controls available',ui.fields.length === 101 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
     check('Quality presets, self-reported limiters and the unused Sboys folder are gone',!$('tuningPreset') && !$('undoTune') && !$('tuningDialog') && !$('budgets') && !['externalLimiter','externalLimiterFps','runtimeReprojection','sboysDriverDirectory'].some(p => ui.fields.some(f => f.path === p)));
     check('Rarely changed settings start folded away',[...document.querySelectorAll('details.advanced')].length === 5 && [...document.querySelectorAll('details.advanced')].every(d => !d.open) && $('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details'));
     // Pimax Play's page exactly as Pimax Play shows it (labels, order, rounding), from the fixture's Quick 33 % or Fine 33/10 · 33/33.
@@ -37,7 +37,7 @@ window.runWebSmoke = async function() {
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click();
       check('Pimax or Sboys after Optimizations only brings the VR features back',ui.profile.desktop === false && ui.profile.runtime === before.runtime && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && ui.profile.neuralRendering === before.neural && !$('feature-quad').hidden && !$('nav-foveation').hidden); }
     check('Legacy defaults preserve the DCS frame limit and VSync',ui.profile.fpsLimit === 'Preserve' && !ui.profile.disableDcsVSync);
-    for(const id of ['overview','foveation','dlss','framegen','boost','engine','setup','diagnostics','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
+    for(const id of ['overview','foveation','dlss','framegen','pupil','boost','engine','setup','diagnostics','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
     check('The frame generation page is called Framegen',$('nav-framegen').textContent.startsWith('Framegen') && $('pageTitle').textContent !== 'Frame rate' && (ui.navigate('framegen'), $('pageTitle').textContent === 'Framegen'));
     // Overview: launch status, the four feature tiles and the last flight, read from the fixture's logs.
     ui.navigate('overview');
@@ -100,6 +100,13 @@ window.runWebSmoke = async function() {
       check('The engine optimizations switch is a capture field, Alt+Shift+F11 by default',ui.fields.find(f => f.path === 'engineToggleKey').type === 'hotkey' && ui.profile.engineToggleKey === '122:6' && k.textContent === 'Alt+Shift+F11');
       k.click(); press(120,'ca'); check('The module test keys (Ctrl+Alt+F9 to F12) are refused for the switch',k.classList.contains('capturing') && $('keynote-engineToggleKey').textContent.includes('test suite') && ui.profile.engineToggleKey === '122:6');
       press(27); edit('engineOptimizations',was); }
+    { const was = {pupilShift:ui.profile.pupilShift, quadViews:ui.profile.quadViews, gaze:ui.profile.gaze, engine:ui.profile.engineOptimizations}; edit('engineOptimizations',true);
+      edit('pupilShift',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); ui.navigate('pupil'); const k = $('input-pupilShiftToggleKey');
+      check('Pupil shift has its own page, marked experimental, with its switch as a capture field (Ctrl+Shift+F10)',!$('page-pupil').hidden && $('pupilControls').textContent.includes('EXPERIMENTAL') && $('pupilNeeds').hidden && ui.fields.find(f => f.path === 'pupilShiftToggleKey').type === 'hotkey' && ui.profile.pupilShiftToggleKey === '121:5' && k.textContent === 'Ctrl+Shift+F10');
+      k.click(); press(122,'as'); check('The pupil shift switch refuses a key another switch uses',k.classList.contains('capturing') && ui.profile.pupilShiftToggleKey === '121:5'); press(27);
+      edit('gaze','Fixed'); check('Without an eye-tracked gaze the page says why and links to the setting',!$('pupilNeeds').hidden && $('pupilNeeds').textContent.includes('Focus movement') && ($('pupilFix').click(), !$('page-foveation').hidden));
+      edit('gaze',was.gaze); edit('quadViews',was.quadViews); edit('pupilShift',was.pupilShift); edit('engineOptimizations',was.engine); ui.navigate('pupil');
+      check('The pupil shift status reads the log through the bridge',!$('pupilStatus').textContent.includes('Open this page')); }
     { const cursor = ui.fields.find(f => f.path === 'smoothCursor');
       check('Smooth mouse cursor sits under Frame generation, off by default, and says the click does not move',cursor.page === 'framegen' && cursor.type === 'toggle' && ui.profile.smoothCursor === false && !$('setting-smoothCursor').closest('details') && $('setting-smoothCursor').textContent.includes("Where you click doesn't change")); }
     { const vram = ui.fields.find(f => f.path === 'diagnosticVram');

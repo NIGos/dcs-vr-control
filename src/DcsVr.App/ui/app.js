@@ -7,12 +7,13 @@ const pages = [
   ['foveation','Quad Views','Foveated rendering: high detail where you look, less in the periphery.','Foveated rendering','M3 8V5a2 2 0 0 1 2-2h3 M16 3h3a2 2 0 0 1 2 2v3 M21 16v3a2 2 0 0 1-2 2h-3 M8 21H5a2 2 0 0 1-2-2v-3 M6 12c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4s-4.4-1.3-6-4Z M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'],
   ['dlss','DLSS 5','NVIDIA DLSS 5 on the image, and Foveated Super Resolution.','Neural rendering','M10 3c.6 3.8 2.2 5.4 6 6-3.8.6-5.4 2.2-6 6-.6-3.8-2.2-5.4-6-6 3.8-.6 5.4-2.2 6-6Z M18 14c.3 1.8 1.1 2.6 3 3-1.9.4-2.7 1.2-3 3-.3-1.8-1.1-2.6-3-3 1.9-.4 2.7-1.2 3-3Z'],
   ['framegen','Framegen','OFXR frame generation, the DCS frame limit and in-headset diagnostics.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
+  ['pupil','Pupil shift','Experimental. Each eye is rendered from where its pupil is as you look around, not from one fixed eye point.','Experimental · eye position','M2.5 12c2.2-3.7 5.4-5.5 9.5-5.5s7.3 1.8 9.5 5.5c-2.2 3.7-5.4 5.5-9.5 5.5S4.7 15.7 2.5 12Z M14.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z M17 3.5l2.5 2.5L17 8.5 M19.5 6h-5'],
   ['setup','DCS & headset','Where DCS is installed, its launcher and, for VR, the headset software.','Paths & launcher','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
   ['recovery','Stock DCS','Back to stock DCS puts DCS back exactly as it was before DCS Control: every file and setting it changed, in one step.','Undo every change','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
 ];
 /** Pages of the VR features, hidden in Optimizations only (no VR). */
-const VR_PAGES = ['foveation','dlss','framegen'];
+const VR_PAGES = ['foveation','dlss','framegen','pupil'];
 // The feature checklist in the right panel; each feature has its own page. First what every pilot can use (monitor or any
 // headset), then the VR features for Pimax (and Sboys).
 const FEATURES = [
@@ -164,6 +165,8 @@ function effectiveFovea(p) {
   const cap = quad(p) ? .9 : 1, low = stereoCheeky(p) ? CHEEKY_MIN : 0, fit = v => Math.max(low, Math.min(cap, v));
   return {w:fit(p.foveaWidth),h:fit(p.foveaHeight),focus:p.quadFocusScale,periphery:Math.max(low,p.peripheralScale),blend:p.quadEdgeBlend,pimax:false};
 }
+/** The refresh rate in use: the headset's own when it follows the headset and one was read, otherwise the profile's. */
+const refreshHz = p => p.refreshFromHeadset && state?.headsetRefresh?.hz ? state.headsetRefresh.hz : p.headsetRefreshHz;
 const PRIORITY = {Normal:'Normal priority',AboveNormal:'Above normal',High:'High priority'};
 function featureSummary(key, p) {
   if (key === 'engine') {
@@ -188,7 +191,7 @@ function featureSummary(key, p) {
   if (key === 'framegen') {
     if (p.frameGen === 'Off') return 'Off · rendered frames only';
     const factor = p.frameGenFactor === 0 ? 'Auto 2×/3×' : p.frameGenFactor+'×';
-    return `${p.frameGen === 'Nvidia' ? 'NVIDIA' : 'FidelityFX'} · ${factor} · renders ${Number((p.headsetRefreshHz/(p.frameGenFactor === 3 ? 3 : 2)).toFixed(1))} FPS`;
+    return `${p.frameGen === 'Nvidia' ? 'NVIDIA' : 'FidelityFX'} · ${factor} · renders ${Number((refreshHz(p)/(p.frameGenFactor === 3 ? 3 : 2)).toFixed(1))} FPS`;
   }
   // The flight helpers on the same page run with or without CPU Boost.
   const vr = !p.desktop;
@@ -248,6 +251,7 @@ function change() {
   $('status').textContent = 'Profile edited. Launch DCS applies it; Review files lists what it writes.';
   request('changed').catch(showError); updateControls(); saveDraftSoon();
   if (page === 'engine') renderEngine();
+  if (page === 'pupil') { renderPupilNeeds(); renderPupil(); }
 }
 /** "What happens at launch" depends only on the Boost settings and the route: refreshed for those edits, not every edit. */
 function boostChanged() { if (page === 'boost') refreshBoostPlan(); }
@@ -336,9 +340,10 @@ function keyProblem([vk,mods]) {
   return null;
 }
 const HOTKEYS = {
-  neuralToggleKey:{others:['diagnosticOverlayKey','engineToggleKey'],used:p => p.neuralRendering,name:'DLSS 5 toggle',fallback:'Ctrl+Shift+F12'},
-  diagnosticOverlayKey:{others:['neuralToggleKey','engineToggleKey'],used:p => p.frameGen !== 'Off',name:'diagnostic panel',fallback:'Alt+Shift+F12'},
-  engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey'],used:p => p.engineOptimizations,name:'engine optimizations switch',fallback:'122:6'}
+  neuralToggleKey:{others:['diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey'],used:p => p.neuralRendering,name:'DLSS 5 toggle',fallback:'Ctrl+Shift+F12'},
+  diagnosticOverlayKey:{others:['neuralToggleKey','engineToggleKey','pupilShiftToggleKey'],used:p => p.frameGen !== 'Off',name:'diagnostic panel',fallback:'Alt+Shift+F12'},
+  engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','pupilShiftToggleKey'],used:p => p.engineOptimizations,name:'engine optimizations switch',fallback:'122:6'},
+  pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey'],used:p => usesPupilShift(p),name:'pupil shift switch',fallback:'121:5'}
 };
 /** Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down belong to the engine optimizations module itself. */
 const engineReserved = ([vk,mods]) => mods === 3 && ((vk >= 0x77 && vk <= 0x7B) || vk === 33 || vk === 34);
@@ -486,7 +491,8 @@ function buildFields() {
   field(more,'diagnosticRecorder','OFXR log','Writes OFXR\'s log while flying, for troubleshooting.','toggle',null,p => p.frameGen !== 'Off');
   c = card('pacingControls','DCS frame limit','Written to DCS\'s options.lua; the original values are backed up when the profile is applied.');
   field(c,'fpsLimit','Frame limit','Match refresh: DCS renders exactly the frames the headset needs (half or a third with frame generation), so none are wasted.','select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]);
-  field(c,'headsetRefreshHz','Headset refresh rate','The refresh rate selected in Pimax Play or SteamVR.','number',[60,240,.5],null,'Hz');
+  field(c,'refreshFromHeadset','Read the refresh rate from the headset','Pimax Play: the rate the headset runs at now, or in its last session. Sboys: SteamVR\'s refresh rate. Off: set it below.','toggle');
+  field(c,'headsetRefreshHz','Headset refresh rate','Used when it is set by hand, or when the headset software has not reported one yet.','number',[60,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
   field(c,'renderedFpsCap','Custom limit','Frames DCS renders per second.','number',[30,300,.5],p => p.fpsLimit === 'Custom','FPS');
   field(c,'disableDcsVSync','Desktop VSync off','Stops VSync of the DCS window on the monitor from holding back the frame rate (graphics.sync = false). Headset sync is unaffected.','toggle');
   // CPU Boost page: started with Launch DCS, undone when DCS exits.
@@ -540,6 +546,13 @@ function buildFields() {
   field(c,'dcs','DCS executable','DCS.exe in the bin folder of your installation.','path');
   field(c,'options','DCS settings file','Saved Games\\DCS\\Config\\options.lua.','path');
   field(c,'keepDcsLauncher','Show the DCS launcher','Off: Launch DCS goes straight into the game (the launcher setting is switched off with the profile and restored with it). On: the DCS launcher opens first; press Play there.','toggle');
+  // Pupil shift (native/pupil_shift): an OpenXR layer first in the chain; it needs the gaze of eye-tracked Quad Views.
+  const pupil = p => p.pupilShift;
+  c = card('pupilControls','<span class="tag">EXPERIMENTAL</span> Pupil shift','When your eyes turn, each pupil moves a few millimetres. DCS normally renders both eyes from fixed points, so near objects shift slightly against far ones as you look around. Not yet confirmed in flight; turn it off if anything looks wrong.');
+  field(c,'pupilShift','Pupil shift','Renders each eye from where its pupil is for your gaze, so the cockpit stays put when only your eyes move. About 0.2 to 0.4 degrees at 25 degrees of gaze. No GPU cost.','toggle');
+  field(c,'pupilShiftEyeRadiusMm','Eye rotation radius','From the pupil to the point the eye turns around. About 10 to 11 mm for most people; more makes the shift larger.','number',[5,15,.5],pupil,'mm');
+  field(c,'pupilShiftVirtualImageM','Lens image distance','How far away the lens shows the image. Pimax does not publish it; 1 to 2 m is typical. It changes only distant objects, by less than 0.1 degree.','number',[.5,5,.1],pupil,'m');
+  field(c,'pupilShiftToggleKey','In-flight switch','Turns the correction off and back on in flight, to compare: a low beep off, a high beep on. Click, then press the keys. Default Ctrl+Shift+F10.','hotkey',null,pupil);
   c = card('headsetControls','Headset runtime','Uses the headset software chosen under How you fly in the right panel (Pimax Play or SteamVR).');
   more = disclosure(c,'Runtime override','Only for a runtime that is not registered.');
   field(more,'runtimeManifestPath','OpenXR runtime file','An OpenXR runtime JSON to use instead of the route\'s registered runtime. Leave empty normally. Not used with Optimizations only.','path',null,p => !p.desktop);
@@ -562,6 +575,7 @@ function navigate(id) {
   if (id === 'foveation' && profile) rereadPimax(false);
   if (id === 'boost' && profile) refreshBoostPlan(0);
   if (id === 'engine' && profile) refreshEngine();
+  if (id === 'pupil' && profile) { renderPupilNeeds(); refreshPupil(); }
   if (id === 'overview' && profile) loadFlight();
 }
 // ---- Pimax Play focus values ------------------------------------------------------------------------------------
@@ -653,6 +667,47 @@ async function engineAction(action, data) {
   if (busy) return;
   try { const result = await request(action, data); if (result?.message) $('status').textContent = result.message; refreshEngine(); }
   catch (error) { showError(error); }
+}
+// ---- Pupil shift -------------------------------------------------------------------------------------------------
+/** The layer is installed only for a VR flight with eye-tracked Quad Views (VrProfile.UsesPupilShift). */
+const usesPupilShift = p => Boolean(p.pupilShift && !p.desktop && p.quadViews !== 'None' && p.gaze === 'EyeTracked');
+/** What the profile still needs for a gaze, with a link to the setting that gives it. */
+function renderPupilNeeds() {
+  const box = $('pupilNeeds'); if (!box || !profile) return;
+  const need = profile.quadViews === 'None' ? ['Pupil shift needs Quad Views with eye-tracked focus: it reads your gaze from the focus area. Quad Views is off.','quadViews','Turn on Quad Views']
+    : profile.gaze !== 'EyeTracked' ? ['Pupil shift needs eye-tracked focus: it reads your gaze from the focus area, and Focus movement is Fixed.','gaze','Set Focus movement'] : null;
+  box.hidden = !need;
+  box.innerHTML = need ? `<p>${need[0]}${profile.pupilShift ? ' Until then it is not installed.' : ''}</p><button class="button secondary" id="pupilFix">${need[2]}</button>` : '';
+  if (need) $('pupilFix').addEventListener('click',() => revealSetting(fields.find(f => f.path === need[1])));
+}
+let pupilTimer, pupilSequence = 0, pupilStatus = null;
+/** The layer's log, read again every 5 s while the page is open (it writes once a second in flight). */
+async function refreshPupil() {
+  clearTimeout(pupilTimer);
+  const mine = ++pupilSequence;
+  try { const result = await request('pupilStatus'); if (mine === pupilSequence) { pupilStatus = result.status; renderPupil(); } }
+  catch (error) { if (mine === pupilSequence) $('pupilStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
+  if (page === 'pupil') pupilTimer = setTimeout(refreshPupil, 5000);
+}
+const PUPIL_STATE = {'not-installed':['Not installed',''], waiting:['Installed',''], working:['Working','loaded'], 'no-gaze':['No gaze','failed'], off:['Switched off',''], 'not-restored':['Check the log','failed']};
+const degrees = r => r ? `${r.min > 0 ? '+' : ''}${r.min.toFixed(0)}° to ${r.max > 0 ? '+' : ''}${r.max.toFixed(0)}°` : '—';
+function renderPupil() {
+  const s = pupilStatus, box = $('pupilStatus'); if (!box) return;
+  if (!s) { box.innerHTML = '<p class="fine">Reading the layer\'s log…</p>'; $('pupilLog').disabled = true; return; }
+  const installed = s.state !== 'not-installed';
+  const pending = profile && usesPupilShift(profile) !== installed ? `<p class="fine">${usesPupilShift(profile) ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
+  const [label, tone] = PUPIL_STATE[s.state] || [s.state,''];
+  const rows = s.seconds ? [
+    ['Gaze range, left–right', degrees(s.sessionGazeX)], ['Gaze range, up–down', degrees(s.sessionGazeY)],
+    ['Largest pupil shift', s.sessionMaxShiftMm ? s.sessionMaxShiftMm.toFixed(1)+' mm' : '—'],
+    ['Seconds with a gaze', `${s.secondsWithGaze} of ${s.seconds}`],
+    ['Runtime poses given back', s.restoredViews == null ? '—' : s.restoredViews > 0 ? 'Yes: the headset places the image as without the layer' : 'No'],
+    ['In-flight switch', s.hotkey ? keyLabel(parseKey(s.hotkey)) : '—']
+  ] : [];
+  box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(s.summary)}</span></div>${pending}`
+    + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
+    + (rows.length ? `<dl class="pimax-values">${rows.map(([k,v]) => `<dt>${escape(k)}</dt><dd>${escape(v)}</dd>`).join('')}</dl>` : '');
+  $('pupilLog').disabled = busy || !s.logPath;
 }
 // ---- CPU Boost plan ---------------------------------------------------------------------------------------------
 let boostTimer, boostSequence = 0;
@@ -770,14 +825,14 @@ function updatePanelScroll() {
   document.querySelector('.workflow').classList.toggle('more-above', top.scrollHeight - top.clientHeight - top.scrollTop > 1);
 }
 function renderCadence() {
-  const fg = profile.frameGen !== 'Off', multiplier = fg ? (profile.frameGenFactor === 3 ? 3 : 2) : 1, target = profile.headsetRefreshHz / multiplier;
+  const fg = profile.frameGen !== 'Off', multiplier = fg ? (profile.frameGenFactor === 3 ? 3 : 2) : 1, hz = refreshHz(profile), target = hz / multiplier;
   const detected = Number(state?.inventory?.dcsSettings?.['graphics.maxFPS']);
   const cap = profile.fpsLimit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : profile.fpsLimit === 'RuntimeHeadroom' ? 300 : profile.fpsLimit === 'MatchRefresh' ? target : profile.renderedFpsCap;
   const n = value => Number(value.toFixed(3)).toLocaleString('en-US');
   const metrics = [
     ['DCS NEEDS TO RENDER',n(target)+' FPS',fg ? (profile.frameGenFactor === 0 ? 'Half the refresh rate; a third while DCS falls behind.' : multiplier === 3 ? 'A third of the refresh rate.' : 'Half the refresh rate.') : 'The full refresh rate; frame generation is off.'],
     ['DCS FRAME LIMIT',cap === null ? 'Not set' : n(cap)+' FPS',profile.fpsLimit === 'Preserve' ? (cap === null ? 'No limit found in options.lua; left as it is.' : 'Found in options.lua; left as it is.') : 'Written to options.lua when the profile is applied.'],
-    ['HEADSET',n(profile.headsetRefreshHz)+' Hz',fg ? `Up to ${n(cap === null ? profile.headsetRefreshHz : Math.min(profile.headsetRefreshHz,cap*multiplier))} FPS with generated frames.` : 'Set this refresh rate in Pimax Play or SteamVR.']
+    ['HEADSET',n(hz)+' Hz' + (profile.refreshFromHeadset && state?.headsetRefresh ? ' · '+state.headsetRefresh.source : ''),fg ? `Up to ${n(cap === null ? hz : Math.min(hz,cap*multiplier))} FPS with generated frames.` : 'Set this refresh rate in Pimax Play or SteamVR.']
   ];
   $('cadenceMetrics').innerHTML = metrics.map(b => `<div class="budget"><span>${b[0]}</span><strong>${b[1]}</strong><p>${b[2]}</p></div>`).join('');
   const warnings = [];
@@ -843,10 +898,12 @@ const CHECK_INFO = {
   'boost-choice':['CPU Boost',{page:'boost',label:'Open'}], 'monitor-mode':['Monitor mode in flight',{reveal:'flightDisplayMode',label:'Open'}], 'boost-high-priority':['DCS priority',{reveal:'boostDcsPriority',label:'Open'}],
   'framegen-factor':['Generated frames',{reveal:'frameGenFactor',label:'Open'}], 'flow-preset':['Optical flow',{reveal:'flowPreset',label:'Open'}], 'flow-scale':['Optical flow',{reveal:'nvidiaFlowScale',label:'Open'}],
   'fps-mode':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'fps-under-target':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}],
-  'refresh-rate':['Refresh rate',{reveal:'headsetRefreshHz',label:'Open'}], 'external-limiters':['Other FPS limits',null], 'runtime-reprojection':['Motion smoothing',null],
+  'refresh-rate':['Refresh rate',{reveal:'refreshFromHeadset',label:'Open'}], 'external-limiters':['Other FPS limits',null], 'runtime-reprojection':['Motion smoothing',null],
   'route-mismatch':['Headset route',{page:'setup',label:'Open'}], 'steamvr-not-found':['SteamVR',{guide:'steamvr',label:'Guide'}],
   'gaze-bridge-missing':['Eye tracking on Sboys',{guide:'gaze',label:'Guide'}], 'runtime':['OpenXR runtime',{page:'setup',label:'Open'}],
   'active-backup':['Applied profile',{page:'recovery',label:'Stock DCS'}], 'deployment':['Files and components',{page:'diagnostics',label:'Review',review:true}],
+  'pupil-gaze':['Pupil shift',{page:'pupil',label:'Open'}], 'pupil-radius':['Pupil shift',{reveal:'pupilShiftEyeRadiusMm',label:'Open'}], 'pupil-image':['Pupil shift',{reveal:'pupilShiftVirtualImageM',label:'Open'}],
+  'pupil-hotkey':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}], 'pupil-hotkey-dcs':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}],
   'neural-area':['DLSS 5 area',{reveal:'neuralFocusArea',label:'Open'}], 'neural-depth':['Depth convention',{reveal:'neuralDepth',label:'Open'}]
 };
 const GROUPS = [['fix','Must fix'],['check','Check yourself'],['ok','OK']];
@@ -990,9 +1047,11 @@ async function initialize() {
   $('engineSuite').addEventListener('click',() => engineAction('engineSuite'));
   $('engineReport').addEventListener('click',() => engineAction('engineOpen',{target:'report'}));
   $('engineLog').addEventListener('click',() => engineAction('engineOpen',{target:'log'}));
+  $('refreshPupil').addEventListener('click',() => refreshPupil());
+  $('pupilLog').addEventListener('click',() => request('pupilOpenLog').catch(showError));
   $('searchOpen').addEventListener('click',openSearch); $('searchClose').addEventListener('click',() => $('searchDialog').close()); $('searchInput').addEventListener('input',renderSearch); $('searchInput').addEventListener('keydown',e => { if (e.key === 'Enter') { e.preventDefault(); revealSetting(searchResults[0]); } });
   $('refreshFlight').addEventListener('click',() => loadFlight(0)); $('resetApplied').addEventListener('click',resetToApplied);
-  document.addEventListener('keydown',e => { if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (!$('searchDialog').open) openSearch(); } if (e.ctrlKey && new RegExp('^[1-'+pages.length+']$').test(e.key)) { e.preventDefault(); navigate(pages[Number(e.key)-1][0]); } });
+  document.addEventListener('keydown',e => { if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (!$('searchDialog').open) openSearch(); } if (e.ctrlKey && /^[1-9]$/.test(e.key) && Number(e.key) <= pages.length) { e.preventDefault(); navigate(pages[Number(e.key)-1][0]); } });
   try { sync(await request('ready')); loadFlight(); window.uiReady = true; }
   catch(e) { showError(e); }
 }

@@ -138,7 +138,7 @@ public static class ConfigurationWriters
         GBufferRecorderRedo=1
         GBufferRecorderSwapAhead=1
         GBufferRecorderCockpit=0
-        GBufferRecorderByOrdinal=0
+        GBufferRecorderByOrdinal=1
         SrvTailTrim=0
         PassFlush=0
 
@@ -274,6 +274,26 @@ public static class ConfigurationWriters
 
         [overlay]
         position={(p.ShowOverlay ? "upper_right" : "off")}
+
+        """;
+
+    /// <summary>PupilShift.ini, next to the pupil shift layer, which re-reads it about once a second while DCS runs.</summary>
+    public static string PupilShift(VrProfile p) => $"""
+        ; DCS Control pupil shift layer. Changes apply live while DCS runs.
+        [PupilShift]
+        Enabled=1
+        ; In-flight switch, virtual-key:modifiers (1 Ctrl, 2 Alt, 4 Shift); 0:0 off.
+        Toggle={NeuralHotkeys.Environment(p.PupilShiftToggleKey, NeuralHotkeys.PupilDefault)}
+        ; Pupil to eye rotation centre, millimetres.
+        EyeRadiusMm={Number(p.PupilShiftEyeRadiusMm)}
+        ; Lens virtual image distance, metres.
+        VirtualImageM={Number(p.PupilShiftVirtualImageM)}
+        ; Gaze beyond this angle is treated as this angle.
+        MaxGazeDeg=35
+        ; Testing only: a fixed gaze instead of the eye tracker.
+        SimulateGaze=0
+        SimulateGazeXDeg=0
+        SimulateGazeYDeg=0
 
         """;
 

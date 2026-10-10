@@ -1,3 +1,13 @@
+# 0.5.2 preview
+
+**Pupil shift (experimental)**: when your eyes turn, each pupil moves a few millimetres, but DCS renders both eyes from fixed points, so near objects shift slightly against far ones as you look around. With eye-tracked Quad Views, a new OpenXR layer renders each eye from where its pupil is for your gaze, then hands the headset its own poses back, so the image is placed exactly as before. About 0.2-0.4 degrees at 25 degrees of gaze, no GPU cost. It has its own page: settings, an in-flight switch (Ctrl+Shift+F10), what the profile still needs for a gaze, and the layer's status from its log. Off by default; not yet confirmed in flight. See [PUPIL_SHIFT.md](PUPIL_SHIFT.md).
+
+**Diagnostic panel**: an Engine line says whether all the engine optimizations are working, only some, none, or that you switched them off; recorders that are on but idle count as not working, so the panel shows when a scene keeps them from helping. A Pupil shift line shows its state.
+
+**Refresh rate read from the headset**: the Pimax refresh rate is read from Pimax Play's runtime as it runs (it changes within a second when you switch it in Pimax Play), and SteamVR's on the Sboys route. The number field is only for setting it by hand.
+
+**Engine optimizations**: scenes with more than 64 views per frame (the F-4) no longer leave them idle; the multi-threaded G-buffer follows DCS's render graph and matches its passes by the view's volume, which brought it from 22-33 % to 99.8-100 % of the passes in the F-4 mission. The G-buffer uses the 0.5.0 pass mapping by default (GBufferRecorderByOrdinal=1) after a scene where the newer one stayed idle.
+
 # 0.5.1 preview
 
 **Sturdier multi-threaded G-buffer**: every place where it runs on DCS's render thread is now protected, so a fault turns it off for the session ("exception … contained" on the Engine Optimizations page) and DCS keeps running; worker counts are bounded; the frames it records are recognized by what they are rather than by their order, so in the cockpit (F1) MFD frames no longer shift it. Verified pixel-identical live, also in F1 (F-14B, F-16C).

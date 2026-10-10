@@ -76,6 +76,12 @@ foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/nati
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
 }
+# Pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in the profile folder when the profile enables it.
+& (Join-Path $PSScriptRoot 'build-pupil-shift.ps1')
+New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/pupilshift') -Force | Out-Null
+$pupilShift = Join-Path $payloadRoot 'components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll'
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/pupil-shift/XR_APILAYER_DCSVR_pupil_shift.dll') -Destination $pupilShift -Force
+(Get-FileHash -LiteralPath $pupilShift -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($pupilShift + '.sha256') -Encoding ascii
 $cheekyDll = Join-Path $payloadRoot 'components/CheekyOpenXRLayer.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll') -Destination $cheekyDll -Force
 (Get-FileHash -LiteralPath $cheekyDll -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($cheekyDll + '.sha256') -Encoding ascii

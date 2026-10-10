@@ -242,6 +242,8 @@ struct CollKey {
   uint16_t sm = 0, rank = 0;  // rank: earlier descriptors with the same model and tag
   uint32_t tag = 0;
   bool ok = false;
+  const void* vol = nullptr;  // the collection's ClippingVolume (+0x8; not part of the identity)
+  uint16_t vrank = 0;         // earlier descriptors with the same model and volume
 };
 inline bool SameKey(const CollKey& a, const CollKey& b) {
   return a.ok == b.ok && (!a.ok || (a.sm == b.sm && a.tag == b.tag && a.rank == b.rank));
@@ -257,10 +259,12 @@ inline bool CollKeyAt(const uint8_t* descs, size_t count, uint32_t idx, CollKey*
   const uint8_t* d = descs + static_cast<size_t>(idx) * kCollStride;
   out->sm = *reinterpret_cast<const uint16_t*>(d);
   out->tag = *reinterpret_cast<const uint32_t*>(d + kCollTag);
+  out->vol = *reinterpret_cast<const void* const*>(d + 8);
   for (uint32_t k = 0; k < idx; ++k) {
     const uint8_t* e = descs + static_cast<size_t>(k) * kCollStride;
-    if (*reinterpret_cast<const uint16_t*>(e) == out->sm && *reinterpret_cast<const uint32_t*>(e + kCollTag) == out->tag)
-      ++out->rank;
+    if (*reinterpret_cast<const uint16_t*>(e) != out->sm) continue;
+    if (*reinterpret_cast<const uint32_t*>(e + kCollTag) == out->tag) ++out->rank;
+    if (*reinterpret_cast<const void* const*>(e + 8) == out->vol) ++out->vrank;
   }
   out->ok = true;
   return true;
@@ -286,6 +290,21 @@ inline int CollFindIn(const uint8_t* descs, size_t count, const CollKey& want) {
   }
   return -1;
 }
+// The view's collection by (model, ClippingVolume, vrank): the volume is the
+// view object's own (`addGBufferPass`'s ClippingVolume& is a member of the
+// viewport [V SR 0x3abc3: r12+0x30]), stable across frames while collection
+// indexes move when other views add collections (R24 13). Index or -1. Plain.
+inline int CollFindVolIn(const uint8_t* descs, size_t count, uint16_t sm, const void* vol, uint16_t vrank) {
+  if (!descs || !vol) return -1;
+  uint32_t r = 0;
+  for (size_t k = 0; k < count && k <= 0xffff; ++k) {
+    const uint8_t* e = descs + k * kCollStride;
+    if (*reinterpret_cast<const uint16_t*>(e) != sm || *reinterpret_cast<const void* const*>(e + 8) != vol) continue;
+    if (r++ == vrank) return static_cast<int>(k);
+  }
+  return -1;
+}
+
 // The render graph's descriptor array. Plain.
 inline const uint8_t* CollDescs(const void* rg, size_t* count) {
   const uint8_t* b = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(rg) + kCollDescs);
@@ -352,6 +371,91 @@ inline bool EndFrame(Binder& b) {
   if (commit) ++b.commits;
   return commit;
 }
+// Identity is ambiguous when two executions of a frame share model and tag
+// (the tag is not per view in every scene: a user mission showed all four
+// main views with tag 0x1f4, R24 11). Then the scope falls back to plain
+// ordinals.
+inline bool SeqAmbiguous(const FrameSeq& s) {
+  const uint32_t n = s.n < static_cast<uint32_t>(kSeqMax) ? s.n : static_cast<uint32_t>(kSeqMax);
+  for (uint32_t a = 0; a < n; ++a)
+    for (uint32_t b = a + 1; b < n; ++b)
+      if (s.id[a].ok && s.id[b].ok && s.id[a].sm == s.id[b].sm && s.id[a].tag == s.id[b].tag) return true;
+  const uint32_t m = s.nck < static_cast<uint32_t>(kSeqCockpit) ? s.nck : static_cast<uint32_t>(kSeqCockpit);
+  for (uint32_t a = 0; a < m; ++a)
+    for (uint32_t b = a + 1; b < m; ++b)
+      if (s.ck[a].ok && s.ck[b].ok && s.ck[a].tag == s.ck[b].tag) return true;
+  return false;
+}
+// The G-buffer graph to follow: a new graph replaces the followed one once
+// that one had no render entry for staleTicks (DCS rebuilt its render graph,
+// e.g. another mission: the old pointer never renders again, so the frame
+// never ended and the ordinal never reset; R24 11). True when it changed.
+inline bool FollowGraph(void*& followed, int64_t followedEntry, void* rg, int64_t now, int64_t staleTicks) {
+  if (!rg || rg == followed) return false;
+  if (followed && now - followedEntry < staleTicks) return false;
+  followed = rg;
+  return true;
+}
+// A bound slot whose execution has not run for staleTicks while other G-buffer
+// executions did (its identity matches nothing any more).
+inline bool SlotStarved(bool bound, int64_t lastPass, int64_t boundAt, int64_t now, int64_t staleTicks,
+                        bool executionsRan) {
+  if (!bound || !executionsRan) return false;
+  const int64_t last = lastPass > boundAt ? lastPass : boundAt;
+  return now - last > staleTicks;
+}
+
+// ---- Quad-view executions (R24 12) ----
+// The culling hook classifies each collect call's collections (the same
+// descriptors as the render graph's) into the quad views' peripheral/focus
+// pairs and publishes their ClippingVolumes (every pass of one view shares
+// its volume). An execution of another view (an F-4's extra views: 68
+// collections and 12 G-buffer executions per frame in the user's scene, or an
+// MFD sensor view) is then not counted: scope bit o is the o-th non-cockpit
+// execution of a quad view, as in F2 without extra views. Without a
+// classification (no quad session) every execution counts, as before.
+constexpr int kQuadVols = 16;
+struct QuadSet {
+  const void* vol[kQuadVols] = {};
+  int n = 0;
+  bool Has(const void* v) const {
+    for (int i = 0; i < n; ++i)
+      if (vol[i] == v) return true;
+    return false;
+  }
+};
+// An execution counts toward the ordinals: no set, its key unread, or one of the set's volumes.
+inline bool CountsAsQuad(const QuadSet& q, const CollKey& k) { return q.n == 0 || !k.ok || q.Has(k.vol); }
+// Seqlock-published set (writer: the culling thread; reader: the render thread at its render entry).
+std::atomic<uint32_t> g_qvSeq{0};
+std::atomic<int64_t> g_qvQpc{0};
+QuadSet g_qvPub;
+inline void PublishQuadVolumes(const void* const* vols, int n, int64_t qpc) {
+  const uint32_t s0 = g_qvSeq.load(std::memory_order_relaxed);
+  g_qvSeq.store(s0 + 1, std::memory_order_release);
+  std::atomic_thread_fence(std::memory_order_release);
+  g_qvPub.n = 0;
+  for (int i = 0; i < n && g_qvPub.n < kQuadVols; ++i)
+    if (vols[i] && !g_qvPub.Has(vols[i])) g_qvPub.vol[g_qvPub.n++] = vols[i];
+  g_qvQpc.store(qpc, std::memory_order_relaxed);
+  g_qvSeq.store(s0 + 2, std::memory_order_release);
+}
+// The published set if it is at most maxAgeTicks old (else empty: count every execution).
+inline QuadSet ReadQuadVolumes(int64_t now, int64_t maxAgeTicks) {
+  QuadSet q;
+  for (int tries = 0; tries < 4; ++tries) {
+    const uint32_t s0 = g_qvSeq.load(std::memory_order_acquire);
+    if (s0 & 1) continue;
+    q = g_qvPub;
+    const int64_t at = g_qvQpc.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (g_qvSeq.load(std::memory_order_relaxed) != s0) continue;
+    if (!at || now - at > maxAgeTicks) q = QuadSet();
+    return q;
+  }
+  return QuadSet();
+}
+
 // The identity of each slot under scope from a base sequence: s < 4 the
 // scope's ordinals; s + 4 (cockpit on) the cockpit execution with the same
 // tag and rank as slot s's SM_GBUFFER_PBR one.
@@ -1024,6 +1128,8 @@ struct Job {
   uint32_t keyScope = 0;               // keys of this execution's collection (its identity hash, R24)
   bool cockpit = false;                // [Model] GBufferRecorderCockpit: cockpit items are candidates
   bool armById = false;                // the sort observer starts it by armKey (else by armIdx)
+  const void* armVol = nullptr;        // by (armSm, armVol, armVrank) when set (before armById, R24 13)
+  uint16_t armSm = 0, armVrank = 0;
   CollKey armKey;
   ID3D11RenderTargetView* rtv[kRtv] = {};  // references held by the job
   ID3D11DepthStencilView* dsv = nullptr;
@@ -2682,6 +2788,15 @@ std::atomic<uint32_t> g_logBudget{24};
 std::atomic<uint64_t> g_keysOk{0}, g_keysRejected{0}, g_keyDowngrades{0}, g_meshesOk{0}, g_meshesRejected{0},
     g_tableFull{0}, g_probeInconclusive{0}, g_keyRelearnt{0}, g_probePool{0};
 std::atomic<uint32_t> g_diffLogBudget{32};
+// Why a wanted item was not probed (10 s line; a stall shows as wants with 0 probes).
+enum ProbeSkip : int { kSkNotModel = 0, kSkRejected, kSkCooling, kSkKnown, kSkNoReads, kSkStatic, kSkRenderer,
+                       kSkBudget, kSkips };
+const char* const kSkipName[kSkips] = {"not a pass-1 opaque model draw", "key not recordable", "key cooling down",
+                                       "key and mesh known under the pass's scope", "reads not resolved yet",
+                                       "published without a probe (static)", "renderer vtable not DCS's",
+                                       "pass probe budget used"};
+std::atomic<uint64_t> g_probeSkip[kSkips] = {};
+std::atomic<uint64_t> g_probeWants{0};  // probe requests of the jobs taken by passes
 
 void LogReject(const char* what, const ProbeIn& in, uint32_t flags, const char* why) {
   if (g_logBudget.load() == 0) return;
@@ -2897,6 +3012,9 @@ Binder g_bind;                         // render thread
 std::atomic<uint64_t> g_bindChanges{0}, g_idFail{0};
 std::atomic<int> g_state{0};        // 0 = not tried (retried), 1 = ready, -1 = unavailable
 std::atomic<bool> g_disabled{false};
+// Passes that drew at least one segment from a command list (monotonic;
+// the status word reads it to tell a working recorder from an idle one).
+std::atomic<uint64_t> g_workPasses{0};
 std::atomic<bool> g_shutdown{false};
 std::atomic<int> g_inside{0};
 std::atomic<bool> g_chained{false};
@@ -2932,6 +3050,13 @@ uint32_t g_entryGen = 0;
 int64_t g_entryQpc = 0;
 int g_ordinal = 0;       // G-buffer executions since the last render entry (render thread)
 void* g_gbRg = nullptr;  // the render graph of the G-buffer executions
+bool g_collOk = false;   // the collection descriptors as analysed (install)
+QuadSet g_frameQuad;     // the quad views' volumes for this frame (render thread, at its first execution)
+uint32_t g_frameQuadGen = 0, g_frameExecs = 0, g_frameCounted = 0, g_quadMissFrames = 0;
+bool g_quadFilterOn = true;
+std::atomic<uint64_t> g_nonQuad{0};  // executions of other views (not counted, stock)
+int64_t g_gbRgEntryQpc = 0;  // its last render entry
+std::atomic<uint64_t> g_graphChanges{0};
 int64_t g_lastPassQpc = 0, g_gbEntryQpc = 0;
 std::atomic<uint64_t> g_faults{0}, g_probes{0}, g_probeOdd{0}, g_entries{0}, g_gbExecs{0}, g_ordMax{0};
 constexpr uint32_t kEvictAge = 1500;  // render entries an unused texture entry is kept
@@ -3035,6 +3160,8 @@ struct Stat {
   // Cockpit jobs: render-target textures at exec entries: seen, drawn to since their last mip generation, bound
   // as a target of the pass (R24 3.4).
   std::atomic<uint64_t> rtSeen{0}, rtDrawn{0}, rtBound{0};
+  // "Item vector changed": the job read another collection's vector, or the same one changed after its read.
+  std::atomic<uint64_t> idOtherVec{0}, idSameVec{0};
   std::atomic<uint64_t> verifyAa{0}, verifyAb{0}, verifyAaBad{0}, verifyAbBad{0}, verifyTexels{0}, verifyBadTexels{0},
       verifySkipped{0}, verifyErrors{0}, verifyStateBad{0}, verifyExecs{0};
 };
@@ -3051,6 +3178,11 @@ struct Slot {
   LoopObj front = {};
   LoopObj exec[kMaxSegments] = {};
   int64_t lateEntry = 0, latePassQpc = 0;  // the render entry and pass time of a late job (0: none)
+  int64_t boundQpc = 0, lastPassQpc = 0;    // identity self-check: when bound, its last pass
+  // Its execution's collection as last seen at the pass (model, volume, vrank): jobs start on this frame's
+  // collection with them (R24 13). vol null: not known (raw index).
+  const void* lvol = nullptr;
+  uint16_t lsm = 0, lvrank = 0;
   double workUs = -1;  // the slot's jobs' worker time (stage A on every thread, commit, recording), smoothed
   double slackMs = -1;  // the slot's jobs in time: pass minus done, smoothed
   Stat st;
@@ -3058,7 +3190,27 @@ struct Slot {
 Slot g_slot[kSlots];
 
 // Keys are learnt per execution: its identity, or its collection index.
-inline uint32_t KeyScopeOf(int s) { return g_idMode ? CollHash(g_slot[s].id) : g_slot[s].learn.idx; }
+// Keys are learnt per execution: its identity, else its view's collection
+// (model, ClippingVolume, vrank) once seen, else the collection index. The
+// index alone moves when other views add collections (F-4 scene): the jobs
+// were armed with the previous frame's index and the probes ran under this
+// frame's, so a key probed under one never served the other and probing
+// stalled with thousands of items "key not probed yet" (R24 14).
+inline uint32_t VolScope(uint16_t sm, const void* vol, uint16_t vrank) {
+  const uint64_t v = reinterpret_cast<uintptr_t>(vol);
+  return static_cast<uint32_t>(Mix(v * 0x9E3779B97F4A7C15ull ^ (static_cast<uint64_t>(sm) << 48) ^
+                                   (static_cast<uint64_t>(vrank) << 32))) | 0x80000000u;
+}
+inline uint32_t KeyScopeFor(bool idMode, const CollKey& id, const void* lvol, uint16_t lsm, uint16_t lvrank,
+                            uint32_t idx) {
+  if (idMode) return CollHash(id);
+  if (lvol) return VolScope(lsm, lvol, lvrank);
+  return idx;
+}
+inline uint32_t KeyScopeOf(int s) {
+  const Slot& sl = g_slot[s];
+  return KeyScopeFor(g_idMode, sl.id, sl.lvol, sl.lsm, sl.lvrank, sl.learn.idx);
+}
 // The scope ordinal a slot serves (a cockpit slot: its view's slot's), and its log name.
 inline int SlotOrdinal(int s) { return OrdinalOfSlot(g_scope.load(), s % kScopeSlots); }
 inline void SlotName(int s, char* out, size_t n) {
@@ -3997,16 +4149,20 @@ bool ProbeCall(void* self, void* ctx, uint64_t* ret) {
 // (DCS's own draw), false = not probed (the caller draws it as usual).
 bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
   ProbeIn in;
-  if (!ReadProbeInRaw(self, in, g_env)) return false;
-  in.scope = KeyScopeOf(pc.slot);
+  auto skip = [](int why) {
+    g_probeSkip[why]++;
+    return false;
+  };
+  if (!ReadProbeInRaw(self, in, g_env)) return skip(kSkNotModel);
+  in.scope = pc.job ? pc.job->keyScope : KeyScopeOf(pc.slot);  // the scope the job's keys were looked up in
   in.ordinal = SlotOrdinal(pc.slot);
   const GbKey* k = FindKey(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, in.scope);
-  if (k && k->state.load() <= 0) return false;
+  if (k && k->state.load() <= 0) return skip(kSkRejected);
   if (!k && KeyCooling(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, in.scope, g_entryGen, false))
-    return false;
-  if (k && shrec::FindMesh(g_tab.mesh, in.mesh, in.shader, in.tech, in.effect, in.techBegin)) return false;
+    return skip(kSkCooling);
+  if (k && shrec::FindMesh(g_tab.mesh, in.mesh, in.shader, in.tech, in.effect, in.techBegin)) return skip(kSkKnown);
   const ReadsEntry* rd = FindReads(g_tab, in.shader, in.tech, in.effect, in.techBegin);
-  if (!rd) return false;  // resolved after the pass; probed later
+  if (!rd) return skip(kSkNoReads);  // resolved after the pass; probed later
   VsStatic st;
   if (k) {
     st = k->st;
@@ -4015,7 +4171,7 @@ bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
     shrec::Capture none;
     none.flags = pc.flags;
     ProcessProbe(g_tab, in, st, Facts(), none, Extra(), g_entryGen);
-    return false;
+    return skip(kSkStatic);
   }
   Facts f;
   f.dcsVs = shrec::FxPassVsGuarded(in.shader, in.tech);
@@ -4027,7 +4183,7 @@ bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
   f.reads = rd;
   if (*shadowbatch::g_rendererApi != static_cast<void*>(shadowbatch::g_rendererObj) ||
       *shadowbatch::g_rendererObj != static_cast<void*>(shadowbatch::g_rendererVtbl))
-    return false;
+    return skip(kSkRenderer);
   g_cap = shrec::Capture();
   g_extra = Extra();
   g_capSt = &st;
@@ -4109,9 +4265,14 @@ uint64_t CallItem(void* self, void* ctx) {
 bool OverrideBody(void* self, void* ctx, uint64_t* ret) {
   PassCtx* pc = g_pass;
   if (pc && GetCurrentThreadId() == g_renderTid) {
-    if (pc->probesLeft > 0 && pc->job) {
+    if (pc->job && pc->job->wantCount) {
       const int64_t k = Locate(*pc, self);
-      if (k >= 0 && pc->job->items[k].want && TryProbe(*pc, self, ctx, ret)) return true;
+      if (k >= 0 && pc->job->items[k].want) {
+        if (pc->probesLeft <= 0)
+          g_probeSkip[kSkBudget]++;
+        else if (TryProbe(*pc, self, ctx, ret))
+          return true;
+      }
     }
     if (!pc->ratioSeen && pc->front && pc->fb) {
       *ret = CallItem(self, ctx);
@@ -4387,6 +4548,7 @@ void TakeJob(PassCtx& pc, void** vec) {
   st.tlDone += QpcNs(g_entryQpc, (std::max)(j.tDone, recDone));
   NoteSlack(sl, QpcNs((std::max)(j.tDone, recDone), t0) / 1e6);
   if (!SameVectorGuarded(j, vec)) {
+    (j.vec != vec ? st.idOtherVec : st.idSameVec)++;
     ReleaseSegLists(j);
     pc.reason = kPIdentity;
     return;
@@ -4468,11 +4630,13 @@ void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
   Slot& sl = g_slot[s];
   LearnVector(sl, vec, ctx);
   sl.st.passes++;
+  sl.lastPassQpc = defrec::Qpc();
   PassCtx pc;
   pc.slot = s;
   const bool mine = sl.job && sl.armed && sl.job->entryGen && sl.job->entryGen == g_entryGen;
   if (mine) TakeJob(pc, vec);
   pc.probesLeft = pc.job && pc.job->wantCount ? kProbesPerPass : 0;
+  if (pc.job) g_probeWants += pc.job->wantCount;
   if (g_verify.load(std::memory_order_relaxed) && pc.state == kPsArmed)
     VerifyPass(pc, pass, ctx, orig, vec);
   else
@@ -4489,6 +4653,7 @@ void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
       done += pc.segDone[k];
     }
     if (done) {
+      g_workPasses.fetch_add(1, std::memory_order_relaxed);
       const Job& j = *pc.job;
       st.recorded += j.recorded;
       st.draws += j.draws;
@@ -4543,6 +4708,28 @@ int CollFindGuarded(void* rg, const CollKey& k) {
     return -1;
   }
 }
+int CollFindVolGuarded(void* rg, uint16_t sm, const void* vol, uint16_t vrank) {
+  __try {
+    size_t n = 0;
+    const uint8_t* d = CollDescs(rg, &n);
+    return CollFindVolIn(d, n, sm, vol, vrank);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+// Descriptor idx is the (sm, vol, vrank) collection (cheap fields first). Guarded.
+bool CollIsVolGuarded(void* rg, uint32_t idx, uint16_t sm, const void* vol, uint16_t vrank) {
+  __try {
+    size_t n = 0;
+    const uint8_t* d = CollDescs(rg, &n);
+    if (!d || idx >= n) return false;
+    const uint8_t* e = d + static_cast<size_t>(idx) * kCollStride;
+    if (*reinterpret_cast<const uint16_t*>(e) != sm || *reinterpret_cast<const void* const*>(e + 8) != vol) return false;
+    return CollFindVolIn(d, n, sm, vol, vrank) == static_cast<int>(idx);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
 bool CollIsGuarded(void* rg, uint32_t idx, const CollKey& k) {
   __try {
     size_t n = 0;
@@ -4579,6 +4766,8 @@ void Rebind() {
     if (sl.armed && sl.job && !DropStale(s)) continue;  // its job still runs: next base frame
     if (want[s].ok && !EnsureSlot(s)) continue;
     sl.id = want[s];
+    sl.lvol = nullptr;
+    sl.boundQpc = defrec::Qpc();
     sl.learn.haveVec = false;
     sl.learn.target = false;
     sl.learn.ratioOk = false;
@@ -4594,6 +4783,35 @@ void Rebind() {
   }
 }
 
+// Identity binding off for the session: the slots by plain ordinal (render
+// thread). Logged once with the reason.
+void FallbackToOrdinal(const char* why) {
+  if (!g_idMode) return;
+  g_idMode = false;
+  for (int s = 0; s < kSlots; ++s) {
+    Slot& sl = g_slot[s];
+    if (sl.armed && sl.job) DropStale(s);  // a job still running is dropped at its next arm
+    sl.id = CollKey();
+    sl.learn.haveVec = false;
+    sl.learn.target = false;
+    sl.learn.ratioOk = false;
+  }
+  g_ordinal = 0;
+  Log("gbuffer recorder: execution identity off for this session (%s); the scope bits are plain ordinals again", why);
+}
+
+// The graph of a G-buffer execution, followed when the old one went stale. Plain.
+void* ExecGraphRaw(void* ctx) { return *static_cast<void**>(ctx); }
+void* ExecGraphGuarded(void* ctx) {
+  __try {
+    return ExecGraphRaw(ctx);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return nullptr;
+  }
+}
+constexpr double kGraphStaleMs = 500.0, kStarvedMs = 5000.0;
+inline int64_t MsTicks(double ms) { return static_cast<int64_t>(ms / (defrec::QpcToUs() / 1000.0)); }
+
 void WrapBody(void* pass, void* ctx, gbpass::ExecFn orig) {
   if (Active() && g_pool.Disabled()) Disable("worker fault (see the deferred rec line above)");
   if (!Active()) {
@@ -4603,25 +4821,49 @@ void WrapBody(void* pass, void* ctx, gbpass::ExecFn orig) {
     if (GetCurrentThreadId() != g_renderTid) {
       PrevWrap(pass, ctx, orig);
     } else {
-      const int ord = g_ordinal++;
+      if (FollowGraph(g_gbRg, g_gbRgEntryQpc, ExecGraphGuarded(ctx), defrec::Qpc(), MsTicks(kGraphStaleMs))) {
+        g_graphChanges++;
+        g_ordinal = 0;
+        g_bind.cur = FrameSeq();
+        g_bind.prevN = 0;
+        g_bind.stable = 0;
+        if (g_graphChanges.load() > 1)
+          Log("gbuffer recorder: the G-buffer executions moved to render graph %p (the one followed had no render entry "
+              "for %.0f ms)", g_gbRg, kGraphStaleMs);
+      }
       g_gbExecs++;
-      NoteMax(g_ordMax, static_cast<uint64_t>(ord));
-      int s = -1;
-      if (g_idMode) {
-        CollKey k;
-        void* rg = nullptr;
+      if (g_frameQuadGen != g_entryGen) {  // after this frame's culling, which published the quad views
+        g_frameQuadGen = g_entryGen;
+        g_frameQuad = g_collOk && g_quadFilterOn ? ReadQuadVolumes(defrec::Qpc(), MsTicks(250.0)) : QuadSet();
+      }
+      ++g_frameExecs;
+      CollKey k;
+      void* rg = nullptr;
+      if (g_collOk) {
         void** vec = gbpass::ItemVector(pass, ctx);
-        if (vec && ExecKeyGuarded(vec, ctx, &k, &rg)) {
-          if (!g_gbRg) g_gbRg = rg;  // the frame's graph (every view's passes, MFD views too [V SceneRenderer 0x1f7a0])
-        } else {
-          g_idFail++;
-        }
+        if ((!vec || !ExecKeyGuarded(vec, ctx, &k, &rg)) && g_idMode) g_idFail++;
+      }
+      int s = -1;
+      if (CountsAsQuad(g_frameQuad, k)) ++g_frameCounted;
+      if (!CountsAsQuad(g_frameQuad, k)) {
+        g_nonQuad++;  // another view's execution (R24 12): stock, not counted
+      } else if (g_idMode) {
         if (!k.ok || rg == g_gbRg) {
           SeqAdd(g_bind.cur, k);
           s = SlotOfKey(k);
         }
+      } else if (g_frameQuad.n && k.ok && k.sm == kSmCockpit) {
+        g_nonQuad++;  // with the quad views known, the ordinals count their non-cockpit executions
       } else {
+        const int ord = g_ordinal++;
+        NoteMax(g_ordMax, static_cast<uint64_t>(ord));
         s = SlotOfOrdinal(g_scope.load(), ord);
+      }
+      if (s >= 0 && k.ok && k.vol) {
+        Slot& sl = g_slot[s];
+        sl.lvol = k.vol;
+        sl.lsm = k.sm;
+        sl.lvrank = k.vrank;
       }
       if (s < 0 || !EnsureSlot(s))
         PrevWrap(pass, ctx, orig);
@@ -4699,6 +4941,9 @@ bool Arm(int s) {
   j.cockpit = g_cockpit.load();
   j.armById = g_idMode;
   j.armKey = sl.id;
+  j.armVol = sl.lvol;
+  j.armSm = sl.lsm;
+  j.armVrank = sl.lvrank;
   j.maxSeg = g_maxSeg.load();
   if (slack) {
     j.island = (std::min)(j.island, kSlackIsland);
@@ -4790,7 +5035,46 @@ void OnRenderBody(void* rg, void* renderables) {
     g_ordinal = 0;
     ++g_entryGen;
     g_entryQpc = defrec::Qpc();
-    if (g_idMode && EndFrame(g_bind) && Active()) Rebind();
+    g_gbRgEntryQpc = g_entryQpc;
+    // The quad filter matched nothing in a whole frame of executions (volumes not the executions' own): off.
+    if (g_frameQuad.n && g_frameExecs && !g_frameCounted && ++g_quadMissFrames >= 30 && g_quadFilterOn) {
+      g_quadFilterOn = false;
+      Log("gbuffer recorder: quad-view filter off for this session (30 frames in which no G-buffer execution used a "
+          "quad view's volume); every execution counts again");
+    } else if (g_frameCounted) {
+      g_quadMissFrames = 0;
+    }
+    g_frameExecs = g_frameCounted = 0;
+    if (g_idMode && EndFrame(g_bind) && Active()) {
+      if (SeqAmbiguous(g_bind.base)) {
+        char why[160];
+        snprintf(why, sizeof(why), "executions share a viewport tag: %u non-cockpit, first tag 0x%x", g_bind.base.n,
+                 g_bind.base.id[0].tag);
+        FallbackToOrdinal(why);
+      } else {
+        Rebind();
+      }
+    }
+  }
+  // Self-check: a bound slot that has not run for a while although G-buffer executions did.
+  static uint64_t s_execsAt = 0;
+  static int64_t s_checkQpc = 0;
+  const int64_t nowQpc = defrec::Qpc();
+  if (g_idMode && Active() && nowQpc - s_checkQpc > MsTicks(1000.0)) {
+    const uint64_t execs = g_gbExecs.load();
+    const bool ran = execs != s_execsAt;
+    const int64_t now = nowQpc;
+    s_execsAt = execs;
+    s_checkQpc = now;
+    for (int s = 0; s < g_poolSlots && g_idMode; ++s) {
+      const Slot& sl = g_slot[s];
+      if (SlotStarved(sl.id.ok, sl.lastPassQpc, sl.boundQpc, now, MsTicks(kStarvedMs), ran)) {
+        char why[160];
+        snprintf(why, sizeof(why), "slot %d (viewport tag 0x%x, rank %u) saw no execution for %.0f s", s, sl.id.tag,
+                 sl.id.rank, kStarvedMs / 1000.0);
+        FallbackToOrdinal(why);
+      }
+    }
   }
   if (Active() && rg == g_gbRg) {
     const int64_t prevEntry = g_lastPassQpc > g_gbEntryQpc ? g_lastPassQpc : g_gbEntryQpc;
@@ -4809,8 +5093,8 @@ void OnRenderBody(void* rg, void* renderables) {
       }
       if (!sl.armed && !Arm(s)) continue;
       if (count == SIZE_MAX) count = VectorCountGuarded(rg, renderables);
-      if (g_idMode) {  // this frame's index of the slot's execution (MFD frames shift them)
-        const int idx = CollFindGuarded(rg, sl.id);
+      if (sl.lvol || g_idMode) {  // this frame's index of the slot's execution (other views shift them)
+        const int idx = sl.lvol ? CollFindVolGuarded(rg, sl.lsm, sl.lvol, sl.lvrank) : CollFindGuarded(rg, sl.id);
         if (idx < 0) continue;
         sl.learn.idx = static_cast<uint32_t>(idx);
       }
@@ -4844,7 +5128,12 @@ void OnSortedBody(void** out) {
     if (!j || j->startState.load(std::memory_order_acquire) != kStartArmed) continue;
     uint8_t* base = shrec::ArrayBaseGuarded(j->armRg);
     if (!base) continue;
-    if (j->armById) {
+    if (j->armVol) {
+      const intptr_t d = reinterpret_cast<uint8_t*>(out) - base;
+      if (d >= 0 && d % 24 == 0 && d / 24 <= 0xffff &&
+          CollIsVolGuarded(j->armRg, static_cast<uint32_t>(d / 24), j->armSm, j->armVol, j->armVrank))
+        StartJob(*j, out, true);
+    } else if (j->armById) {
       const intptr_t d = reinterpret_cast<uint8_t*>(out) - base;
       if (d >= 0 && d % 24 == 0 && d / 24 <= 0xffff &&
           CollIsGuarded(j->armRg, static_cast<uint32_t>(d / 24), j->armKey))
@@ -4991,7 +5280,9 @@ bool Install() {
     for (int k = 0; k < kMaxSegments; ++k) g_slot[s].exec[k] = {g_execVtbl, s, k};
   }
   // Execution identity (R24 2): the collection descriptors as analysed, else plain ordinals.
-  const char* idWhy = g_byOrdinal.load() ? "[Model] GBufferRecorderByOrdinal=1" : CollBuildWhy();
+  const char* collWhy = CollBuildWhy();
+  g_collOk = !collWhy;
+  const char* idWhy = g_byOrdinal.load() ? "[Model] GBufferRecorderByOrdinal=1" : collWhy;
   g_idMode = !idWhy;
   PoolShape(g_cockpit.load() && g_idMode, &g_poolSlots, &g_threads);
   if (g_cockpit.load() && !g_idMode) {
@@ -5138,11 +5429,13 @@ void ResetCounters() {
     s.aaClean = 0;
     s.redoPlanned = s.redoExecuted = s.redoLate = s.redoFail = s.swapsAhead = s.redoNs = s.slackJobs = 0;
     s.rtReplays = s.rtSeen = s.rtDrawn = s.rtBound = 0;
+    s.idOtherVec = s.idSameVec = 0;
     s.verifyAa = s.verifyAb = s.verifyAaBad = s.verifyAbBad = s.verifyTexels = s.verifyBadTexels = 0;
     s.verifySkipped = s.verifyErrors = s.verifyStateBad = s.verifyExecs = 0;
   }
-  g_probes = g_probeOdd = g_probePool = 0;
-  g_entries = g_gbExecs = g_ordMax = 0;
+  g_probes = g_probeOdd = g_probePool = g_probeWants = 0;
+  for (auto& a : g_probeSkip) a = 0;
+  g_entries = g_gbExecs = g_ordMax = g_nonQuad = 0;
   g_texBuilt = g_texRefreshed = g_texFull = g_texDeferred = 0;
   memset(g_texWhy, 0, sizeof(g_texWhy));
 }
@@ -5152,10 +5445,11 @@ void LogCounters(const char* label, double frames) {
   const double f = frames > 0 ? frames : 1.0;
   const uint32_t scope = g_scope.load();
   Log("  gbuffer recorder %s: scope 0x%x, %.0f frames%s; %.2f render entries and %.2f G-buffer executions/frame "
-      "(highest ordinal %llu); probes %llu (unusable %llu, inconclusive %llu, sampler pool differs %llu); keys %u (recordable %llu, not %llu, "
+      "(highest ordinal %llu; other views' executions %.2f/frame, quad views %d known); probes %llu (unusable %llu, inconclusive %llu, sampler pool differs %llu); keys %u (recordable %llu, not %llu, "
       "retired for a state change %llu, relearnt %llu), meshes %u (recordable %llu, not %llu), read sets %u, table full %llu; faults %llu",
       label, scope, frames, g_disabled.load() ? ", DISABLED" : "", g_entries.load() / f, g_gbExecs.load() / f,
-      static_cast<unsigned long long>(g_ordMax.load()), static_cast<unsigned long long>(g_probes.load()),
+      static_cast<unsigned long long>(g_ordMax.load()), g_nonQuad.load() / f, g_frameQuad.n,
+      static_cast<unsigned long long>(g_probes.load()),
       static_cast<unsigned long long>(g_probeOdd.load()), static_cast<unsigned long long>(g_probeInconclusive.load()),
       static_cast<unsigned long long>(g_probePool.load()), g_tab.keysUsed, static_cast<unsigned long long>(g_keysOk.load()),
       static_cast<unsigned long long>(g_keysRejected.load()), static_cast<unsigned long long>(g_keyDowngrades.load()),
@@ -5221,6 +5515,11 @@ void LogCounters(const char* label, double frames) {
       line += buf;
     }
     Log("  gbuffer recorder %s %s drawn stock: %s", label, name, line.empty() ? "none" : line.c_str());
+    if (st.idOtherVec.load() || st.idSameVec.load())
+      Log("  gbuffer recorder %s %s item vector changed: %llu times another collection's vector, %llu times the same "
+          "vector with other items",
+          label, name, static_cast<unsigned long long>(st.idOtherVec.load()),
+          static_cast<unsigned long long>(st.idSameVec.load()));
     line.clear();
     for (int r = 1; r < kSegReasons; ++r) {
       if (!st.segReason[r].load()) continue;
@@ -5261,12 +5560,27 @@ void LogCounters(const char* label, double frames) {
     rtDrawn += g_slot[k].st.rtDrawn.load();
     rtBound += g_slot[k].st.rtBound.load();
   }
+  {
+    std::string sk;
+    char b[96];
+    for (int r = 0; r < kSkips; ++r) {
+      if (!g_probeSkip[r].load()) continue;
+      snprintf(b, sizeof(b), "%s%s %.1f", sk.empty() ? "" : "; ", kSkipName[r], g_probeSkip[r].load() / f);
+      sk += b;
+    }
+    Log("  gbuffer recorder %s probes: requests %.1f/frame in the jobs used, probed %.2f/frame%s; not probed/frame: "
+        "%s",
+        label, g_probeWants.load() / f, g_probes.load() / f,
+        g_probeWants.load() && !g_probes.load() ? " (STALLED: requests but no probe)" : "", sk.empty() ? "none" : sk.c_str());
+  }
   if (g_idMode)
     Log("  gbuffer recorder %s identity: %llu frames, %llu base, %llu with more executions (MFD frames); last base "
-        "frame %u non-cockpit and %u cockpit executions; %llu bindings changed; %llu executions not identified",
+        "frame %u non-cockpit and %u cockpit executions; %llu bindings changed; %llu executions not identified; "
+        "render graph changes %llu",
         label, static_cast<unsigned long long>(g_bind.frames), static_cast<unsigned long long>(g_bind.baseFrames),
         static_cast<unsigned long long>(g_bind.extraFrames), g_bind.base.n, g_bind.base.nck,
-        static_cast<unsigned long long>(g_bindChanges.load()), static_cast<unsigned long long>(g_idFail.load()));
+        static_cast<unsigned long long>(g_bindChanges.load()), static_cast<unsigned long long>(g_idFail.load()),
+        static_cast<unsigned long long>(g_graphChanges.load()));
   if (g_cockpit.load())
     Log("  gbuffer recorder %s cockpit: render-target textures at exec entries %.2f/frame, drawn to since their last "
         "mip generation %.2f/frame, a target of the pass %.2f/frame",

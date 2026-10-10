@@ -117,8 +117,9 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // A focus area that follows Pimax Play is read now, so the plan holds exactly the values that will be written.
         // profile.json keeps the user's own draft; the converted values go to the provider configuration and pimax-fovea.json.
         var draft = profile;
-        // Optimizations only runs none of the VR settings the draft keeps (profile.json still holds them).
-        profile = profile.ForLaunch();
+        // Optimizations only runs none of the VR settings the draft keeps (profile.json still holds them); the refresh
+        // rate is the headset's own when it can be read.
+        profile = HeadsetRefresh.Resolve(profile.ForLaunch());
         fovea ??= PimaxFovea.Resolve(profile);
         profile = fovea.Profile;
         // Checked and deployed with the saved runtime copy when the draft has no runtime file of its own; profile.json
@@ -210,7 +211,14 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                         throw new InvalidDataException("The DCS engine optimizations are modified or incomplete.");
                 }
             }
-            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, prefetchFix, engine)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha);
+            string? pupilShift = null;
+            if (profile.ForLaunch().UsesPupilShift)
+            {
+                pupilShift = Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll");
+                if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
+                    throw new InvalidDataException("The pupil shift layer is modified or incomplete.");
+            }
+            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, prefetchFix, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha);
         }
         string Import(string id)
         {

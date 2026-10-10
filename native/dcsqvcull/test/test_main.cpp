@@ -210,6 +210,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "pass_flush_test.h"
 #include "fwd_rec_count_test.h"
 #include "srv_tail_trim_test.h"
+#include "status_word_test.h"
 
 int main() {
   g_log = stdout;
@@ -1389,6 +1390,8 @@ int main() {
   frctest::Run();
   // setShaderResources identical-tail trim (R15 F2): fake caches vs the 0x1ac20 transcription, real device via fake sites.
   strtest::Run();
+  // DcsQvCull_Status word (status_word.h): bit layout, feature counting, loader/payload handover.
+  swtest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

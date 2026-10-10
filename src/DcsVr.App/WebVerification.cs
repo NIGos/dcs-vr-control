@@ -149,6 +149,7 @@ internal static class WebVerification
             "2026-10-04 15:12:40.500 INFO    VISUALIZER (31660): render thread has stopped", "=== Log closed."]);
         var flight = WriteFlightFixture(Path.Combine(fixture, "flight"), sessionStart, sessionEnd);
         PimaxFovea.SettingsPath = pimax;
+        HeadsetRefresh.PimaxLogFolder = Path.Combine(fixture, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(fixture, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(fixture, "no-steamvr.vrsettings");
         var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") });
         using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
         var env = await CoreWebView2Environment.CreateAsync(null,Path.Combine(fixture,"browser"),new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-component-update --no-first-run --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion"));

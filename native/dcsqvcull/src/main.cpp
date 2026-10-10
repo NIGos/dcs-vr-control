@@ -32,6 +32,7 @@
 
 #include "loader_api.h"
 #include "reloc.h"
+#include "status_word.h"
 #include "scene_layout.h"
 
 using namespace layout;
@@ -47,6 +48,7 @@ std::mutex g_logMutex;
 FILE* g_log = nullptr;                   // standalone builds (tests) only
 const DcsQvLoaderApi* g_api = nullptr;   // set when running under the loader
 std::atomic<bool> g_stop{false};         // payload is being replaced
+qvstatus::Sink g_statusSink;             // loader-owned status word (status_word.h)
 bool g_reportCapture = false;  // guarded by g_logMutex
 DWORD g_reportThread = 0;      // only lines logged by the suite thread go to the report
 std::string g_reportBuf;
@@ -1039,6 +1041,11 @@ void DumpViews(uint32_t count, const uint8_t* infos, const std::vector<ViewInfo>
   }
 }
 
+// Collections per collect call we classify and patch. It was 64: an F-4 cockpit
+// scene has 68 (R24 12), so no call was classified, no quad frame counted, and
+// every feature keyed on quad frames stood still. This is only a sanity bound.
+constexpr uint32_t kMaxCollectInfos = 4096;
+
 // Classifies the views of one call into peripheral/focus pairs.
 int Classify(uint32_t count, const uint8_t* infos, std::vector<ViewInfo>& views) {
   views.clear();
@@ -1350,7 +1357,7 @@ std::map<uint64_t, CensusEntry> g_census;
 
 void CensusRecord(uint32_t count, const uint8_t* infos, uint64_t us) {
   uint32_t shadingMask = 0, aux = 0;
-  if (infos && count <= 64) {
+  if (infos && count <= kMaxCollectInfos) {
     for (uint32_t i = 0; i < count; ++i) {
       const uint8_t* ci = infos + i * kCollectionInfoStride;
       uint16_t sm = *reinterpret_cast<const uint16_t*>(ci + kCiShadingModel);
@@ -1384,6 +1391,30 @@ void CensusDump(uint64_t quadFrames) {
     uint32_t aux = static_cast<uint32_t>(kv.first & 0xff);
     Log("  views=%2u shading=0x%08x aux=%u  calls/frame=%.2f  ms/frame=%.3f", count, mask, aux,
         kv.second.calls / f, kv.second.us / 1000.0 / f);
+  }
+}
+
+// The quad views' ClippingVolumes of a classified call (the infos hold the
+// originals again), for the G-buffer recorder's execution filter (R24 12).
+void PublishQuadViewsRaw(const uint8_t* infos, const ViewInfo* views, size_t n, int64_t qpc) {
+  const void* vols[gbrec::kQuadVols];
+  int k = 0;
+  for (size_t i = 0; i < n && k < gbrec::kQuadVols; ++i) {
+    const ViewInfo& v = views[i];
+    const bool focusOfPair = v.role == 2 && [&] {
+      for (size_t j = 0; j < n; ++j)
+        if (views[j].role == 1 && views[j].partner == static_cast<int>(i)) return true;
+      return false;
+    }();
+    if (!((v.role == 1 && v.partner >= 0) || focusOfPair)) continue;
+    vols[k++] = *reinterpret_cast<void* const*>(infos + v.index * kCollectionInfoStride + kCiClipVolume);
+  }
+  gbrec::PublishQuadVolumes(vols, k, qpc);
+}
+void PublishQuadViews(const uint8_t* infos, const std::vector<ViewInfo>& views, int64_t qpc) {
+  __try {
+    PublishQuadViewsRaw(infos, views.data(), views.size(), qpc);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
   }
 }
 
@@ -1422,12 +1453,18 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   ApplyThreadsMax(scene);
 
   thread_local std::vector<ViewInfo> views;
-  Patch patches[128];
+  // Every info slot is patched at most once by the views and once by the shadows.
+  thread_local std::vector<Patch> patchBuf;
+  if (patchBuf.size() < 2u * count + 16u) patchBuf.resize(2u * count + 16u);
+  Patch* patches = patchBuf.data();
   int pairs = 0;
   int patched = 0;
-  if (count >= 4 && count <= 64 && infos) {
-    if (!SehPrepare(count, infos, patches, 128, &pairs, &patched, &views))
+  if (count >= 4 && count <= kMaxCollectInfos && infos) {
+    if (!SehPrepare(count, infos, patches, patchBuf.size(), &pairs, &patched, &views))
       Log("ERROR: exception while preparing views; optimisation disabled");
+  } else if (count > kMaxCollectInfos) {
+    static std::atomic<bool> once{false};
+    if (!once.exchange(true)) Log("collect: a call with %u collections (above %u) is not classified", count, kMaxCollectInfos);
   }
 
   if (allocslab::g_state.load(std::memory_order_relaxed) > 0) allocslab::OnCollect();
@@ -1442,11 +1479,12 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   jointail::End(joinId);
 
   for (int i = 0; i < patched; ++i) *reinterpret_cast<uint8_t**>(patches[i].slot) = patches[i].original;
+  if (pairs >= 1) PublishQuadViews(infos, views, t1.QuadPart);
 
   uint64_t us = static_cast<uint64_t>((t1.QuadPart - t0.QuadPart) * g_qpcToUs);
   CensusRecord(count, infos, us);
   if (g_entryDumpRequest.exchange(false)) DumpEntries(static_cast<uint8_t*>(self));
-  if (g_infoSnapRequest.load() && infos && count <= 64) {
+  if (g_infoSnapRequest.load() && infos && count <= kMaxCollectInfos) {
     std::lock_guard<std::mutex> lock(g_infoSnapMutex);
     g_infoSnap.assign(infos, infos + count * kCollectionInfoStride);
     g_infoSnapCount = count;
@@ -2032,6 +2070,62 @@ void SetEngineOff(bool off) {
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
+}
+
+// Status word for DcsQvCull_Status (status_word.h), recomputed by the worker
+// about once per second. Production optimizations = the features the app's
+// ini turns on by default, each from its module's real state:
+//   [Model] AllocSlabs, BigModelPages, FrameHeapSlabs, PlainTriangleCounter,
+//   ShadowInstancing, ShadowBatching, ShadowPlanAsync, ShadowTextureSkip,
+//   ShadowRecorder, GBufferRecorder; [Timing] TaskQueueClock, ShaderTimeCache;
+//   [Texture] StreamDedupe; [Effects] SkipSameConstantBuffer;
+//   [Scene] CostWeights, PartitionBoost; [D3D] SplitFilter.
+// Latched = off for the rest of the session (build or verify mismatch,
+// contained exception, install failed with its DLL loaded).
+uint64_t ComputeStatus() {
+  const bool dx11 = GetModuleHandleW(L"dx11backend.dll") != nullptr;
+  const bool ngModel = GetModuleHandleW(L"NGModel.dll") != nullptr;
+  const uint32_t threadsDef = g_defaultThreadsMax.load();
+  const bool batchLatched = shadowbatch::g_disabled.load() || shadowbatch::g_state.load() < 0;
+  const bool batchActive = shadowbatch::g_on.load() && shadowbatch::g_state.load() == 1 && !batchLatched;
+  // The recorders count as active only when they drew passes from command
+  // lists since the last update: enabled but idle (scene layout not learned,
+  // no quad frames) is not active. Only the worker calls this, about once
+  // per second.
+  static uint64_t shWork = 0, gbWork = 0;
+  const uint64_t shNow = shrec::g_workPasses.load(std::memory_order_relaxed);
+  const uint64_t gbNow = gbrec::g_workPasses.load(std::memory_order_relaxed);
+  const bool shWorked = shNow != shWork, gbWorked = gbNow != gbWork;
+  shWork = shNow;
+  gbWork = gbNow;
+  const qvstatus::Feature f[] = {
+      {g_allocSlabsOn.load() && allocslab::g_state.load() == 2, allocslab::g_state.load() < 0, g_cfg.allocSlabs},
+      {bigpages::g_wanted.load() && bigpages::g_state.load() == 1, bigpages::g_state.load() < 0, g_cfg.bigPages},
+      {g_frameHeapOn.load() && frameheap::g_state.load() == 1, frameheap::g_state.load() < 0, g_cfg.frameHeapSlabs},
+      {g_triPlainOn.load() && tricount::g_plain.load(), g_triPlainOn.load() && !tricount::g_site && ngModel,
+       g_cfg.triPlain},
+      {g_taskClockOn.load() && edtime::g_state.load() == 1, edtime::g_state.load() < 0, g_cfg.taskClock},
+      {timercache::g_on.load() && timercache::g_orig, g_cfg.shaderTimeCache && !timercache::g_orig,
+       g_cfg.shaderTimeCache},
+      {g_texDedupeOn.load() && texbind::g_attached.load(), g_texDedupeOn.load() && !texbind::g_orig && dx11,
+       g_cfg.texDedupe},
+      {g_cbSkipOn.load() && cbskip::g_attached.load(), g_cbSkipOn.load() && !cbskip::g_orig && dx11, g_cfg.cbSkip},
+      {g_costWeightsOn.load() && partw::g_orig, g_costWeightsOn.load() && !partw::g_orig, g_cfg.costWeights},
+      {g_partitionBoost.load() && threadsDef >= 1 && threadsDef <= 32, threadsDef > 32, g_cfg.partitionBoost},
+      {shadowinst::g_on.load() && shadowinst::g_state.load() == 1, shadowinst::g_state.load() == -1,
+       g_cfg.shadowInst},
+      {batchActive, batchLatched, g_cfg.shadowBatch && g_cfg.shadowInst},
+      {batchActive && shadowbatch::g_async.load() && shadowbatch::g_workersUp.load(),
+       g_cfg.shadowPlanAsync && batchLatched, g_cfg.shadowPlanAsync && g_cfg.shadowBatch && g_cfg.shadowInst},
+      {g_shadowTexSkipOn.load() && shadowtex::g_state.load() == 1 && shadowtex::g_attached.load(),
+       shadowtex::g_state.load() < 0, g_cfg.shadowTexSkip},
+      {shrec::g_on.load() && shrec::Ready() && shWorked, shrec::g_disabled.load() || shrec::g_state.load() < 0,
+       g_cfg.shadowRecorder},
+      {gbrec::g_on.load() && gbrec::Ready() && gbWorked, gbrec::g_disabled.load() || gbrec::g_state.load() < 0,
+       g_cfg.gbufferRecorder},
+      {sfilt::Live(), sfilt::g_disabled.load() || sfilt::g_state.load() < 0, g_cfg.splitFilter},
+  };
+  return qvstatus::Compose(f, sizeof(f) / sizeof(f[0]), true, g_engineOff.load());
 }
 
 bool ToggleEngine() {
@@ -3134,6 +3228,7 @@ DWORD WINAPI WorkerThread(void*) {
   bool autoStarted = false;
   ULONGLONG lastStats = GetTickCount64();
   ULONGLONG lastCfg = lastStats;
+  g_statusSink.Publish(ComputeStatus());  // hooks installed: running
   while (!g_stop.load()) {
     Sleep(50);
     bool chord = KeyDown(VK_CONTROL) && KeyDown(VK_MENU);
@@ -3215,6 +3310,7 @@ DWORD WINAPI WorkerThread(void*) {
     if (now - lastCfg >= 1000) {
       lastCfg = now;
       LoadConfig(false);
+      g_statusSink.Publish(ComputeStatus());  // last second's states (the retries below show next time)
       // NGModel.dll may load after the payload: retry until the hook installs.
       if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
           !g_benchRunningFlag.load())
@@ -3579,8 +3675,14 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   return 0;
 }
 
+// Optional export, called by the loader before DcsQvPayload_Start.
+extern "C" __declspec(dllexport) void DcsQvPayload_SetStatusWord(std::atomic<uint64_t>* word) {
+  g_statusSink.Attach(word);
+}
+
 extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   Log("payload: stopping");
+  g_statusSink.Detach();  // stores 0; this payload never writes the word again
   g_benchAbort = true;
   g_stop = true;
   threadtune::Restore();

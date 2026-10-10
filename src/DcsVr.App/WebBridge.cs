@@ -260,6 +260,17 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // Read-only: the DCS engine optimizations' own log, the newest test report and DCS's log.
                     var engineOptions = EngineOptionsPath();
                     return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
+                case "pupilStatus":
+                    // Read-only: the pupil shift layer's log in the applied profile's folder.
+                    var pupilApplied = await Task.Run(service.ReadAppliedProfile);
+                    var pupilFolder = pupilApplied?.Profile.ForLaunch().UsesPupilShift == true ? PupilShiftStatus.Folder(service.ManagedRoot, pupilApplied.Profile.Id) : null;
+                    return Reply(id, new { status = await Task.Run(() => PupilShiftStatus.Read(pupilFolder, DcsRunning())) });
+                case "pupilOpenLog":
+                    EnsureInteractive();
+                    var pupilLog = (await Task.Run(service.ReadAppliedProfile)) is { } applied && applied.Profile.ForLaunch().UsesPupilShift
+                        ? Path.Combine(PupilShiftStatus.Folder(service.ManagedRoot, applied.Profile.Id), PupilShiftStatus.LogName) : null;
+                    if (pupilLog is null || !File.Exists(pupilLog)) throw new InvalidOperationException("No log yet: the layer writes it when DCS starts VR.");
+                    using (var process = Process.Start(new ProcessStartInfo(pupilLog) { UseShellExecute = true })) { } break;
                 case "engineSuite":
                     EnsureInteractive();
                     var suiteOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");
@@ -422,7 +433,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         else if (_profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown) issues.Insert(0, new("dcs-launcher", IssueSeverity.Warning, LaunchSafety.LauncherUnknownMessage));
         return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
-            issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(_profile, CurrentInventory) : null, status = _status, report = _report,
+            issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
             // Recovery: one record of original files, restored with one action.
             originals = new { count = originals.Count, files = originals.Files, state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },

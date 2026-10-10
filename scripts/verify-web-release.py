@@ -63,7 +63,7 @@ assert result['manager']['passed'] == result['manager']['total'] and result['man
 fixture = Path(args.fixture)
 result['installer'] = json.loads((fixture/'result.json').read_text(encoding='utf-8-sig'))
 assert result['installer']['passed'] and result['installer']['previousReleaseUpgradeChecked']
-for name, prefix, count in [('packagedWebView',release/'files/docs/interface',261),('installedWebView',fixture/'gui',275)]:
+for name, prefix, count in [('packagedWebView',release/'files/docs/interface',272),('installedWebView',fixture/'gui',286)]:
     checks = json.loads(Path(str(prefix)+'-checks.json').read_text())
     assert checks['passed'] and checks['count'] == count
     renders = json.loads(Path(str(prefix)+'-renders.json').read_text())
@@ -78,7 +78,7 @@ for f in json.loads((release/'release-manifest.json').read_text(encoding='utf-8-
     # Components added after 0.2.3 (the deferred OFXR layer) have no baseline to compare against.
     # Components rebuilt on purpose from patched sources (Cheeky OpenXR layer with the DCS quad layout export, the
     # focus adapter) must match their own published hash instead; every other component stays byte-identical.
-    rebuilt = p.removesuffix('.sha256') in ('components/CheekyOpenXRLayer.dll', 'components/quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll') or p.startswith('components/cheeky-focus/') or p.startswith('components/boost/') or p.startswith('components/dcsqvcull/')
+    rebuilt = p.removesuffix('.sha256') in ('components/CheekyOpenXRLayer.dll', 'components/quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll') or p.startswith('components/cheeky-focus/') or p.startswith('components/boost/') or p.startswith('components/dcsqvcull/') or p.startswith('components/pupilshift/')
     if rebuilt:
         sidecar = release/'files'/(p + '.sha256')
         if not p.endswith('.sha256') and sidecar.exists():
@@ -106,4 +106,4 @@ result['nativePacing'] = {'passed':True,'sourceTests':40,'bundledDllLimiterTest'
 assert all(any(c['id'] == 'external-limiters' and c['state'] == 'Manual' for c in json.loads((root/f'artifacts/live-readiness-{version.split("-")[0]}'/f'{id}-report.json').read_text(encoding='utf-8-sig'))['checks']) for id in result['liveReadiness'])
 output = root/f'artifacts/release-verification-{version.split("-")[0]}.json'
 output.write_text(json.dumps(result,indent=2),encoding='utf-8')
-print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':261,'installedWebViewChecks':275,'rendersPerRun':52,'binaryBytes':result['binary']['bytes']}))
+print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':272,'installedWebViewChecks':286,'rendersPerRun':52,'binaryBytes':result['binary']['bytes']}))

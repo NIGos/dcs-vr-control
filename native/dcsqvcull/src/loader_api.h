@@ -9,6 +9,7 @@
 // a thread may still be executing inside one of their hooks.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 struct DcsQvLoaderApi {
@@ -30,3 +31,6 @@ constexpr uint32_t kDcsQvLoaderApiVersion = 1;
 // Payload exports.
 using DcsQvPayloadStartFn = int (*)(const DcsQvLoaderApi* api);
 using DcsQvPayloadStopFn = void (*)();
+// Optional export, called before Start: the loader-owned status word the
+// payload publishes to (see status_word.h); detached again by Stop.
+using DcsQvPayloadSetStatusWordFn = void (*)(std::atomic<uint64_t>* word);

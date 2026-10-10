@@ -208,7 +208,7 @@ public static class SetupDetection
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 
-    private static double? ReadSteamVrRefresh(string settings)
+    internal static double? ReadSteamVrRefresh(string settings)
     {
         try
         {
