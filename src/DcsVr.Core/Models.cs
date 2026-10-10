@@ -32,7 +32,8 @@ public sealed record VrProfile
     /// <summary>Optimizations only, for another headset or a monitor: DCS runs exactly as the user set it up (VR or not,
     /// with the OpenXR runtime and layers of the PC), and the app adds only the features that are not VR (Engine
     /// Optimizations, CPU Boost with the prefetch fix, Free VRAM before flight): no runtime, layer or VR option of its
-    /// own. <see cref="ProfileValidation.ResolveFeatures"/> turns the VR features off.</summary>
+    /// own. The VR settings stay in the profile for the next Pimax or Sboys flight; <see cref="ForLaunch"/> is what
+    /// runs.</summary>
     public bool Desktop { get; init; }
     public QuadProvider QuadViews { get; init; } = QuadProvider.PimaxNative;
     public FrameGeneration FrameGen { get; init; }
@@ -269,13 +270,15 @@ public sealed record VrProfile
     /// <summary>The prefetch fix is deployed (bin\dxgi2.dll) and enabled through the launch environment.</summary>
     public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>
-    public bool UsesBoostHelper => CpuBoost || FreeVram || UsesLowerMonitor || PauseTobiiDesktop;
+    public bool UsesBoostHelper => CpuBoost || FreeVram || UsesLowerMonitor || UsesTobiiPause;
+    /// <summary>The desktop Tobii pause is for a Pimax next to a desktop tracker, never with <see cref="Desktop"/>.</summary>
+    public bool UsesTobiiPause => PauseTobiiDesktop && !Desktop;
     /// <summary>The monitor mode and the small DCS window are for the desktop mirror of a VR flight, never with
     /// <see cref="Desktop"/>, where they would shrink the game itself.</summary>
     public bool UsesLowerMonitor => LowerMonitor && !Desktop;
     public bool UsesSmallDcsWindow => SmallDcsWindow && !Desktop;
     /// <summary>The boost helper starts elevated: CPU Boost's administrator option, or pausing the desktop Tobii services.</summary>
-    public bool BoostHelperElevated => (CpuBoost && BoostElevated) || PauseTobiiDesktop;
+    public bool BoostHelperElevated => (CpuBoost && BoostElevated) || UsesTobiiPause;
     /// <summary>Foveated Super Resolution actually runs: only in stereo, without Quad Views.</summary>
     public bool UsesFoveatedDlss => FoveatedDlss && QuadViews == QuadProvider.None;
     public bool UsesCheeky => UsesFoveatedDlss || NeuralRendering;
@@ -286,6 +289,11 @@ public sealed record VrProfile
     /// <summary>Cheeky NrTransitionWidth for <see cref="UsesNeuralEdgeFade"/>: the Quad Views fade band (2 x the edge
     /// blending, in focus radii), at most Cheeky's 0.3.</summary>
     public double NeuralEdgeFeather => Math.Min(0.3, 2 * QuadEdgeBlend);
+    /// <summary>What a launch runs: with <see cref="Desktop"/> (Optimizations only) the VR features are off, whatever the
+    /// profile keeps for the next VR flight; otherwise the profile itself.</summary>
+    public VrProfile ForLaunch() => Desktop
+        ? this with { QuadViews = QuadProvider.None, NeuralRendering = false, FoveatedDlss = false, FrameGen = FrameGeneration.Off, QuadFocusAdapter = false, PauseTobiiDesktop = false }
+        : this;
     public override string ToString() => Name;
 }
 

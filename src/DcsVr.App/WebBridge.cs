@@ -136,7 +136,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             var data = root.GetProperty("data");
             var draftProfile = JsonData.Deserialize<VrProfile>(data.GetProperty("profile").GetRawText());
             var log = DcsLogPath(Empty(data.GetProperty("options").GetString()) ?? _options ?? _inventory.OptionsPath);
-            var key = JsonData.Serialize(new { draftProfile.CpuBoost, draftProfile.BoostDcsPriority, draftProfile.BoostMoveVrRuntime, draftProfile.BoostMoveBackgroundApps,
+            var key = JsonData.Serialize(new { draftProfile.Desktop, draftProfile.CpuBoost, draftProfile.BoostDcsPriority, draftProfile.BoostMoveVrRuntime, draftProfile.BoostMoveBackgroundApps,
                 draftProfile.BoostBackgroundApps, draftProfile.BoostPrefetch, draftProfile.BoostElevated, draftProfile.Runtime, log,
                 draftProfile.FreeVramApps, draftProfile.FlightDisplayWidth, draftProfile.FlightDisplayHeight, draftProfile.FlightDisplayRefresh });
             lock (_boostCacheLock)
@@ -210,7 +210,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     var detection = await Task.Run(() => SetupDetection.Detect(_profile, CurrentInventory, new DetectionSources { SavedRuntimes = service.SavedRuntime }));
                     _activeRoute = (DateTime.UtcNow, detection.Active);
                     return Reply(id, new { profile = detection.Profile, detected = detection.Detected, notes = detection.Notes, active = detection.Active.Summary });
-                case "refresh": Invalidate(); await Capture(); _status = "Inventory refreshed."; break;
+                case "refresh": Invalidate(); await Capture(); _status = "PC rescanned."; break;
                 case "pimaxFovea":
                     // Read-only: Pimax Play's Quad View values as they are on disk now.
                     await RefreshEyeResolution();
@@ -220,7 +220,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
                     if (FoveaFact(_profile) is { } fact)
                         _readiness = _readiness with { Checks = [.. _readiness.Checks, new("pimax-fovea", fact.Severity == IssueSeverity.Warning ? CheckState.Warning : CheckState.Pass, "Focus area from Pimax Play", fact.Message)] };
-                    _status = _readiness.CanPrepare ? "Automatic checks complete. Headset checks are still required." : "Setup needs attention. Resolve the listed blockers, then check again.";
+                    _status = _readiness.CanPrepare ? "Automatic checks done. Confirm the items under Check yourself." : "Setup needs attention. Resolve the listed blockers, then check again.";
                     _report = JsonData.Serialize(_readiness); break;
                 case "openGuide":
                     EnsureInteractive(); var guide = data.GetProperty("guide").GetString();
@@ -243,7 +243,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     _report = (fovea.Applies ? string.Join("\n", fovea.Notes.Prepend("Focus area from Pimax Play:")) + "\n\n" : "") + service.Describe(_plan);
                     _status = $"Review · {_plan.Files.Count} files. " + (current is null ? "Launch DCS backs up the originals, then writes them."
                         : ControlService.SameDraft(_profile, current.Profile) ? "This is the applied profile: Launch DCS writes nothing new" + (FoveaChanged(current) is null ? "." : " except Pimax Play's new focus values.")
-                        : $"Launch DCS writes them over {current.Journal.ProfileId}; the original files stay backed up.")
+                        : $"Launch DCS writes them over {current.Profile?.Name ?? current.Journal.ProfileId}; the original files stay backed up.")
                         + (fovea.Pimax is { } pimax ? " " + PimaxFovea.Summary(pimax) : fovea.Applies ? " " + fovea.Notes[0] : ""); break;
                 case "apply":
                     // Apply without launching: the same steps as Launch DCS, with Pimax Play's values read now.
@@ -317,13 +317,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         ? "The saved runtime copy is no longer used for new drafts. The applied profile was installed from it, so the file stays until that profile is restored."
                         : "The saved runtime copy was deleted. Select nvngx_dlssnr.dll again to use DLSS 5." });
                 case "save":
-                    EnsureInteractive(); var save = new SaveFileDialog { Filter = "VR profile|*.json", FileName = "vr-profile.json" };
+                    EnsureInteractive(); var save = new SaveFileDialog { Filter = "DCS Control profile|*.json", FileName = "dcs-control-profile.json" };
                     if (save.ShowDialog(owner) == true) { service.SaveProfile(_profile, save.FileName); _status = "Profile saved."; } break;
                 case "import":
-                    EnsureInteractive(); var import = new OpenFileDialog { Filter = "VR profile|*.json" };
-                    if (import.ShowDialog(owner) == true) { _profile = service.LoadProfile(import.FileName); Invalidate(); _status = "Profile imported. Exact numeric values retained."; } break;
+                    EnsureInteractive(); var import = new OpenFileDialog { Filter = "DCS Control profile|*.json" };
+                    if (import.ShowDialog(owner) == true) { _profile = service.LoadProfile(import.FileName); Invalidate(); _status = "Profile imported."; } break;
                 case "export":
-                    EnsureInteractive(); var export = new SaveFileDialog { Filter = "Diagnostic report|*.json", FileName = "dcs-vr-diagnostic.json" };
+                    EnsureInteractive(); var export = new SaveFileDialog { Filter = "Diagnostic report|*.json", FileName = "dcs-control-report.json" };
                     if (export.ShowDialog(owner) == true) { await Capture(); _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
                         AtomicFile.WriteText(export.FileName, JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, inventory = CurrentInventory, profile = _profile, readiness = _readiness,
                             packages = PackageCatalog.All, originals = service.Originals.Status() })); _status = "Fresh diagnostic and readiness report exported."; } break;
@@ -383,7 +383,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private void Invalidate() { _plan = null; _readiness = null; }
     private string LaunchStatus(LaunchSync sync, string launched) => sync.Kind == LaunchSyncKind.Unchanged ? launched + " " + _profile.Name + "." : sync.Message + " " + launched;
     private static string SyncReport(LaunchSync sync) => sync.Message + "\nProfile: " + sync.Journal.ProfileId
-        + (sync.ReplacedProfileId is { } replaced && replaced != sync.Journal.ProfileId ? "\nWritten over: " + replaced : "");
+        + (sync.ReplacedProfileId is { } replaced && replaced != sync.Journal.ProfileId && !sync.Message.Contains(" over " + replaced, StringComparison.Ordinal) ? "\nWritten over: " + replaced : "");
     private void EnsureInteractive() { if (offline) throw new InvalidOperationException("Interactive commands are disabled during offline verification."); }
     private async Task Capture()
     {
@@ -426,7 +426,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
             // Recovery: one record of original files, restored with one action.
             originals = new { count = originals.Count, files = originals.Files, state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
-            launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId,
+            launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
             appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = DcsRunning(),
             savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys = NeuralHotkeys.DcsDefaultsForCurrentLayout(), readiness = _readiness };

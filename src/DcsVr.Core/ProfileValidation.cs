@@ -18,12 +18,7 @@ public static class ProfileValidation
     /// Views, Cheeky always runs through the focus adapter.</summary>
     public static VrProfile ResolveFeatures(VrProfile profile)
     {
-        // Optimizations only (no headset): none of the VR features. The helpers made for the desktop mirror of a VR
-        // session (small DCS window, lower monitor mode, moving the VR runtime) keep their setting for the next VR
-        // flight but do not run (UsesSmallDcsWindow, UsesLowerMonitor, BoostRuntime).
-        if (profile.Desktop)
-            profile = profile with { QuadViews = QuadProvider.None, NeuralRendering = false, FoveatedDlss = false, FrameGen = FrameGeneration.Off,
-                PauseTobiiDesktop = false };
+        // Optimizations only keeps the VR settings for the next VR flight; VrProfile.ForLaunch is what runs.
         if (profile.FoveatedDlss && profile.QuadViews != QuadProvider.None) profile = profile with { FoveatedDlss = false };
         if (profile.QuadViews == QuadProvider.PimaxNative && (profile.Runtime == RuntimeKind.SboysSteamVr || profile.UsesCheeky))
             profile = profile with { QuadViews = QuadProvider.QuadViewsFoveated };
@@ -32,6 +27,8 @@ public static class ProfileValidation
 
     public static IReadOnlyList<ValidationIssue> Validate(VrProfile profile, InventorySnapshot? inventory = null)
     {
+        // What will run: Optimizations only is never held back by the VR settings it keeps for later.
+        profile = profile.ForLaunch();
         var issues = new List<ValidationIssue>();
         void Error(string code, string text) => issues.Add(new(code, IssueSeverity.Error, text));
         void Range(string code, double value, double min, double max)
@@ -128,7 +125,7 @@ public static class ProfileValidation
             DevPath(profile.EngineDevPayloadPath, ".dll", "developer payload");
             DevPath(profile.EngineDevIniPath, ".ini", "developer settings file");
         }
-        if (profile.LowerMonitor && (profile.FlightDisplayWidth is < 640 or > 15360 || profile.FlightDisplayHeight is < 480 or > 8640 || profile.FlightDisplayRefresh is < 24 or > 1000))
+        if (profile.UsesLowerMonitor && (profile.FlightDisplayWidth is < 640 or > 15360 || profile.FlightDisplayHeight is < 480 or > 8640 || profile.FlightDisplayRefresh is < 24 or > 1000))
             Error("monitor-mode", "Select a monitor mode from the list for Lower the monitor while flying.");
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && (profile.FoveaWidth > .9 || profile.FoveaHeight > .9))
             issues.Add(new("quad-coverage-cap", IssueSeverity.Warning, "Bundled Quad Views renders a focus of at most 90% of the view per axis, which is Horizontal and Vertical FOV 10% in Pimax Play's Quick units. Lower values are kept in the profile and rendered as 10%."));
@@ -171,7 +168,7 @@ public static class ProfileValidation
                      !File.Exists(Path.Combine(Path.GetDirectoryName(inventory.DcsExecutable) ?? "", "Visualizer.dll")))
                 issues.Add(new("smooth-cursor-images", IssueSeverity.Info, "Smooth mouse cursor: DCS's cursor images (Visualizer.dll) are not next to DCS.exe. Frame generation reads them from the running game, or uses a plain arrow."));
             if (inventory.OptionsPath is null) Error("options-not-found", "Select your DCS Config/options.lua file.");
-            if (profile.Runtime == RuntimeKind.SboysSteamVr && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
+            if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
                 Error("steamvr-not-found", "SteamVR OpenXR manifest not found.");
         }
         return issues;

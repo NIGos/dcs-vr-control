@@ -66,6 +66,10 @@ nav{gap:4px;width:100%}
 .two-column>div,#pacingControls,#externalPacingControls,#qualityControls>div,#neuralControls>div{container-type:inline-size}
 @container (max-width:470px){.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}}
 #componentControls .setting>.path-row,#diagnosticControls .setting>.path-row,#componentControls .setting>select{grid-column:1;grid-row:auto;margin-top:6px}
+/* Game & headset: the page uses the whole width when the Sboys card is hidden, and file paths run the full row under
+   their title, so a long DCS or Saved Games path stays readable. */
+#page-setup .two-column:has(#sboysCard[hidden]){grid-template-columns:minmax(0,1fr)}
+#gameControls .setting>.path-row,#headsetControls .setting>.path-row{grid-column:1 / -1;grid-row:auto;margin-top:6px}
 select,input[type=text],input[type=number]{background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);min-height:40px;font-size:14px;padding:8px 12px}
 select{appearance:none;padding-right:34px;background-image:linear-gradient(45deg,transparent 50%,var(--accent) 50%),linear-gradient(135deg,var(--accent) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
 select:hover,input[type=text]:hover,input[type=number]:hover{background-color:#151515}
@@ -94,6 +98,8 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .stage-group-label{font:700 10px var(--display);letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)}
 .stage-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch}
 .stage-row.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.rail-group{font:700 10px var(--display);letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);margin:14px 0 4px 12px}
+.rail-group:first-child{margin-top:4px}
 .feature-group{font:700 10px var(--display);letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);margin:2px 0 -2px}
 .stage{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius);padding:12px 14px;transition:background .14s,border-color .14s}
 .stage:hover{background:var(--s1);border-color:var(--line-strong)}
@@ -385,7 +391,7 @@ details.advanced>summary:hover{color:var(--accent-hi)}
 .cadence-card .budget-grid{margin:14px 0 0}
 .cadence-card .budget{margin-bottom:0}
 
-/* Overview: launch status, the four features, the last flight. */
+/* Overview: launch status, the five features, the last flight. */
 .dash-status{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 14px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius)}
 .dash-status:empty{display:none}
 .dash-dot{width:11px;height:11px;border-radius:50%;background:var(--accent);flex-shrink:0;box-shadow:0 0 0 4px var(--accent-dim)}

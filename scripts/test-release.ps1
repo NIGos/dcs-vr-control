@@ -44,7 +44,7 @@ $start.UseShellExecute=$false; $start.CreateNoWindow=$true
 $start.ArgumentList.Add('--web-smoke');$start.ArgumentList.Add((Join-Path $fixtureRoot 'gui'))
 if ($NeuralRuntime) { $start.Environment['DCSVR_TEST_NEURAL_PATH'] = $NeuralRuntime }
 $gui=[Diagnostics.Process]::Start($start)
-if(-not $gui.WaitForExit(120000)){$gui.Kill();throw 'Offscreen GUI smoke timed out.'}
+if(-not $gui.WaitForExit(120000)){$gui.Kill($true);throw 'Offscreen GUI smoke timed out.'}
 if($gui.ExitCode -ne 0){throw 'Installed GUI offscreen smoke failed.'}
 $gui.Dispose()
 foreach($index in 0..47){if(-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "gui-$index.png"))){throw 'Missing offscreen GUI view.'}}
@@ -141,7 +141,9 @@ foreach($case in $cases){
 }
 $notes=Join-Path $installRoot 'user-notes.txt'
 [IO.File]::WriteAllText($notes,'Retain this unowned file.')
-& $cli app-uninstall --destination $installRoot
+# Uninstall exactly as a user does: files\Uninstall.cmd's script inside the installation, with no destination given
+# (it removes its own installation, running the uninstaller from a temporary copy of the program).
+& "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installRoot 'files/scripts/installer.ps1') -Action Uninstall -NoShortcut
 if($LASTEXITCODE -ne 0){throw 'Application uninstall fixture failed.'}
 if((Test-Path -LiteralPath (Join-Path $installRoot 'DcsControl.exe')) -or (Test-Path -LiteralPath (Join-Path $installRoot 'files/DcsControl.exe'))){throw 'Owned application executable was not removed.'}
 if([IO.File]::ReadAllText($notes) -ne 'Retain this unowned file.'){throw 'User file was changed.'}

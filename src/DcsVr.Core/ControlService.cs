@@ -117,6 +117,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // A focus area that follows Pimax Play is read now, so the plan holds exactly the values that will be written.
         // profile.json keeps the user's own draft; the converted values go to the provider configuration and pimax-fovea.json.
         var draft = profile;
+        // Optimizations only runs none of the VR settings the draft keeps (profile.json still holds them).
+        profile = profile.ForLaunch();
         fovea ??= PimaxFovea.Resolve(profile);
         profile = fovea.Profile;
         // Checked and deployed with the saved runtime copy when the draft has no runtime file of its own; profile.json
@@ -378,8 +380,10 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var plan = Preview(draft, inventory);
         var result = Apply(plan);
         var replacedProfile = applied?.Journal.ProfileId ?? baseline.Current?.ProfileId;
+        // Pilots read the profile's name; the id stays in LaunchSync for the report's "Written over" line and tests.
+        var replacedName = applied?.Profile?.Name ?? replacedProfile;
         var message = reason is not null ? $"Applied {plan.Description} again ({reason})."
-            : replacedProfile is not null ? $"Applied {plan.Description} over {replacedProfile}." : $"Applied {plan.Description}; the original files are backed up.";
+            : replacedName is not null ? $"Applied {plan.Description} over {replacedName}." : $"Applied {plan.Description}; the original files are backed up.";
         var notes = result.ReplacedForeign.Select(path => $"Replaced another {Path.GetFileName(path)} ({path}); it is backed up and Back to stock DCS brings it back.").ToArray();
         if (notes.Length > 0) message += " " + string.Join(" ", notes);
         return new(LaunchSyncKind.Applied, message, result.Current, replacedProfile, notes);

@@ -4,6 +4,8 @@ try
 {
     var command = args.FirstOrDefault() ?? "help";
     string? Option(string name) { var i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
+    // The release folder holds release-manifest.json next to files\, where this program lives.
+    string ReleaseFolder() => File.Exists(Path.Combine(AppContext.BaseDirectory, "release-manifest.json")) ? AppContext.BaseDirectory : Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))!;
     var service = new ControlService(Option("--distribution") ?? AppContext.BaseDirectory, Option("--state") ?? ControlService.DefaultStateRoot);
     // Commands that read or write the record of original files refuse to run from a sandbox that redirects
     // %LOCALAPPDATA% (a second, private record would diverge from the app's); an explicit --state is the caller's choice.
@@ -13,10 +15,10 @@ try
     switch (command)
     {
         case "app-verify":
-            Console.WriteLine($"Verified {ApplicationInstaller.VerifySource(Option("--source") ?? AppContext.BaseDirectory).Files.Count} release files."); break;
+            Console.WriteLine($"Verified {ApplicationInstaller.VerifySource(Option("--source") ?? ReleaseFolder()).Files.Count} release files."); break;
         case "app-install":
         {
-            var journal = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Install(Option("--source") ?? AppContext.BaseDirectory);
+            var journal = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Install(Option("--source") ?? ReleaseFolder());
             Console.WriteLine($"Installed {journal.Entries.Count} application files. Recovery transaction: {journal.Id}"); break;
         }
         case "app-uninstall":

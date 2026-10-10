@@ -7,7 +7,7 @@
   let step = 0, source, candidate, paths, choices, report, checking = false;
   const text = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const opts = (values,current) => values.map(([v,label]) => `<option value="${v}" ${v === current ? 'selected' : ''}>${label}</option>`).join('');
-  const activeProfile = () => ui().state?.appliedProfile;
+  const activeProfile = () => ui().state?.appliedName || ui().state?.appliedProfile;
   function open() {
     if (!ui()?.profile || document.body.classList.contains('busy')) return;
     if (ui().invalid.size) { el('status').textContent = 'Correct the marked numeric values before opening guided setup.'; return; }
@@ -24,7 +24,7 @@
     if (p.quadViews !== 'None') p.quadViewsLayerDirectory = null;
     return p;
   }
-  /** Sets choices directly (verification and tests): {route, features:{quad,dlss,framegen,boost}, gaze}. */
+  /** Sets choices directly (verification and tests): {route, features:{engine,boost,quad,dlss,framegen}, gaze}. */
   function choose(next) { choices = {...choices,...next,features:{...choices.features,...(next.features || {})}}; if (step === 0) render(); }
   function renderChoose() {
     const preview = plan(), notes = ui().featureNotes(preview), on = ui().featureState(preview);
@@ -46,7 +46,7 @@
     const body = el('setupBody');
     if (step === 0) {
       const live = ui().state?.activeRoute;
-      body.innerHTML = `<h3>What do you want to fly with?</h3><p>Your quality settings stay as they are. Only the route and the active features change.</p><div class="setup-grid"><label>How you fly<select id="setupRoute">${opts([['Pimax','Pimax (Pimax Play)'],['SboysSteamVr','Sboys (SteamVR)'],['Desktop','Optimizations only (monitor or any other headset)']],choices.route)}</select><small class="setup-hint">${text(live?.summary || '')}</small></label><label id="setupGazeRow">Focus movement<select id="setupGaze">${opts([['EyeTracked','Eye tracked'],['Fixed','Fixed (centred)']],choices.gaze)}</select></label></div><div class="setup-features" id="setupFeatures" role="group" aria-label="Features"></div>`;
+      body.innerHTML = `<h3>What do you want to fly with?</h3><p>Your quality settings stay as they are. Only the route and the active features change.</p><div class="setup-grid"><label>How you fly<select id="setupRoute">${opts([['Pimax','Pimax (Pimax Play)'],['SboysSteamVr','Sboys (SteamVR)'],['Desktop','Optimizations only (monitor or any other headset)']],choices.route)}</select><small class="setup-hint">${text(live?.summary || '')}</small></label><label id="setupGazeRow">Focus movement<select id="setupGaze">${opts([['EyeTracked','Eye tracked'],['Fixed','Fixed (centered)']],choices.gaze)}</select></label></div><div class="setup-features" id="setupFeatures" role="group" aria-label="Features"></div>`;
       renderChoose();
       for (const [id,key] of [['setupRoute','route'],['setupGaze','gaze']]) el(id).addEventListener('change',e => { choices[key] = e.target.value; renderChoose(); });
       el('setupFeatures').addEventListener('change',e => { const key = e.target.dataset?.feature; if (!key) return; choices.features[key] = e.target.checked; renderChoose(); el('setupFeature-'+key).focus(); });
@@ -84,7 +84,7 @@
       if (checking) body.querySelectorAll('button,input').forEach(control => control.disabled = true);
     } else {
       const manual = report?.checks.filter(c => c.state === 'Manual') || [], current = activeProfile();
-      body.innerHTML = `<h3>Ready to fly</h3><p>Start your headset software, then press <b>Launch DCS</b>. It ${current ? `writes over <b>${text(current)}</b>, ` : 'backs up the original files, then '}applies <b>${text(candidate.name)}</b> and starts DCS. <b>Back to stock DCS</b> in Recovery puts everything back at any time.</p><ol class="flight-checklist">${manual.map(c => `<li><b>${text(c.title)}</b><p>${text(c.detail)}</p></li>`).join('')}</ol><div class="inline-actions"><button id="setupUseDraft" class="button quiet">Keep as draft without launching</button></div>`;
+      body.innerHTML = `<h3>Ready to fly</h3><p>${ui().profile?.desktop ? 'Press' : 'Start your headset software, then press'} <b>Launch DCS</b>. It ${current ? `writes over <b>${text(current)}</b>, ` : 'backs up the original files, then '}applies <b>${text(candidate.name)}</b> and starts DCS. <b>Back to stock DCS</b> on the Stock DCS page puts everything back at any time.</p><ol class="flight-checklist">${manual.map(c => `<li><b>${text(c.title)}</b><p>${text(c.detail)}</p></li>`).join('')}</ol><div class="inline-actions"><button id="setupUseDraft" class="button quiet">Keep these settings, don't launch</button></div>`;
       el('setupUseDraft').addEventListener('click',() => { if (checking) return; adopt(); el('setupDialog').close(); });
       if (checking) body.querySelectorAll('button').forEach(control => control.disabled = true);
     }

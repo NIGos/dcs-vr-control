@@ -688,7 +688,11 @@ Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the u
     var vr = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, FrameGen = FrameGeneration.Nvidia, CpuBoost = true, BoostPrefetch = PrefetchFix.Skip,
         SmallDcsWindow = true, LowerMonitor = true, PauseTobiiDesktop = true, FpsLimit = FpsLimitMode.MatchRefresh, DisableDcsVSync = true };
     var desktop = ProfileValidation.ResolveFeatures(vr with { Desktop = true });
-    Require(desktop.QuadViews == QuadProvider.None && !desktop.NeuralRendering && desktop.FrameGen == FrameGeneration.Off && !desktop.UsesCheeky && !desktop.PauseTobiiDesktop, "VR features off");
+    // The VR settings stay in the profile for the next VR flight (an app restart, Pimax again); none of them runs.
+    Require(desktop.QuadViews == QuadProvider.QuadViewsFoveated && desktop.NeuralRendering && desktop.FrameGen == FrameGeneration.Nvidia && desktop.PauseTobiiDesktop, "VR settings kept");
+    var launch = desktop.ForLaunch();
+    Require(launch.QuadViews == QuadProvider.None && !launch.NeuralRendering && launch.FrameGen == FrameGeneration.Off && !launch.UsesCheeky && !launch.UsesQuadFocus && !desktop.UsesTobiiPause, "VR features off at launch");
+    Require(ProfileValidation.ResolveFeatures(desktop with { Desktop = false }) is { QuadViews: QuadProvider.QuadViewsFoveated, NeuralRendering: true, UsesQuadFocus: true }, "Pimax again brings them back");
     Require(desktop.SmallDcsWindow && desktop.LowerMonitor && !desktop.UsesSmallDcsWindow && !desktop.UsesLowerMonitor && desktop.UsesBoostHelper && !desktop.BoostHelperElevated, "VR helpers kept for later but not run");
     var planner = new DeploymentPlanner(new(null, null, null, QuadFocusDirectory: loaderDir, PrefetchFixDll: fix));
     var plan = planner.Build(desktop, inventory, Path.Combine(root, "desktop/managed"));
@@ -699,6 +703,8 @@ Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the u
     Require(plan.Files.Any(f => f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase)) && plan.Files.All(f => !f.Path.Contains("quadviews", StringComparison.OrdinalIgnoreCase) && !f.Path.Contains("ofxr", StringComparison.OrdinalIgnoreCase)));
     // The readiness checks never ask for a runtime or a headset.
     Require(!ProfileValidation.Validate(desktop, inventory).Any(i => i.Severity == IssueSeverity.Error));
+    // A former Sboys user without SteamVR, and VR settings that need a runtime file, never block Optimizations only.
+    Require(!ProfileValidation.Validate(desktop with { Runtime = RuntimeKind.SboysSteamVr }, inventory).Any(i => i.Severity == IssueSeverity.Error), "Sboys route kept, SteamVR absent");
     // A VR profile on the same PC still needs its runtime.
     try { planner.Build(ProfileValidation.ResolveFeatures(vr with { NeuralRendering = false }), inventory, Path.Combine(root, "desktop/managed-vr")); Require(false, "VR without a runtime must be refused"); }
     catch (InvalidDataException e) { Require(e.Message.Contains("OpenXR runtime")); }
@@ -739,7 +745,9 @@ Test("CPU Boost prefetch fix deploys as the loader's dxgi2.dll, only when enable
     Require(loaderIndex >= 0 && fixIndex > loaderIndex); // restored first, before its loader
     Require(plan.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "skip" && plan.LaunchEnvironment["DCSVR_PREFETCH_LOG"] == Path.Combine(bin, "DcsVrPrefetchFix.log") && plan.LaunchEnvironment["DCSVR_PREFETCH_WINDOW_MS"] == "5000");
     // The same settings next to the fix, so it also works when DCS starts from Steam or a shortcut.
-    var settings = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path == Path.Combine(bin, "DcsControlPrefetchFix.ini")).Content);
+    var settingsBytes = plan.Files.Single(f => f.Path == Path.Combine(bin, "DcsControlPrefetchFix.ini")).Content;
+    Require(settingsBytes[0] == 0xFF && settingsBytes[1] == 0xFE, "UTF-16 LE with a byte order mark, so Windows reads any path");
+    var settings = Encoding.Unicode.GetString(settingsBytes, 2, settingsBytes.Length - 2);
     Require(settings.Contains("[PrefetchFix]") && settings.Contains("Mode=skip") && settings.Contains("WindowMs=5000") && settings.Contains("Log=" + Path.Combine(bin, "DcsVrPrefetchFix.log")), settings);
     var off = planner.Build(boost with { BoostPrefetch = PrefetchFix.Off }, inventory, Path.Combine(root, "prefetch/managed-off"));
     Require(off.Files.All(f => !f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("PrefetchFix.ini", StringComparison.OrdinalIgnoreCase)) && off.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "off");

@@ -28,7 +28,7 @@ public static class FramePacing
         {
             FpsLimitMode.Preserve => cap is null ? "Preserve existing DCS limit (not detected)" : "Preserve detected DCS limit",
             FpsLimitMode.RuntimeHeadroom => "300 FPS headroom; OpenXR still paces frames",
-            FpsLimitMode.MatchRefresh => fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half refresh; OFXR switches to two generated frames when DCS falls below it" : Multiplier(profile) == 3 ? "A third of the refresh for OFXR's two generated frames" : "Half refresh for OFXR's single intermediate frame") : "Full refresh; frame generation is off",
+            FpsLimitMode.MatchRefresh => fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half refresh; OFXR switches to two generated frames when DCS falls below it" : Multiplier(profile) == 3 ? "A third of the refresh for OFXR's two generated frames" : "Half refresh for OFXR's generated frame (2×)") : "Full refresh; frame generation is off",
             _ => "Custom rendered-frame cap"
         };
         return new(profile.HeadsetRefreshHz, profile.HeadsetRefreshHz / Multiplier(profile), cap,
@@ -47,13 +47,13 @@ public static class FramePacing
         var plan = Describe(profile, inventory);
         var checks = new List<ReadinessCheck>
         {
-            new("fps-cap", plan.DcsCap is null ? CheckState.Manual : CheckState.Pass, "Rendered-frame FPS limit", plan.CapDescription + (plan.DcsCap is null ? "." : string.Create(CultureInfo.InvariantCulture, $": {plan.DcsCap:0.###} FPS.")) + " Changes are previewed, backed up and restored with the profile."),
-            new("refresh-rate", CheckState.Manual, "Refresh rate and frame cadence", string.Create(CultureInfo.InvariantCulture, $"Confirm {profile.HeadsetRefreshHz:0.###} Hz in the selected headset provider. Target: {plan.RequiredRenderedFps:0.###} rendered FPS") + (plan.FrameGeneration ? " + one intermediate frame per rendered frame." : "; frame generation is off.") + " " + plan.Note)
+            new("fps-cap", plan.DcsCap is null ? CheckState.Manual : CheckState.Pass, "DCS frame limit", plan.CapDescription + (plan.DcsCap is null ? "." : string.Create(CultureInfo.InvariantCulture, $": {plan.DcsCap:0.###} FPS.")) + " Changes are previewed, backed up and restored with the profile."),
+            new("refresh-rate", CheckState.Manual, "Refresh rate", string.Create(CultureInfo.InvariantCulture, $"Confirm {profile.HeadsetRefreshHz:0.###} Hz in the selected headset provider. Target: {plan.RequiredRenderedFps:0.###} rendered FPS") + (plan.FrameGeneration ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? " + generated frames: 1 (2×), or 2 (3×) when DCS falls behind." : Multiplier(profile) == 3 ? " + 2 generated frames per rendered frame (3×)." : " + 1 generated frame per rendered frame (2×).") : "; frame generation is off.") + " " + plan.Note)
         };
         if (plan.DcsCap is { } cap && cap + .01 < plan.RequiredRenderedFps)
-            checks.Add(new("fps-under-target", CheckState.Warning, "Cap below the selected cadence", string.Create(CultureInfo.InvariantCulture, $"{cap:0.###} rendered FPS cannot supply {profile.HeadsetRefreshHz:0.###} fresh frames/s with this pipeline. Its calculated ceiling is {plan.ConfiguredOutputCeiling:0.###} FPS before other bottlenecks.")));
+            checks.Add(new("fps-under-target", CheckState.Warning, "Frame limit too low", string.Create(CultureInfo.InvariantCulture, $"{cap:0.###} rendered FPS cannot supply {profile.HeadsetRefreshHz:0.###} fresh frames/s with this pipeline. Its calculated ceiling is {plan.ConfiguredOutputCeiling:0.###} FPS before other bottlenecks.")));
         if (inventory.AutoexecPath is not null)
-            checks.Add(new("autoexec-pacing", inventory.AutoexecMaxFps is not null || inventory.AutoexecPacingUnknown ? CheckState.Warning : CheckState.Pass, "Additional DCS autoexec configuration", inventory.AutoexecMaxFps is { } value
+            checks.Add(new("autoexec-pacing", inventory.AutoexecMaxFps is not null || inventory.AutoexecPacingUnknown ? CheckState.Warning : CheckState.Pass, "autoexec.cfg frame limit", inventory.AutoexecMaxFps is { } value
                 ? "Detected max_fps = " + value + ". This separate legacy cap may affect cadence. Review it before testing; the tool preserves autoexec.cfg."
                 : inventory.AutoexecPacingUnknown ? "autoexec.cfg contains unsupported commands; its pacing effect is unknown. Review custom caps and commands before testing. The tool preserves this file."
                 : "No max_fps assignment was found in the data-only autoexec.cfg. Review other custom pacing settings before testing. This file is preserved."));

@@ -80,10 +80,16 @@ public static class SetupDetection
         var active = DetectActiveRoute(sources);
         if (active.Route is { } route)
         {
-            profile = profile with { Runtime = route, RuntimeManifestPath = route == profile.Runtime ? profile.RuntimeManifestPath : null };
-            Set("runtime", "Headset route", route == RuntimeKind.SboysSteamVr ? "Sboys · SteamVR OpenXR" : "Pimax OpenXR", active.Summary);
+            // A running Pimax or SteamVR route is what this PC flies with: it replaces Optimizations only, whose VR settings
+            // were kept in the profile and come back with it.
+            profile = profile with { Desktop = false, Runtime = route, RuntimeManifestPath = route == profile.Runtime ? profile.RuntimeManifestPath : null };
+            Set("runtime", "How you fly", (route == RuntimeKind.SboysSteamVr ? "Sboys · SteamVR OpenXR" : "Pimax OpenXR") + (current.Desktop ? " (instead of Optimizations only)" : ""), active.Summary);
         }
-        else notes.Add(active.Summary);
+        else
+        {
+            notes.Add(active.Summary);
+            if (current.Desktop) notes.Add("Optimizations only stays selected: no Pimax or SteamVR runtime is running.");
+        }
 
         var tracking = active.Tracking != TrackingKind.Unknown ? active.Tracking : inventory.Tracking;
         if (tracking != TrackingKind.Unknown)
@@ -120,7 +126,7 @@ public static class SetupDetection
 
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { } quad)
         {
-            // The focus area follows Pimax Play (read again at every Preview); the converted values are also stored so
+            // The focus area follows Pimax Play (read again at every launch); the converted values are also stored so
             // the profile keeps them if the source is later switched to "This profile".
             var c = quad.Converted;
             profile = profile with
@@ -130,7 +136,7 @@ public static class SetupDetection
             };
             // Shown in Pimax Play's own units and labels; the converted values are in the Quad Views page's details.
             var source = "Pimax Play " + quad.Play.Mode + " mode (" + sources.PimaxPlaySettings + ")";
-            Set("foveaSource", "Focus area source", "Pimax Play (read again at every Preview)", sources.PimaxPlaySettings);
+            Set("foveaSource", "Focus area source", "Pimax Play (read again at every launch)", sources.PimaxPlaySettings);
             foreach (var control in quad.Play.Controls)
                 Set("pimax:" + control.Label, control.Label, control.Value, source);
             Set("quadEdgeBlend", "Edge blending", Format(profile.QuadEdgeBlend), c.Transition ? "Pimax Transition Mode is " + quad.Play.TransitionMode + "; this profile's blending is kept" : "Pimax Transition Mode is Off");

@@ -11,6 +11,8 @@ public sealed class ApplicationInstaller(string destination)
 {
     public string Root { get; } = ValidateRoot(destination);
     public TransactionStore Transactions => new(Path.Combine(Root, ".installer"));
+    /// <summary>The command at the top of the downloaded release that runs the installer; not copied into an installation.</summary>
+    public const string InstallCommand = "Install DCS Control.cmd";
     public static string DefaultDestination => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs/DcsControl");
     public static ReleaseManifest VerifySource(string source)
     {
@@ -43,7 +45,7 @@ public sealed class ApplicationInstaller(string destination)
         var owned = CurrentOwned(journals);
         foreach (var entry in owned.Values) VerifyOwned(entry, Root);
         var changes = new List<FileMutation>();
-        foreach (var file in manifest.Files)
+        foreach (var file in manifest.Files.Where(f => !f.Path.Equals(InstallCommand, StringComparison.OrdinalIgnoreCase)))
         {
             var path = PathPolicy.UnderRoot(Root, file.Path);
             var old = owned.GetValueOrDefault(path);
@@ -102,11 +104,27 @@ public sealed class ApplicationInstaller(string destination)
             throw new InvalidDataException("Select a dedicated application folder.");
         PathPolicy.RejectReparsePoints(root); return root;
     }
-    private static void EnsureAppClosed()
+    private void EnsureAppClosed()
     {
         // The app as it is named now and as it was named before (DCS VR Control).
         var processes = Process.GetProcessesByName("DcsControl").Concat(Process.GetProcessesByName("DcsVrControl")).ToArray();
         try { if (processes.Length > 0) throw new InvalidOperationException("Close DCS Control before installing or uninstalling it."); }
         finally { foreach (var p in processes) p.Dispose(); }
+        // The CPU Boost helper (DcsVr.Cli from this installation) runs until DCS exits and holds its files open. The
+        // installer itself is a DcsVr.Cli too, possibly from this folder: it never counts.
+        var helpers = Process.GetProcessesByName("DcsVr.Cli");
+        try
+        {
+            foreach (var helper in helpers)
+            {
+                if (helper.Id == Environment.ProcessId) continue;
+                string? image = null;
+                try { image = helper.MainModule?.FileName; }
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { }
+                if (image is not null && Path.GetFullPath(image).StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("CPU Boost from this installation is still running with DCS. Close DCS first, then install or uninstall DCS Control.");
+            }
+        }
+        finally { foreach (var p in helpers) p.Dispose(); }
     }
 }

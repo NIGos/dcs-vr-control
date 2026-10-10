@@ -106,7 +106,7 @@ New-Item -ItemType Directory -Path $demoRoot -Force | Out-Null
 $renderStart.Environment['DCSVR_SMOKE_DEMO_ROOT'] = $demoRoot
 $renderStart.ArgumentList.Add('--web-smoke'); $renderStart.ArgumentList.Add((Join-Path $renderRoot 'interface'))
 $renderProcess = [Diagnostics.Process]::Start($renderStart)
-if (-not $renderProcess.WaitForExit(120000)) { $renderProcess.Kill(); throw 'Release interface render timed out.' }
+if (-not $renderProcess.WaitForExit(120000)) { $renderProcess.Kill($true); throw 'Release interface render timed out.' }
 if ($renderProcess.ExitCode -ne 0) { throw 'Release interface render failed.' }
 $renderProcess.Dispose()
 Remove-Item -LiteralPath $demoRoot -Recurse -Force -ErrorAction SilentlyContinue

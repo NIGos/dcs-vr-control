@@ -50,7 +50,8 @@ public sealed class BoostRuntime
 
     private BoostRuntime(VrProfile profile, string stateRoot, string? dcsExecutable, int? dcsPid, string? dcsLog)
     {
-        _profile = profile;
+        // The VR helpers (desktop Tobii pause) never run in Optimizations only.
+        _profile = profile.ForLaunch();
         _dcsExecutable = string.IsNullOrWhiteSpace(dcsExecutable) ? null : SystemPaths.Canonical(dcsExecutable);
         _dcsPid = dcsPid;
         _dcsLog = dcsLog;
@@ -184,7 +185,7 @@ public sealed class BoostRuntime
             if (_profile.UsesLowerMonitor) ApplyDisplay();
             // Before DCS creates its OpenXR session, so the headset's eye tracker is free when Quad Views asks for gaze.
             ResumeLeftoverTobii();
-            if (_profile.PauseTobiiDesktop) PauseTobii();
+            if (_profile.UsesTobiiPause) PauseTobii();
             WriteStatus("waiting");
             output.WriteLine("CPU Boost waiting for DCS...");
 
@@ -197,32 +198,49 @@ public sealed class BoostRuntime
                 return timedOut ? 2 : 0;
             }
 
-            using (dcs)
+            // DCS's own launcher (and the Steam edition) exits and starts DCS again as DCS.exe --restarted: the attached
+            // process ending is only DCS's exit when no DCS from the same executable follows within RestartGrace.
+            var first = true;
+            while (dcs is not null)
             {
-                _attachedPid = dcs.Id;
-                _topology = CpuTopology.Detect(_dcsLog);
-                _allCpus = _topology.AllCpusMask != 0 ? _topology.AllCpusMask : Mask(Enumerable.Range(0, Math.Min(64, _topology.LogicalCount)));
-                _vrMask = Mask(_topology.VrRuntimeCores) & _allCpus;
-                _bgMask = Mask(_topology.BackgroundCores) & _allCpus;
-                Log($"DCS found (PID {dcs.Id}). {_topology.Description}." + (_topology.HasRanking ? "" : " No process is moved between cores; only DCS priority changes."));
-
-                if (_profile.CpuBoost) TuneDcs(dcs);
-                if (_profile.FreeVram) CloseForVram(dcs.Id);
-                if (_profile.CpuBoost) ApplyToOthers(dcs.Id);
-                WriteStatus("active");
-                output.WriteLine($"CPU Boost active for DCS PID {dcs.Id}.");
-
-                // One handle, opened at attach, tells when this DCS exits; no PID lookups that a recycled PID could fool.
-                using var exited = new ProcessExitWaitHandle(dcs.SafeHandle);
-                var handles = new[] { stopping.WaitHandle, exited };
-                while (true)
+                Process? next = null;
+                using (dcs)
                 {
-                    var signaled = WaitHandle.WaitAny(handles, RescanInterval);
-                    if (signaled == 0) break;
-                    if (signaled == 1) { Log("DCS exited; restoring."); break; }
+                    _attachedPid = dcs.Id;
+                    if (first)
+                    {
+                        _topology = CpuTopology.Detect(_dcsLog);
+                        _allCpus = _topology.AllCpusMask != 0 ? _topology.AllCpusMask : Mask(Enumerable.Range(0, Math.Min(64, _topology.LogicalCount)));
+                        _vrMask = Mask(_topology.VrRuntimeCores) & _allCpus;
+                        _bgMask = Mask(_topology.BackgroundCores) & _allCpus;
+                        Log($"DCS found (PID {dcs.Id}). {_topology.Description}." + (_topology.HasRanking ? "" : " No process is moved between cores; only DCS priority changes."));
+                    }
+
+                    if (_profile.CpuBoost) TuneDcs(dcs);
+                    if (_profile.FreeVram && first) CloseForVram(dcs.Id);
                     if (_profile.CpuBoost) ApplyToOthers(dcs.Id);
                     WriteStatus("active");
+                    output.WriteLine($"CPU Boost active for DCS PID {dcs.Id}.");
+
+                    // One handle, opened at attach, tells when this DCS exits; no PID lookups that a recycled PID could fool.
+                    using var exited = new ProcessExitWaitHandle(dcs.SafeHandle);
+                    var handles = new[] { stopping.WaitHandle, exited };
+                    var dcsExited = false;
+                    while (true)
+                    {
+                        var signaled = WaitHandle.WaitAny(handles, RescanInterval);
+                        if (signaled == 0) break;
+                        if (signaled == 1) { dcsExited = true; break; }
+                        if (_profile.CpuBoost) ApplyToOthers(dcs.Id);
+                        WriteStatus("active");
+                    }
+                    if (!dcsExited) break;
+                    next = WaitForRestart(dcs.Id, stopping);
+                    if (next is null) { Log("DCS exited; restoring."); break; }
+                    Log($"DCS PID {dcs.Id} ended and DCS started again (PID {next.Id}), as DCS's launcher does: CPU Boost moves to it; nothing is restored.");
                 }
+                dcs = next;
+                first = false;
             }
             return 0;
         }
@@ -282,6 +300,36 @@ public sealed class BoostRuntime
             if (stopping.Wait(TimeSpan.FromSeconds(2))) break;
         }
         return (null, false);
+    }
+
+    /// <summary>How long a DCS that ended is given to start again (its launcher's Play, the Steam edition's restart)
+    /// before CPU Boost restores everything.</summary>
+    private static readonly TimeSpan RestartGrace = TimeSpan.FromSeconds(30);
+
+    /// <summary>A DCS from the same executable (any one when the launch named none) that runs within
+    /// <see cref="RestartGrace"/> after <paramref name="endedPid"/> ended, opened for the session; null when none does.</summary>
+    private Process? WaitForRestart(int endedPid, ManualResetEventSlim stopping)
+    {
+        var deadline = DateTime.UtcNow + RestartGrace;
+        while (!stopping.IsSet && DateTime.UtcNow < deadline)
+        {
+            foreach (var candidate in DcsCandidates())
+            {
+                if (candidate.Pid == endedPid) continue;
+                if (_dcsExecutable is not null && (candidate.ImagePath is null || !candidate.ImagePath.Equals(_dcsExecutable, StringComparison.OrdinalIgnoreCase))) continue;
+                Process? process = null;
+                try
+                {
+                    process = Process.GetProcessById(candidate.Pid);
+                    _ = process.SafeHandle; // the one handle for the rest of the session
+                    if (!process.HasExited && process.StartTime == candidate.StartTime) { var attached = process; process = null; return attached; }
+                }
+                catch (Exception e) when (e is ArgumentException || IsProcessAccess(e)) { }
+                finally { process?.Dispose(); }
+            }
+            if (stopping.Wait(TimeSpan.FromSeconds(1))) break;
+        }
+        return null;
     }
 
     private static IReadOnlyList<DcsCandidate> DcsCandidates()

@@ -32,7 +32,8 @@ window.runWebSmoke = async function() {
       check('The Sboys driver card shows on the Sboys route',!$('sboysCard').hidden); document.querySelector('#routeSwitch [data-route="Pimax"]').click(); check('The Sboys driver card is hidden on the Pimax route',$('sboysCard').hidden); document.querySelector(`#routeSwitch [data-route="${before}"]`).click(); }
     { const before = {runtime:ui.profile.runtime,quadViews:ui.profile.quadViews,frameGen:ui.profile.frameGen,neural:ui.profile.neuralRendering};
       document.querySelector('#routeSwitch [data-route="Desktop"]').click();
-      check('Optimizations only turns the VR features off and hides their rows and pages',ui.profile.desktop === true && ui.profile.quadViews === 'None' && ui.profile.frameGen === 'Off' && !ui.profile.neuralRendering && $('feature-quad').hidden && $('feature-dlss').hidden && $('feature-framegen').hidden && !$('feature-boost').hidden && $('nav-foveation').hidden && $('nav-framegen').hidden && !$('nav-engine').hidden && ui.profile.name === 'Optimizations only' && ui.profile.id === 'desktop-optimizations');
+      ui.navigate('framegen'); const vrPageOpened = !$('page-framegen').hidden; ui.navigate('overview');
+      check('Optimizations only keeps the VR settings for later, hides their rows and pages and never opens them',!vrPageOpened && ui.profile.desktop === true && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && $('feature-quad').hidden && $('feature-dlss').hidden && $('feature-framegen').hidden && !$('feature-boost').hidden && $('nav-foveation').hidden && $('nav-framegen').hidden && !$('nav-engine').hidden && ui.profile.name === 'Optimizations only' && ui.profile.id === 'desktop-optimizations');
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click();
       check('Pimax or Sboys after Optimizations only brings the VR features back',ui.profile.desktop === false && ui.profile.runtime === before.runtime && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && ui.profile.neuralRendering === before.neural && !$('feature-quad').hidden && !$('nav-foveation').hidden); }
     check('Legacy defaults preserve the DCS frame limit and VSync',ui.profile.fpsLimit === 'Preserve' && !ui.profile.disableDcsVSync);
@@ -62,7 +63,7 @@ window.runWebSmoke = async function() {
     edit('foveaWidth','1.1'); check('Out-of-range numeric entry blocks save',$('saveProfile').disabled);
     edit('foveaWidth','0.612345678901234'); check('Exact numeric value preserved',ui.profile.foveaWidth === .612345678901234 && !ui.invalid.size);
     $('searchOpen').click(); $('searchInput').value = 'pimax play focus'; $('searchInput').dispatchEvent(new Event('input')); check('Search finds the Pimax Play focus values',[...$('searchResults').querySelectorAll('b')].some(b => b.textContent === 'Pimax Play focus values'));
-    $('searchInput').value = 'what boost'; $('searchInput').dispatchEvent(new Event('input')); check('Search finds the CPU Boost plan',[...$('searchResults').querySelectorAll('b')].some(b => b.textContent === 'What Boost will do'));
+    $('searchInput').value = 'happens at launch'; $('searchInput').dispatchEvent(new Event('input')); check('Search finds the CPU Boost plan',[...$('searchResults').querySelectorAll('b')].some(b => b.textContent === 'What happens at launch'));
     $('searchInput').value = 'paper white'; $('searchInput').dispatchEvent(new Event('input')); check('Search filters settings',$('searchResults').querySelectorAll('button').length === 1); $('searchResults').querySelector('button').click(); check('Search opens a folded DLSS 5 setting',!$('page-dlss').hidden && $('neuralAdvanced').open);
     $('neuralAdvanced').open = false;
     check('Motion follows Windows only: no Reduce motion toggle, a prefers-reduced-motion rule instead',!$('reducedMotion') && !document.querySelector('.motion') && [...document.styleSheets].some(sheet => [...sheet.cssRules].some(r => r.media?.mediaText?.includes('prefers-reduced-motion'))));
@@ -134,18 +135,18 @@ window.runWebSmoke = async function() {
       row.querySelector('.check-line').click(); check('A click shows the whole text',row.classList.contains('expanded'));
       ui.navigate('overview'); check('Overview counts what to fix and links to Checks',$('dashStatus').querySelector('.dash-chip.fix[data-open-page=diagnostics]')?.textContent.includes('must fix')); }
     edit('freeVramApps',vramDefaults); edit('freeVram',false); const boostPlan = await ui.request('boostPlan',ui.draft());
-    // What Boost will do is fetched again for Boost and route edits, not for other edits.
+    // What happens at launch is fetched again for Boost and route edits, not for other edits.
     ui.navigate('boost'); await sleep(450); let requests = ui.boostRequests; edit('quadSharpening',.61); edit('neuralIntensity',.8); await sleep(450);
     check('Non-Boost edits do not refetch the Boost plan',ui.boostRequests === requests);
     edit('boostDcsPriority','High'); await sleep(450); check('Boost edits refetch the Boost plan once',ui.boostRequests === requests + 1); edit('boostDcsPriority','AboveNormal'); await sleep(450);
     const [planA, planB] = await Promise.all([ui.request('boostPlan',ui.draft()), ui.request('pimaxFovea')]);
     check('The Boost plan answers next to other commands and is reused for unchanged Boost settings',Array.isArray(planA.plan.processes) && planB.pimax.found);
     { ui.renderBoostPlan(boostPlan); const b = boostPlan.plan, rows = $('boostPlan').querySelectorAll('.vram-table tbody tr'), select = $('input-flightDisplayMode');
-      check('What Boost will do lists each program to close with its approximate VRAM and the total',rows.length === b.freeVram.length && b.freeVram.length === ui.profile.freeVramApps.length && !!$('vramTotal') && $('boostPlan').textContent.includes('approx'));
+      check('What happens at launch lists each program to close with its approximate VRAM and the total',rows.length === b.freeVram.length && b.freeVram.length === ui.profile.freeVramApps.length && !!$('vramTotal') && $('boostPlan').textContent.includes('approx'));
       const reported = (b.monitor?.modes || []).map(m => m.width+'x'+m.height+'@'+m.refresh), own = ui.profile.flightDisplayWidth+'x'+ui.profile.flightDisplayHeight+'@'+ui.profile.flightDisplayRefresh;
       check('The flight monitor mode offers only modes the monitor reports, and shows current to flight mode',[...select.options].every(o => reported.includes(o.value) || o.value === own) && select.value === own && (!b.monitor || $('monitorPlan').textContent.includes('→')));
       check('The small DCS window shows the options.lua values it sets',$('boostPlan').textContent.includes('graphics.width = 1280') && $('boostPlan').textContent.includes('graphics.fullScreen = false')); }
-    check('What Boost will do comes from the backend without changing the draft',Array.isArray(boostPlan.plan.processes) && Array.isArray(boostPlan.plan.notes) && /dcs\.log$/i.test(boostPlan.dcsLog) && ui.profile.cpuBoost);
+    check('What happens at launch comes from the backend without changing the draft',Array.isArray(boostPlan.plan.processes) && Array.isArray(boostPlan.plan.notes) && /dcs\.log$/i.test(boostPlan.dcsLog) && ui.profile.cpuBoost);
     $('featureCheck-boost').click(); check('Unchecking a feature renames the profile',!ui.profile.cpuBoost && ui.profile.name === 'Pimax · Quad Views + DLSS 5 + Frame generation');
     for (const route of ['Pimax','SboysSteamVr']) {
       select(route,{quad:true,dlss:true,framegen:true});
@@ -156,7 +157,7 @@ window.runWebSmoke = async function() {
       edit('fpsLimit','Custom'); edit('renderedFpsCap',47.5); edit('disableDcsVSync',true);
       check(route+' custom quality retained',ui.profile.quadSharpening === .456789123456 && ui.profile.flowPreset === 'Slow');
       check(route+' the focus area says it comes from Pimax Play\'s settings',ui.profile.foveaSource === 'PimaxPlay' && $('featureSummary-quad').textContent.includes("from Pimax Play's settings") && $('input-foveaSource').querySelector('[value=PimaxPlay]').textContent === "From Pimax Play's settings");
-      check(route+' before the first launch the status says changes apply at launch',$('statusTitle').textContent === 'Changes will be applied when you launch' && !$('launch').disabled && !$('apply').disabled && $('openRecovery').hidden);
+      check(route+' before the first launch the status says changes apply at launch',$('statusTitle').textContent === 'Changes apply at launch' && !$('launch').disabled && !$('apply').disabled && $('openRecovery').hidden);
       await ui.run('preview'); check(route+' Review files lists every file read-only, with nothing to approve',ui.plan.files.length > 5 && !('token' in ui.plan) && !$('page-diagnostics').hidden && $('plannedFiles').children.length === ui.plan.files.length && !ui.state.launchReady && ui.state.originals.count === 0 && ui.state.status.includes('Launch DCS backs up the originals'));
       check(route+' Quad Views without DLSS 5 deploys no Cheeky file',!ui.plan.files.some(f => /CheekyFoveatedDLSS/i.test(f.path)));
       check(route+' review reads Pimax Play and reports it in Pimax Play units',ui.state.status.includes(ui.state.pimax.summary) && ui.state.pimax.summary.startsWith('Pimax Play · '+window.offlineFixture.pimaxMode+': Center Resolution 125%, Peripheral Resolution 20%') && ui.state.report.includes('Focus area from Pimax Play') && ui.plan.foveaStamp === ui.state.pimax.stamp);
@@ -164,30 +165,30 @@ window.runWebSmoke = async function() {
       edit('renderedFpsCap',48); check(route+' an edit drops the reviewed file list',!ui.plan && $('fileCount').textContent === 'NOT REVIEWED'); edit('renderedFpsCap',47.5);
       // Launch DCS: one click applies with a backup and checks the launch contract; the offline host never starts DCS.
       $('launch').click(); await waitIdle();
-      const firstApplied = ui.state.appliedProfile, firstCount = ui.state.originals.count;
+      const firstApplied = ui.state.appliedProfile, firstAppliedName = ui.state.appliedName, firstCount = ui.state.originals.count;
       check(route+' Launch DCS backs up the originals, applies and verifies the launch contract without starting DCS',firstApplied && ui.state.launchReady && firstCount > 5 && ui.state.status.includes('DCS was not started') && ui.state.report.includes('Launch contract verified') && ui.state.report.includes('Profile: '+firstApplied));
       ui.navigate('recovery');
       check(route+' Recovery shows one Original files card with every changed file and one Back to stock DCS button',$('originals').querySelectorAll('.originals-card').length === 1 && $('originals').textContent.includes(firstCount+' files changed by DCS Control') && $('originals').querySelectorAll('.original-file').length === firstCount && !!$('restoreOriginals') && !!$('openBackups') && !$('originals').querySelector('[data-restore]'));
       ui.navigate('overview');
       check(route+' the applied draft reads Ready to fly, with Back to stock DCS one click away',ui.matchesApplied() && $('statusTitle').textContent === 'Ready to fly' && $('statusDot').classList.contains('ready') && $('apply').disabled && !$('launch').disabled && !$('openRecovery').hidden && !$('openRecovery').disabled);
       check(route+' Overview says Ready to fly',$('dashStatus').classList.contains('ready') && $('dashStatus').textContent.includes('Ready to fly') && $('resetApplied').hidden);
-      edit('quadSharpening',.33); check(route+' an edited draft offers Reset to applied',!$('resetApplied').hidden && $('dashStatus').textContent.includes('Changes apply at launch') && !!$('dashStatus').querySelector('[data-reset-applied]'));
-      $('resetApplied').click(); check(route+' Reset to applied brings back the applied profile',ui.matchesApplied() && $('resetApplied').hidden && $('statusTitle').textContent === 'Ready to fly');
+      edit('quadSharpening',.33); check(route+' an edited draft offers Undo changes',!$('resetApplied').hidden && $('dashStatus').textContent.includes('Changes apply at launch') && !!$('dashStatus').querySelector('[data-reset-applied]'));
+      $('resetApplied').click(); check(route+' Undo changes brings back the applied profile',ui.matchesApplied() && $('resetApplied').hidden && $('statusTitle').textContent === 'Ready to fly');
       { const appliedOptions = ui.state.appliedOptions, appliedDcs = ui.state.appliedDcs;
         check(route+' the applied DCS install and options.lua are known to the page',Boolean(appliedOptions && appliedDcs));
         edit('options',appliedOptions.toUpperCase().replace(/\\/g,'/')); check(route+' the same options.lua spelled differently is still Ready to fly',ui.matchesApplied());
         edit('options',appliedOptions.replace(/options\.lua$/i,'other\\options.lua'));
-        check(route+' another options.lua is a change, not Ready to fly',!ui.matchesApplied() && $('statusTitle').textContent === 'Changes will be applied when you launch' && !$('resetApplied').hidden);
-        $('resetApplied').click(); check(route+' Reset to applied brings back the applied options.lua',ui.matchesApplied() && $('input-options').value === appliedOptions && $('statusTitle').textContent === 'Ready to fly'); }
+        check(route+' another options.lua is a change, not Ready to fly',!ui.matchesApplied() && $('statusTitle').textContent === 'Changes apply at launch' && !$('resetApplied').hidden);
+        $('resetApplied').click(); check(route+' Undo changes brings back the applied options.lua',ui.matchesApplied() && $('input-options').value === appliedOptions && $('statusTitle').textContent === 'Ready to fly'); }
       const appliedCount = ui.state.originals.count, appliedAt = ui.state.originals.lastActionAt; $('launch').click(); await waitIdle();
       check(route+' Launch with no changes writes nothing and launches the applied profile',ui.state.originals.count === appliedCount && ui.state.originals.lastActionAt === appliedAt && ui.state.appliedProfile === firstApplied && ui.state.status.startsWith('Offline verification') && ui.state.report.startsWith('The applied profile is up to date.'));
       edit('quadSharpening',.44); await ui.run('refresh');
-      check(route+' a changed draft says changes apply at launch after a refresh',!ui.matchesApplied() && $('statusTitle').textContent === 'Changes will be applied when you launch' && $('launch').title.startsWith('Apply ') && $('launch').title.includes(' over '+firstApplied));
+      check(route+' a changed draft says changes apply at launch after a refresh',!ui.matchesApplied() && $('statusTitle').textContent === 'Changes apply at launch' && $('launch').title.startsWith('Apply ') && $('launch').title.includes(' over '+firstAppliedName));
       $('launch').click(); $('launch').click(); await waitIdle();
       const secondAt = ui.state.originals.lastActionAt;
-      check(route+' Launch after a change writes the draft over the applied profile, with no restore step, and checks the launch contract',secondAt !== appliedAt && ui.state.report.includes(' over '+firstApplied) && !ui.state.report.includes('Restored') && ui.state.status.includes('DCS was not started') && ui.matchesApplied());
+      check(route+' Launch after a change writes the draft over the applied profile, with no restore step, and checks the launch contract',secondAt !== appliedAt && ui.state.report.includes(' over '+firstAppliedName) && !ui.state.report.includes('Restored') && ui.state.status.includes('DCS was not started') && ui.matchesApplied());
       check(route+' a double click launches once and the originals stay the first ones',ui.state.originals.count === appliedCount && !$('launch').disabled);
-      edit('quadSharpening',.45); check(route+' the draft differs again, so Apply without launching is offered',!$('apply').disabled && $('statusTitle').textContent === 'Changes will be applied when you launch');
+      edit('quadSharpening',.45); check(route+' the draft differs again, so Apply without launching is offered',!$('apply').disabled && $('statusTitle').textContent === 'Changes apply at launch');
       $('apply').click(); await waitIdle();
       check(route+' Apply without launching applies the draft and starts nothing',ui.matchesApplied() && ui.state.originals.lastActionAt !== secondAt && ui.state.status.includes('Launch DCS so it receives') && !ui.state.status.includes('not started'));
       await ui.request('launchCheck'); check(route+' saved launch contract verified',true);
@@ -277,7 +278,7 @@ window.runWebSmoke = async function() {
     const wizardCandidate = JSON.stringify(wizard.candidate);
     await wizard.next(); check('Wizard Launch DCS applies the checked profile and closes',!$('setupDialog').open && ui.state.launchReady && ui.matchesApplied() && ui.profile.id === JSON.parse(wizardCandidate).id && ui.state.status.includes('DCS was not started'));
     // A second launch replaces the applied profile: the new draft is written over it, no restore step in between.
-    const firstApplied = ui.state.appliedProfile, firstAt = ui.state.originals.lastActionAt;
+    const firstApplied = ui.state.appliedName, firstAt = ui.state.originals.lastActionAt;
     edit('frameGen','Nvidia'); $('launch').click(); await waitIdle();
     check('Launch switches profiles by writing over the applied one',ui.state.launchReady && ui.state.originals.lastActionAt !== firstAt && ui.state.report.includes(' over '+firstApplied) && ui.matchesApplied());
     wizard.open(); pick('setupRoute','Pimax'); wizard.choose({features:{quad:false,dlss:false,framegen:false,boost:false}}); await wizard.next();

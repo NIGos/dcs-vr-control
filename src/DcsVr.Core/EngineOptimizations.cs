@@ -78,7 +78,7 @@ public static class EngineOptimizations
     /// <summary>Starts the in-game test suite: DcsQvCull checks for run_suite.flag next to its DLL every second.</summary>
     public static string StartSuite(string optionsPath, bool dcsRunning)
     {
-        if (!dcsRunning) throw new InvalidOperationException("Start DCS in VR first: the test suite runs inside DCS, with the headset on and awake.");
+        if (!dcsRunning) throw new InvalidOperationException("Start DCS and get into a flight first: the test suite runs inside DCS (in VR, keep the headset on and awake).");
         var module = ModuleDirectory(optionsPath);
         if (!File.Exists(Path.Combine(module, "DcsQvCull.dll"))) throw new InvalidOperationException("The DCS engine optimizations are not installed. Launch DCS with them on first.");
         File.WriteAllBytes(Path.Combine(module, SuiteFlag), []);

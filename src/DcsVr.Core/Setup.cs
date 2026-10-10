@@ -44,11 +44,12 @@ public static class Readiness
     public static ReadinessReport Check(VrProfile profile, InventorySnapshot inventory, ControlService service)
     {
         // A draft without its own DLSS 5 runtime file is checked with the app's saved copy, exactly as Preview deploys it.
-        profile = service.ResolveNeuralRuntime(profile);
+        // What will run: the VR settings Optimizations only keeps for later are not checked.
+        profile = service.ResolveNeuralRuntime(profile).ForLaunch();
         var checks = new List<ReadinessCheck>();
         void Add(string id, CheckState state, string title, string detail, string? guide = null) => checks.Add(new(id, state, title, detail, guide));
         foreach (var issue in ProfileValidation.Validate(profile, inventory))
-            Add(issue.Code, issue.Severity switch { IssueSeverity.Error => CheckState.Error, IssueSeverity.Info => CheckState.Manual, _ => CheckState.Warning }, "Profile compatibility", issue.Message);
+            Add(issue.Code, issue.Severity switch { IssueSeverity.Error => CheckState.Error, IssueSeverity.Info => CheckState.Manual, _ => CheckState.Warning }, "Settings", issue.Message);
         if (Enum.IsDefined(profile.FpsLimit) && !profile.Desktop) checks.AddRange(FramePacing.Checks(profile, inventory));
         Add("game", File.Exists(inventory.DcsExecutable) && File.Exists(inventory.OptionsPath) ? CheckState.Pass : CheckState.Error,
             "DCS and Saved Games", "Select DCS.exe and the options.lua for the Saved Games profile you will use.", "paths");
@@ -57,12 +58,13 @@ public static class Readiness
         {
             if (inventory.DcsExecutable is { } exe && File.Exists(exe)) LaunchSafety.EnsureNotElevated(exe);
             else if (LaunchSafety.CurrentProcessElevated) throw new InvalidOperationException("DCS Control is running as administrator. Reopen it without administrator rights.");
-            Add("elevation", CheckState.Pass, "Standard user launch", "DCS starts without administrator rights, so the OpenXR loader honours the profile runtime and layers.");
+            Add("elevation", CheckState.Pass, "Runs without admin rights", "DCS starts without administrator rights, so the OpenXR loader uses the profile's headset software and add-ons.");
         }
-        catch (InvalidOperationException e) { Add("elevation", CheckState.Error, "Standard user launch", e.Message); }
+        catch (InvalidOperationException e) { Add("elevation", CheckState.Error, "Runs without admin rights", e.Message); }
         var writable = new List<string>();
         if (inventory.OptionsPath is { } optionsFile && Path.GetDirectoryName(optionsFile) is { } config && !LaunchSafety.CanWrite(config)) writable.Add(config);
-        if (profile.UsesCheeky && inventory.DcsExecutable is { } dcsExe && Path.GetDirectoryName(dcsExe) is { } bin && !LaunchSafety.CanWrite(bin)) writable.Add(bin);
+        // DCS's bin folder receives the Cheeky loader and, with CPU Boost, the prefetch fix (dxgi.dll, dxgi2.dll and its settings).
+        if ((profile.ForLaunch().UsesCheeky || profile.UsesPrefetchFix) && inventory.DcsExecutable is { } dcsExe && Path.GetDirectoryName(dcsExe) is { } bin && !LaunchSafety.CanWrite(bin)) writable.Add(bin);
         Add("write-access", writable.Count == 0 ? CheckState.Pass : CheckState.Error, "Write access to game folders",
             writable.Count == 0 ? "The profile can write its files as the current user." : "These folders are not writable as the current user: " + string.Join("; ", writable) + ". Grant your account Modify permission on them (common for installs under Program Files). Do not run the app as administrator: elevated DCS ignores the profile layers.");
         var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
@@ -77,7 +79,7 @@ public static class Readiness
             Add("dcs-launcher", CheckState.Warning, "DCS launcher", LaunchSafety.LauncherUnknownMessage);
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
         if (foreign.Length > 0 && !profile.Desktop)
-            Add("implicit-layers", CheckState.Warning, "Other OpenXR layers", "These implicit layers load above the profile layers and can intercept views, gaze or frames: " + string.Join(", ", foreign) + ". Disable them (for example with OpenXR API Layers GUI) for the first tests.");
+            Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "These implicit layers load above the profile layers and can intercept views, gaze or frames: " + string.Join(", ", foreign) + ". Disable them (for example with OpenXR API Layers GUI) for the first tests.");
         var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
         if (!profile.Desktop) try
         {
@@ -124,7 +126,7 @@ public static class Readiness
         if (profile.Desktop)
             Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, with another headset or on the monitor, using your own VR settings and OpenXR runtime. The app adds only Engine Optimizations, CPU Boost and Free VRAM as selected.");
         else
-        Add("headset", CheckState.Manual, "Headset and tracking", "Connect the Crystal Super Micro OLED. Verify image, IPD, tracking, and resolution in the selected provider before launching DCS.", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
+        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Check image, IPD, tracking and resolution in Pimax Play (or SteamVR) before launching DCS.", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
         if (profile.Gaze == GazeMode.EyeTracked && profile.QuadViews != QuadProvider.None)
             Add("gaze-live", CheckState.Manual, "Eye calibration and focus motion", "Enable and calibrate eye tracking in Pimax. Verify focus follows both eyes in the headset; a detected layer does not prove gaze is valid.", "gaze");
         if (!profile.Desktop)
@@ -132,7 +134,7 @@ public static class Readiness
         try
         {
             if (service.Originals.Read() is { State: "applied", Current: { } current })
-                Add("active-backup", CheckState.Pass, "Current profile will be replaced", "Profile " + current.ProfileId + " is applied. Launch DCS writes the new profile over it; the original files stay backed up.");
+                Add("active-backup", CheckState.Pass, "Applied settings", "Profile " + (service.ReadAppliedProfile()?.Profile?.Name ?? current.ProfileId) + " is applied. Launch DCS writes the new profile over it; the original files stay backed up.");
             var plan = service.Preview(profile, inventory);
             Add("deployment", CheckState.Pass, "Packages, neural runtime and deployment", $"Verified hashes, component compatibility and {plan.Files.Count} planned files. No game files were changed.");
         }

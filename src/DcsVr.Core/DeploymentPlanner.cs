@@ -30,6 +30,8 @@ public sealed class DeploymentPlanner(ComponentLocations components)
     /// overwrites afterwards (see <see cref="OriginalsStore"/>).</remarks>
     public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null)
     {
+        // Optimizations only: none of the VR settings the profile keeps for later is deployed.
+        profile = profile.ForLaunch();
         var issues = ProfileValidation.Validate(profile, inventory);
         var errors = issues.Where(i => i.Severity == IssueSeverity.Error).ToArray();
         if (errors.Length > 0) throw new InvalidDataException(string.Join(Environment.NewLine, errors.Select(i => i.Message)));
@@ -287,8 +289,11 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var fix = components.PrefetchFixDll is { } dll && File.Exists(dll) ? File.ReadAllBytes(dll) : throw new InvalidDataException("The CPU Boost prefetch fix is unavailable.");
             Add(Path.Combine(bin, "dxgi2.dll"), fix, "CPU Boost prefetch fix", runtimeLogs: [PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log")]);
             // Its settings next to it, so it also works when DCS is started without DCS Control (Steam, a shortcut).
-            AddText(Path.Combine(bin, "DcsControlPrefetchFix.ini"), "; Written by DCS Control for the applied profile (CPU Boost prefetch fix). Back to stock DCS removes it.\r\n[PrefetchFix]\r\n"
-                + "Mode=" + profile.BoostPrefetch.ToString().ToLowerInvariant() + "\r\nWindowMs=5000\r\nLog=" + PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log") + "\r\n", "CPU Boost prefetch fix settings");
+            // UTF-16 with a byte order mark: GetPrivateProfileStringW reads that as Unicode (a log path with any
+            // characters); without it Windows would read the file in the ANSI code page.
+            var prefetchSettings = "; Written by DCS Control for the applied profile (CPU Boost prefetch fix). Back to stock DCS removes it.\r\n[PrefetchFix]\r\n"
+                + "Mode=" + profile.BoostPrefetch.ToString().ToLowerInvariant() + "\r\nWindowMs=5000\r\nLog=" + PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log") + "\r\n";
+            Add(Path.Combine(bin, "DcsControlPrefetchFix.ini"), Encoding.Unicode.GetPreamble().Concat(Encoding.Unicode.GetBytes(prefetchSettings)).ToArray(), "CPU Boost prefetch fix settings");
         }
         void Add(string path, byte[] content, string purpose, IReadOnlyList<LuaValueChange>? luaChanges = null, IReadOnlyDictionary<string, string>? iniValues = null, IReadOnlyList<string>? runtimeLogs = null, IReadOnlyCollection<string>? ownHashes = null)
         {
