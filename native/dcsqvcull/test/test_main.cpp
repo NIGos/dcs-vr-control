@@ -203,7 +203,13 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "gpu_pass_timing_test.h"
 #include "gb_rec_count_test.h"
 #include "gb_rec_test.h"
+#include "gb_rec_cockpit_test.h"
 #include "view_profile_test.h"
+#include "frame_start_test.h"
+#include "vram_count_test.h"
+#include "pass_flush_test.h"
+#include "fwd_rec_count_test.h"
+#include "srv_tail_trim_test.h"
 
 int main() {
   g_log = stdout;
@@ -234,12 +240,44 @@ int main() {
   // QV_GBREC_ONLY=1: only the G-buffer recorder tests (R18 S1-S3).
   if (getenv("QV_GBREC_ONLY")) {
     grtest::Run();
+    gbcktest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
   // QV_VPROF_ONLY=1: only the synthetic pose and view profile tests.
   if (getenv("QV_VPROF_ONLY")) {
     vptest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_FSTART_ONLY=1: only the frame-start and runnable-threads counter tests (R22 E1, E3).
+  if (getenv("QV_FSTART_ONLY")) {
+    fsttest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_PFLUSH_ONLY=1: only the pass flush tests.
+  if (getenv("QV_PFLUSH_ONLY")) {
+    pftest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_SRVTRIM_ONLY=1: only the setShaderResources tail trim tests (R15 F2).
+  if (getenv("QV_SRVTRIM_ONLY")) {
+    strtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_FWDREC_ONLY=1: only the forward recorder S0 counter tests (R21).
+  if (getenv("QV_FWDREC_ONLY")) {
+    frctest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_VRAM_ONLY=1: only the GPU pass timing and VRAM census tests.
+  if (getenv("QV_VRAM_ONLY")) {
+    gpttest::Run();
+    vctest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -1338,8 +1376,19 @@ int main() {
   grctest::Run();
   // G-buffer recorder (R18 S1-S3): texture table, keys, jobs, restores, device segments vs stock.
   grtest::Run();
+  gbcktest::Run();  // cockpit and execution identity (R24)
   // Synthetic pose (sweep with hold/taxi) and the view profile (bounds, spikes, aggregation, GPU light mode).
   vptest::Run();
+  // Frame-start bubble attribution and runnable threads (R22 E1, E3): classes, segments, snapshots, gate, live probes.
+  fsttest::Run();
+  // VRAM census: format sizes, pinned-view rules, summary, device create hooks and refcounts.
+  vctest::Run();
+  // Pass flush: Flush decisions per mask bit, paired A/B statistics, Flush through the execute hook on a device.
+  pftest::Run();
+  // Forward recorder S0 counters (R21): pass kinds, FX pass index, rule flags, segments, gates, item walk.
+  frctest::Run();
+  // setShaderResources identical-tail trim (R15 F2): fake caches vs the 0x1ac20 transcription, real device via fake sites.
+  strtest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

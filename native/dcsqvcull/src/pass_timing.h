@@ -41,25 +41,33 @@ std::atomic<EachFn> g_eachPass{nullptr};
 // sees both calls or neither.
 using BoundaryFn = void (*)(void* pass, bool begin, int depth);
 std::atomic<BoundaryFn> g_boundary{nullptr};
+// Optional second boundary callback (pass_flush.h: Flush at chosen pass
+// boundaries), called before g_boundary at a start and after it at an end;
+// nullptr when unused.
+std::atomic<BoundaryFn> g_flushBoundary{nullptr};
 
 void __fastcall Hook(void* pass, uint64_t frame) {
   if (t_depth == 0) g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
   EachFn each = g_eachPass.load(std::memory_order_relaxed);
   BoundaryFn bnd = g_boundary.load(std::memory_order_relaxed);
+  BoundaryFn fl = g_flushBoundary.load(std::memory_order_relaxed);
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl) return g_orig(pass, frame);
     if (each) each();
+    if (fl) fl(pass, true, t_depth);
     if (bnd) bnd(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
     if (bnd) bnd(pass, false, t_depth);
+    if (fl) fl(pass, false, t_depth);
     if (each) each();
     if (top && after) after();
     return;
   }
   if (each) each();
+  if (fl) fl(pass, true, t_depth);
   if (bnd) bnd(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
@@ -80,6 +88,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (d == 0) g_topLevelUs += us;
   }
   if (bnd) bnd(pass, false, d);
+  if (fl) fl(pass, false, d);
   if (each) each();
   if (d == 0)
     if (AfterTopFn after = g_afterTop.load(std::memory_order_relaxed)) after();

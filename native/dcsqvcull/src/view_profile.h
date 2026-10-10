@@ -300,6 +300,8 @@ struct Rec {
   float periph = 0, focus = 0, shadow = 0, entering = 0;
   float learn = 0, texTable = 0;
   float gpuBusyMs = -1, gpuSpanMs = -1;  // filled after the run from the GPU frames
+  // [Suite] FrameStartGap / RunnableThreads (rotation CSV), filled after the run; -1 = none
+  float fsCls = -1, fsCpuMs = -1, fsGapMs = -1, fsDrain = -1, rtEntry = -1, rtJob = -1;
 };
 
 constexpr size_t kMaxRecs = 1 << 15;
@@ -426,6 +428,10 @@ struct Agg {
   double gpuPeriod = 0, gpuSpan = 0, gpuBusy = 0, gpuIdle = 0, gpuXr = -1;
   std::vector<std::pair<std::string, double>> gpuTop;  // kind, exclusive GPU ms per frame
   std::vector<std::pair<std::string, double>> cpuTop;  // kind, exclusive render-thread CPU ms per frame
+  // [Suite] FrameStartGap / RunnableThreads over the same window
+  bool fsValid = false, rtValid = false;
+  fstart::Result fs;
+  rthreads::Result rt;
 };
 
 Agg Aggregate(const std::vector<Rec>& v, double wallS) {
@@ -573,6 +579,10 @@ void LogAgg(const char* label, const Agg& a) {
 // ---------------------------------------------------------------------------
 
 bool g_gpuOn = false;
+// Set by the suite: run the frame-start / runnable-threads counters inside the profiles.
+bool g_withFs = false, g_withRt = false;
+int g_rtEvery = 16;
+bool g_fsOn = false, g_rtOn = false;
 
 void SessionBegin(std::atomic<uint64_t>& frameCounter, double tscHz) {
   g_tscHz = tscHz > 0 ? tscHz : 1;
@@ -592,6 +602,8 @@ void SessionBegin(std::atomic<uint64_t>& frameCounter, double tscHz) {
     Log("  view profile: xrEndFrame not timed (xrEnd column 0; GPU-bound then only from the GPU idle time)");
   if (!g_pacerObj) Log("  view profile: pacer wait not read (pacer column n/a)");
   if (!g_ct2Slot) Log("  view profile: texture creations not counted");
+  g_fsOn = g_withFs && g_gpuOn && fstart::Begin(frameCounter);
+  g_rtOn = g_withRt && rthreads::Begin(g_rtEvery, g_tscHz);
   g_recording = true;
   Sleep(300);  // first records
 }
@@ -599,6 +611,13 @@ void SessionBegin(std::atomic<uint64_t>& frameCounter, double tscHz) {
 void SessionEnd() {
   g_recording = false;
   ptiming::g_recording = false;
+  if (g_fsOn) Log("  view profile: frame-start probes %.4f ms/frame on the render thread", fstart::OverheadMsPerFrame());
+  if (g_rtOn)
+    Log("  view profile: runnable-threads counters and snapshots %.4f ms/frame at render entry (averaged)",
+        rthreads::g_frame ? rthreads::g_entryTicks.load() * g_qpcToUs / 1000.0 / rthreads::g_frame : 0.0);
+  fstart::End();
+  rthreads::End();
+  g_fsOn = g_rtOn = false;
   if (g_gpuOn)
     Log("  view profile: GPU frames %llu opened, %llu read (truncated %llu, disjoint %llu, dropped unread %llu); "
         "measurement cost on the render thread: GPU timestamps %.3f ms/frame (pass CPU timer not included)",
@@ -621,18 +640,80 @@ int64_t Qpc() {
 // frames late) and filtered by their open time.
 Agg MeasureWindow(int ms, std::atomic<bool>& abort) {
   ptiming::Reset();  // pass CPU per kind for this window only
+  rthreads::Window rw;
+  fstart::Window fw;
+  if (g_rtOn) rw = rthreads::Open();
+  if (g_fsOn) fw = fstart::Open();
   const size_t a = RecCount();
   const int64_t qa = Qpc();
   for (int t = 0; t < ms && !abort; t += 50) Sleep(50);
   const int64_t qb = Qpc();
   const size_t b = RecCount();
   std::map<std::string, ptiming::Stat> cpu = ptiming::TakeByName(nullptr, nullptr);
+  rthreads::Result rr;
+  if (g_rtOn) rr = rthreads::Close(rw);
   Sleep(150);
   std::vector<gpt::Done> done = gpt::TakeDone();
   Agg g = Aggregate(CopyRecs(a, b), (qb - qa) * g_qpcToUs / 1e6);
   AddCpu(g, cpu);
+  if (g_fsOn) {
+    g.fs = fstart::Close(fw, done, qb);
+    g.fsValid = g.fs.sum.valid;
+  }
+  if (g_rtOn) {
+    g.rt = std::move(rr);
+    g.rtValid = g.rt.sum.valid;
+  }
   AddGpu(g, done, qa, qb);
   return g;
+}
+
+// One-line extras of a yaw row.
+std::string CounterCols(const Agg& a) {
+  std::string s;
+  char b[192];
+  if (a.fsValid) {
+    const fstart::Summary& f = a.fs.sum;
+    const double n = std::max(1, f.frames);
+    snprintf(b, sizeof(b), ", turns %.0f%% cpu-late %.0f%% fence %.0f%% runtime %.0f%%, cpu seg %.2f gap %.2f",
+             100.0 * f.cls[fstart::kTurns] / n, 100.0 * f.cls[fstart::kCpuLate] / n, 100.0 * f.cls[fstart::kFence] / n,
+             100.0 * f.cls[fstart::kRuntime] / n, f.seg[fstart::sCpu].mean, f.seg[fstart::sGap].mean);
+    s += b;
+  }
+  if (a.rtValid) {
+    snprintf(b, sizeof(b), ", waiting thr %.2f (>=2 %s, heavy %s) gate %s", a.rt.sum.entry.runnable,
+             rthreads::Share(a.rt.sum.entry.share2).c_str(), rthreads::Share(a.rt.sum.heavyShare2).c_str(),
+             a.rt.sum.gate ? "PASS" : "FAIL");
+    s += b;
+  }
+  return s;
+}
+
+// Whole-frame parts still -> turning, and the one that grows most.
+void LogGrowth(const Agg& a, const Agg& b) {
+  struct P {
+    const char* name;
+    double x, y;
+  };
+  std::vector<P> v = {{"render thread CPU", a.rtCpuMs, b.rtCpuMs}, {"culling", a.collectMs, b.collectMs},
+                      {"pass CPU", a.passMs, b.passMs},          {"xrEndFrame", a.xrEndMs, b.xrEndMs},
+                      {"recorder wait", a.recWaitMs, b.recWaitMs}};
+  if (a.gpuValid && b.gpuValid) {
+    v.push_back({"GPU busy", a.gpuBusy, b.gpuBusy});
+    v.push_back({"GPU idle", a.gpuIdle, b.gpuIdle});
+  }
+  std::string line;
+  char buf[96];
+  const P* most = nullptr;
+  for (const P& p : v) {
+    snprintf(buf, sizeof(buf), "%s%s %.2f -> %.2f", line.empty() ? "" : ", ", p.name, p.x, p.y);
+    line += buf;
+    if (!most || p.y - p.x > most->y - most->x) most = &p;
+  }
+  Log("  rotation frame parts still -> turning (ms/frame): frame %.2f -> %.2f; %s; grows most: %s (%+.2f ms); late "
+      "recorder jobs %.2f -> %.2f /frame",
+      a.frameMs, b.frameMs, line.c_str(), most ? most->name : "-", most ? most->y - most->x : 0.0, a.recLate,
+      b.recLate);
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +747,8 @@ void RunYawProfile(int stepDeg, std::atomic<uint64_t>& frameCounter, std::atomic
     char label[32];
     snprintf(label, sizeof(label), "yaw %3d", deg);
     LogAgg(label, a);
+    if (a.fsValid) fstart::LogResult(label, a.fs, false);
+    if (a.rtValid) rthreads::LogResult(label, a.rt, false);
     // What each recorder drew stock, per frame (MeasureWindow's tail wait included).
     if (shrec::g_state.load() == 1)
       Log("  %s: shadow rec drawn stock: %s", label, shrec::StockText(sh0, shrec::TakeStock(), frames).c_str());
@@ -690,8 +773,8 @@ void RunYawProfile(int stepDeg, std::atomic<uint64_t>& frameCounter, std::atomic
     ++count[b];
     char idle[32] = "n/a";
     if (r.a.gpuValid) snprintf(idle, sizeof(idle), "%.2f ms", r.a.gpuIdle);
-    Log("    yaw %3d: %5.1f fps  %-28s render thread %.2f, xrEnd %.2f, gpu idle %s, recorder late %.2f/frame", r.yaw,
-        r.a.fps, kBoundName[b], r.a.rtCpuMs, r.a.xrEndMs, idle, r.a.recLate);
+    Log("    yaw %3d: %5.1f fps  %-28s render thread %.2f, xrEnd %.2f, gpu idle %s, recorder late %.2f/frame%s", r.yaw,
+        r.a.fps, kBoundName[b], r.a.rtCpuMs, r.a.xrEndMs, idle, r.a.recLate, CounterCols(r.a).c_str());
   }
   Log("  yaw profile: %d CPU-bound, %d worker-bound, %d GPU-bound, %d pacing-bound directions (restored %s)",
       count[kBCpu], count[kBWorker], count[kBGpu], count[kBPacing],
@@ -713,13 +796,14 @@ void WriteCsv(const std::vector<Rec>& v, int64_t q0) {
   if (!f) return;
   fprintf(f, "t_s,yaw,frame_ms,rt_cpu_ms,culling_ms,passes_ms,pacer_ms,xrend_ms,gpu_busy_ms,rec_wait_ms,sh_late,"
              "sh_vec,sh_tex,gb_late,gb_vec,gb_tex,tex_req,tex_new,tex_new_kb,periph,focus,shadow,entering,learn,"
-             "tex_table\n");
+             "tex_table,fs_class,fs_cpu_seg_ms,fs_gpu_gap_ms,fs_drain,rt_waiting_entry,rt_waiting_job\n");
   for (const Rec& r : v)
     fprintf(f, "%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.1f,%.0f,"
-               "%.0f,%.0f,%.0f,%.0f,%.0f\n",
+               "%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.3f,%.0f,%.0f,%.0f\n",
             (r.qpc - q0) * g_qpcToUs / 1e6, r.yaw, r.frameMs, r.rtCpuMs, r.collectMs, r.passMs, r.pacerMs, r.xrEndMs,
             r.gpuBusyMs, r.shWaitMs + r.gbWaitMs, r.shLate, r.shVec, r.shTex, r.gbLate, r.gbVec, r.gbTex, r.texReq,
-            r.texNew, r.texNewKB, r.periph, r.focus, r.shadow, r.entering, r.learn, r.texTable);
+            r.texNew, r.texNewKB, r.periph, r.focus, r.shadow, r.entering, r.learn, r.texTable, r.fsCls, r.fsCpuMs,
+            r.fsGapMs, r.fsDrain, r.rtEntry, r.rtJob);
   fclose(f);
   Log("  rotation profile: per-frame CSV %ls", name);
 }
@@ -737,6 +821,10 @@ void RunRotationProfile(double rateDps, int seconds, std::atomic<uint64_t>& fram
   Agg still = MeasureWindow(3000, abort);
   ptiming::Reset();
   gpt::TakeDone();
+  rthreads::Window rw;
+  fstart::Window fw;
+  if (g_rtOn) rw = rthreads::Open();
+  if (g_fsOn) fw = fstart::Open();
   const size_t a = RecCount();
   const int64_t qa = Qpc();
   posesweep::Start(rateDps);
@@ -745,8 +833,13 @@ void RunRotationProfile(double rateDps, int seconds, std::atomic<uint64_t>& fram
   const size_t b = RecCount();
   posesweep::Stop();  // a hold stays as it was
   std::map<std::string, ptiming::Stat> cpu = ptiming::TakeByName(nullptr, nullptr);
+  rthreads::Result rotRt;
+  if (g_rtOn) rotRt = rthreads::Close(rw);
   Sleep(150);
   std::vector<gpt::Done> done = gpt::TakeDone();
+  fstart::Result rotFs;
+  if (g_fsOn) rotFs = fstart::Close(fw, done, qb);
+  const bool fsOn = g_fsOn, rtOn = g_rtOn;
   SessionEnd();
   std::vector<Rec> v = CopyRecs(a, b);
   // GPU busy per CPU frame: the GPU frame opened between the previous collect and this one.
@@ -765,13 +858,53 @@ void RunRotationProfile(double rateDps, int seconds, std::atomic<uint64_t>& fram
       prev = r.qpc;
     }
   }
+  // Frame-start class and runnable threads per CPU frame (the record's qpc is
+  // its collect end = render entry; the first pass follows before the next).
+  if (fsOn || rtOn) {
+    size_t kf = 0, ks = 0;
+    for (size_t i = 0; i < v.size(); ++i) {
+      Rec& r = v[i];
+      const int64_t next = i + 1 < v.size() ? v[i + 1].qpc : INT64_MAX;
+      if (fsOn) {
+        const auto& fo = rotFs.frames;
+        while (kf < fo.size() && fo[kf].p0 <= r.qpc) ++kf;
+        if (kf < fo.size() && fo[kf].p0 < next && !fo[kf].perturbed) {
+          r.fsCls = static_cast<float>(fo[kf].cls);
+          r.fsCpuMs = fo[kf].seg[fstart::sCpu];
+          r.fsGapMs = std::isnan(fo[kf].seg[fstart::sGap]) ? -1.0f : fo[kf].seg[fstart::sGap];
+          r.fsDrain = static_cast<float>(fo[kf].drain);
+        }
+      }
+      if (rtOn) {
+        const auto& sm = rotRt.samples;
+        while (ks < sm.size() && sm[ks].qpc < r.qpc) ++ks;
+        for (size_t k = ks; k < sm.size() && sm[k].qpc < next; ++k)
+          (sm[k].point == rthreads::kEntry ? r.rtEntry : r.rtJob) = static_cast<float>(sm[k].runnable);
+      }
+    }
+  }
   Agg rot = Aggregate(v, (qb - qa) * g_qpcToUs / 1e6);
   AddCpu(rot, cpu);
+  if (fsOn) {
+    rot.fs = std::move(rotFs);
+    rot.fsValid = rot.fs.sum.valid;
+  }
+  if (rtOn) {
+    rot.rt = std::move(rotRt);
+    rot.rtValid = rot.rt.sum.valid;
+  }
   AddGpu(rot, done, qa, qb);
   Log("  rotation profile: %.0f deg/s for %.1f s (%zu frames), still baseline 3 s (%zu frames)", rateDps,
       (qb - qa) * g_qpcToUs / 1e6, rot.frames, still.frames);
   LogAgg("still   ", still);
   LogAgg("rotating", rot);
+  LogGrowth(still, rot);
+  if (still.fsValid) fstart::LogResult("still", still.fs, true);
+  if (rot.fsValid) fstart::LogResult("turning", rot.fs, true);
+  if (still.fsValid && rot.fsValid) fstart::LogCompare(still.fs, rot.fs);
+  if (still.rtValid) rthreads::LogResult("still", still.rt, true);
+  if (rot.rtValid) rthreads::LogResult("turning", rot.rt, true);
+  if (still.rtValid && rot.rtValid) rthreads::LogCompare(still.rt, rot.rt);
   Log("  rotation transients per frame (still -> rotating): texture streaming requests %.0f -> %.0f, texture "
       "creations %.2f -> %.2f (%.0f -> %.0f KB), renderables added %.0f -> %.0f, recorder learning (probes, keys, "
       "meshes) %.2f -> %.2f, G-buffer texture table builds %.1f -> %.1f, items pending a probe (shadow + gbuffer) "

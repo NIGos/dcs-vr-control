@@ -2,7 +2,7 @@
 // shadow casters recorded on worker threads into D3D11 command lists, which
 // the render thread executes inside DCS's own cascade passes. [Model]
 // ShadowRecorder (default 0), ShadowRecorderScope, ShadowRecorderWaitUs,
-// ShadowRecorderPriority, ShadowRecorderSplit, ShadowRecorderInstancing,
+// ShadowRecorderPriority, ShadowRecorderSplit, ShadowRecorderHelpers, ShadowRecorderInstancing,
 // [Suite] ShadowRecVerify, [Suite] BenchShadowRecorder (bench mode 28).
 //
 // Tags: [V] verified in the binary (DCS 2.9.30: NGModel, dx11backend,
@@ -42,7 +42,13 @@
 //    cascade's vector is snapshotted and classified; recordable casters get
 //    the material's 0x130 CB bytes with +0xfc = [item+0xd4] in the worker's CB
 //    ring and one DrawIndexed with the key's and mesh's objects (and, when
-//    textured, the read textures' views at the key's PS slots).
+//    textured, the read textures' views at the key's PS slots). Split
+//    cascades ([Model] ShadowRecorderSplit) share each job with up to 3
+//    helper workers ([Model] ShadowRecorderHelpers; by caster count, one
+//    more after a late or tight job): stage A's reads (committed by the
+//    primary in vector order as they arrive) and chunks of both phases'
+//    groups, each helper on its own list. Scheduling only: the same
+//    classification, the same draws, executed in list order (order-free).
 //  - Texture views (S4): a streamed texture's views are released by DCS's
 //    mip-set swap on the render thread (getSRV 0x47c60 -> 0x49ca0 -> 0x48e60,
 //    which calls Release on every view of the old set [V]), so a worker never
@@ -1163,9 +1169,13 @@ ID3D11ShaderResourceView* PageSrvGuarded(const Env& env, uint32_t page) {
 // material and per mesh once (cached for the job), per caster only what
 // differs (mesh, page, texture sets, posStructOffset). Phase 1: the
 // untextured records are grouped and recorded at once. Phase 2, after the
-// render thread's texture snapshot: the textured records likewise; with
-// splitting on, the second half of the textured groups goes to a helper
-// worker's own command list (both lists run at the pass, in order).
+// render thread's texture snapshot: the textured records likewise. With
+// splitting on, up to kThreads - 1 helper workers (by the cascade's caster
+// count and lateness) read caster chunks in stage A while the primary commits
+// the chunks already read in vector order, and take chunks of both phases'
+// groups into their own command lists (every list runs at the pass, in
+// order); the primary resolves the texture keys while the helpers start on
+// the untextured groups.
 // Groups: records of one material, mesh, page view and PS texture views draw
 // with identical bindings except posStructOffset, so a group of two or more
 // is one DrawIndexedInstanced(count, n, 0, 0, 0) with shadow_inst's
@@ -1176,17 +1186,39 @@ ID3D11ShaderResourceView* PageSrvGuarded(const Env& env, uint32_t page) {
 enum : int { kJobEmpty = 0, kJobBuilt = 1 };
 enum : int { kBuildNone = 0, kBuildOk, kBuildNoVector, kBuildOversize };
 enum : int { kGoWait = 0, kGoRun = 1, kGoAbort = 2 };
-enum : int { kP1Busy = 3, kP1Closed = 4, kP1Done = 5 };  // Job::p1State after kGoRun
-constexpr double kP1WaitUs = 20000.0;  // the primary waits this long for the helper's last untextured chunk
-std::atomic<bool> g_testP1Wait{false};  // offline tests only: the helper takes the first shared chunk
+// Job::recPhase: the group range the helpers may take chunks of (published by the primary).
+enum : int { kRpWait = 0, kRpUntex = 1, kRpTex = 2, kRpEnd = 3 };
+constexpr double kP1WaitUs = 20000.0;  // the primary waits this long for the helpers' last chunk of a phase
+std::atomic<bool> g_testP1Wait{false};  // offline tests only: the helpers take the first shared chunks
 enum : int { kStartIdle = 0, kStartArmed = 1, kStartRun = 2, kStartAbort = 3 };
 constexpr DWORD kStartWaitMs = 250;  // an armed job waits this long for its vector to be final
-constexpr uint32_t kChunks = 8;      // textured groups are shared in about this many chunks
+constexpr int kThreads = 4;           // per job: the primary worker and up to 3 helpers
+constexpr uint32_t kChunksPerThread = 6;  // a phase's groups are shared in about this many chunks per thread
 constexpr uint32_t kMinChunk = 4;
+constexpr double kHelperSpinUs = 40.0;  // a helper spins this long for the next phase before it blocks
 constexpr uint32_t kMeshCache = 4096;      // power of two
 constexpr uint32_t kGroupHash = 1 << 15;   // power of two
 constexpr uint32_t kMaxOffsets = 1 << 16;  // t127 elements per list
 constexpr uint32_t kMinSplitGroups = 64;   // textured groups worth a helper list
+// Helpers per job from the cascade's last caster count (more casters, more
+// helpers), one more after a job finished less than kTightMs before its pass
+// or late (for the next kBoostJobs jobs). A helper costs a wake-up and one
+// more ExecuteCommandList at the pass (about 8 us) [M]. Pure.
+constexpr size_t kOneHelperN = 400, kTwoHelpersN = 1500;
+constexpr double kTightMs = 0.25;
+constexpr uint32_t kBoostJobs = 240;
+inline uint32_t HelpersFor(size_t lastN, bool tight, uint32_t cap) {
+  if (cap > static_cast<uint32_t>(kThreads - 1)) cap = kThreads - 1;
+  if (!cap) return 0;
+  uint32_t want = !lastN ? cap : lastN < kOneHelperN ? 1u : lastN < kTwoHelpersN ? 2u : 3u;  // 0: not measured
+  if (tight) ++want;
+  return want < cap ? want : cap;
+}
+// Chunk size for `groups` groups shared by `threads` threads. Pure.
+inline uint32_t ChunkFor(uint32_t groups, uint32_t threads) {
+  const uint32_t c = groups / (kChunksPerThread * (threads ? threads : 1));
+  return c > kMinChunk ? c : kMinChunk;
+}
 
 struct Rec {
   const KeyEntry* key;
@@ -1253,12 +1285,16 @@ struct Group {
   uint32_t mat;
 };
 
-// Stage A's reads, split over the primary and (split cascades) the helper:
+// Stage A's reads, split over the primary and (split cascades) the helpers:
 // per caster everything Classify needs from DCS memory, so the serial
-// commit only touches the job's own tables. Per thread (0 primary, 1 helper).
+// commit only touches the job's own tables. Per thread (0 primary, 1..
+// helpers). The primary commits each chunk in vector order once it is read
+// (Job::chunkGen), and reads chunks itself while the next one is not ready.
 constexpr uint32_t kPreMatTable = 1 << 12;  // power of two
 constexpr uint32_t kPreChunk = 32;          // casters per chunk
-constexpr double kPreWaitUs = 20000.0;      // the primary waits this long for the helper's last chunk
+constexpr uint32_t kPreChunks = static_cast<uint32_t>(kMaxCasters / kPreChunk);
+constexpr uint32_t kPreSets = kMaxSetRefs;  // texture sets per thread (full: kRTooMany, residual)
+constexpr double kPreWaitUs = 20000.0;      // the primary waits this long for a helper's chunk
 struct PreMat {  // a material's reads
   uint8_t* mat;
   uint32_t gen;
@@ -1293,6 +1329,16 @@ struct Pre {
   uint8_t meshOk;  // the mesh entry was published and still describes the live mesh
 };
 
+// Per recording thread of a job (0 primary, 1.. helpers).
+struct ThreadOut {
+  uint32_t draws;
+  uint64_t cbBytes;
+  double recordUs;  // time in its chunks (waits excluded)
+  int64_t tDone;    // QPC: helper done (0: not started)
+  uint32_t pre;     // casters it read in stage A
+  bool drew;        // helper: its list is part of the pass
+};
+
 struct Job {
   // Inputs (render thread, written only while the workers are idle).
   void** vec = nullptr;
@@ -1312,15 +1358,16 @@ struct Job {
   void* execObj = nullptr;     // first entry of the caster list handed to DCS's loop
   const Env* env = nullptr;
   const Tables* tab = nullptr;
-  ID3D11Buffer* offBuf[2] = {};              // t127 buffers: primary, helper worker
-  ID3D11ShaderResourceView* offSrv[2] = {};
-  bool splitAllowed = false;   // a helper worker may record half of the textured groups
+  ID3D11Buffer* offBuf[kThreads] = {};       // t127 buffers: primary, helper workers
+  ID3D11ShaderResourceView* offSrv[kThreads] = {};
+  bool splitAllowed = false;   // helper workers share the job (stage A reads, both phases' groups)
+  uint32_t helpers = 0;        // helpers queued with the job (1..kThreads-1 when split)
   uint32_t minSplit = kMinSplitGroups;
   bool instancing = true;      // groups of two or more as one instanced draw
   HANDLE start = nullptr;      // auto-reset: the caster vector is final (sort hook, or render entry at the latest)
   HANDLE go = nullptr;         // auto-reset: the texture snapshot is ready (or the job is aborted)
-  HANDLE helperGo = nullptr;   // auto-reset: the helper's range is ready (or aborted)
-  HANDLE preGo = nullptr;      // auto-reset: the helper may read casters (stage A), or aborted
+  HANDLE helperGo[kThreads] = {};  // auto-reset, per helper (1..): recPhase moved on
+  HANDLE preGo = nullptr;      // manual-reset (reset at Arm): the helpers may read casters (stage A), or aborted
   std::atomic<uint32_t>* snapBell = nullptr;  // render glue: stage A done with textured casters (bit slotBit)
   uint32_t slotBit = 0;
   // Handshake.
@@ -1332,21 +1379,24 @@ struct Job {
   uint32_t entryGen = 0;       // render thread: the render entry the job serves (0: not yet)
   std::atomic<int> stageA{0};  // primary: casters classified, texture keys final
   std::atomic<int> goState{kGoWait};
-  std::atomic<int> helperState{kGoWait};
-  std::atomic<int> p1State{kGoWait};  // untextured groups shared with the helper: kGoRun, kP1Busy, kP1Closed, kP1Done
   std::atomic<int> preState{kGoWait};
   std::atomic<uint32_t> preNext{0}, preDone{0};  // stage A chunks taken / casters read
-  uint32_t preHelper = 0;                         // casters the helper read
   bool needGo = false;         // primary: textured casters wait for the snapshot
   bool snapped = false;        // render thread: snapshot taken for this job
-  bool helperUsed = false;     // primary: the helper was let in on the textured groups
-  bool helperDrew = false;     // helper: it recorded at least one chunk (its list is part of the pass)
-  // Textured groups [groupsTex, texTo) are taken in chunks by the primary and
-  // the helper, whichever is free (depth is order-free: GREATER, no blend).
+  // A phase's groups [from, texTo) are taken in chunks by the primary and the
+  // helpers, whichever is free (depth is order-free: GREATER, no blend). The
+  // primary publishes a phase (recPhase, release), closes it (recClosed) and
+  // waits until no helper is inside it (recActive) before the next one.
+  std::atomic<int> recPhase{kRpWait};
+  std::atomic<int> recClosed{kRpWait};
+  std::atomic<int> recActive{0};
+  std::atomic<uint32_t> joined{0};  // bit t: helper t recorded a chunk (its list is part of the pass)
   std::atomic<uint32_t> nextGroup{0};
   uint32_t texTo = 0, chunk = 0;
   std::atomic<bool> chunkFail{false};  // a chunk could not be recorded: the job is not used
-  int64_t tStageA = 0, tSnap = 0, tDone = 0, tHelperDone = 0, tP1 = 0;  // QPC (timeline; tP1: untextured recorded)
+  // QPC timeline: stage A committed (tCommit) and keys resolved (tStageA), untextured recorded (tP1).
+  int64_t tCommit = 0, tStageA = 0, tSnap = 0, tDone = 0, tP1 = 0;
+  ThreadOut th[kThreads] = {};  // [0]: the primary's reads only (its draws are below)
   // Outputs (workers; readable once they are idle again).
   std::atomic<int> phase{kJobEmpty};
   int result = kBuildNone;
@@ -1354,9 +1404,9 @@ struct Job {
   size_t n = 0;
   uint32_t gen = 0, recCount = 0, matCount = 0, pageCount = 0, wantCount = 0, recorded = 0;
   uint32_t texKeyCount = 0, setCount = 0, vt23Count = 0, swapCount = 0, textured = 0, texRecorded = 0;
-  uint32_t groupCount = 0, groupsTex = 0, draws = 0, drawsHelper = 0;
-  double buildUs = 0, recordUs = 0, helperRecordUs = 0;  // worker time spent (waits excluded)
-  uint64_t cbBytes = 0, cbBytesHelper = 0;
+  uint32_t groupCount = 0, groupsTex = 0, draws = 0;  // draws: the primary's list
+  double buildUs = 0, recordUs = 0, commitUs = 0, resolveUs = 0;  // primary time spent (waits excluded)
+  uint64_t cbBytes = 0;
   uint32_t reasons[kCasterReasons] = {};
   void* snap[kMaxCasters];
   uint8_t reason[kMaxCasters];
@@ -1368,7 +1418,7 @@ struct Job {
   Group groups[kMaxCasters];
   uint32_t gHashIdx[kGroupHash];  // groups index + 1
   uint32_t gHashGen[kGroupHash];
-  uint32_t offsets[2][kMaxOffsets];  // t127 contents per list (primary, helper)
+  uint32_t offsets[kThreads][kMaxOffsets];  // t127 contents per list (primary, helpers)
   RecMat mats[kMaxRecMats];
   PageRef pages[kMaxPages];
   MatSlot matSlots[kMatTable];
@@ -1389,13 +1439,38 @@ struct Job {
   const TexEntry* refresh[kMaxTexKeys];  // read keys' entries found unusable (rebuilt after the pass)
   uint32_t missCount = 0, refreshCount = 0;
   Pre pre[kMaxCasters];
-  uint32_t preSetCount[2];
-  PreSet preSets[2][kMaxSetRefs];
-  PreMat preMats[2][kPreMatTable];
-  const MeshEntry* preMeshKey[2][kMeshCache];
-  uint32_t preMeshGen[2][kMeshCache];
-  uint8_t preMeshOk[2][kMeshCache];
+  std::atomic<uint32_t> chunkGen[kPreChunks];  // = gen once chunk k's casters are read
+  uint32_t preSetCount[kThreads];
+  PreSet preSets[kThreads][kPreSets];
+  PreMat preMats[kThreads][kPreMatTable];
+  const MeshEntry* preMeshKey[kThreads][kMeshCache];
+  uint32_t preMeshGen[kThreads][kMeshCache];
+  uint8_t preMeshOk[kThreads][kMeshCache];
 };
+
+// Helper totals (the lists that joined the pass).
+inline uint32_t HelperDraws(const Job& j) {
+  uint32_t n = 0;
+  for (int t = 1; t < kThreads; ++t) n += j.th[t].drew ? j.th[t].draws : 0;
+  return n;
+}
+inline uint64_t HelperCbBytes(const Job& j) {
+  uint64_t n = 0;
+  for (int t = 1; t < kThreads; ++t) n += j.th[t].drew ? j.th[t].cbBytes : 0;
+  return n;
+}
+inline uint32_t HelperReads(const Job& j) {
+  uint32_t n = 0;
+  for (int t = 1; t < kThreads; ++t) n += j.th[t].pre;
+  return n;
+}
+inline int64_t HelpersDone(const Job& j) {  // the last joined helper's end (0: none joined)
+  int64_t d = 0;
+  const uint32_t m = j.joined.load(std::memory_order_acquire);
+  for (int t = 1; t < kThreads; ++t)
+    if (((m >> t) & 1) && j.th[t].tDone > d) d = j.th[t].tDone;
+  return d;
+}
 
 Job* NewJob() {
   void* mem = VirtualAlloc(nullptr, sizeof(Job), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);  // zeroed
@@ -1403,14 +1478,17 @@ Job* NewJob() {
   if (j) {
     j->start = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     j->go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    j->helperGo = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    j->preGo = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    j->preGo = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // manual-reset: every helper wakes
+    for (int t = 1; t < kThreads; ++t) j->helperGo[t] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   }
-  if (j && (!j->start || !j->go || !j->helperGo || !j->preGo)) {
+  bool events = j && j->start && j->go && j->preGo;
+  for (int t = 1; events && t < kThreads; ++t) events = j->helperGo[t] != nullptr;
+  if (j && !events) {
     if (j->preGo) CloseHandle(j->preGo);
     if (j->start) CloseHandle(j->start);
     if (j->go) CloseHandle(j->go);
-    if (j->helperGo) CloseHandle(j->helperGo);
+    for (HANDLE h : j->helperGo)
+      if (h) CloseHandle(h);
     j->~Job();
     VirtualFree(j, 0, MEM_RELEASE);
     j = nullptr;
@@ -1438,11 +1516,20 @@ void FreeJob(Job*& j) {
   ReleasePool(j->pool);
   if (j->start) CloseHandle(j->start);
   if (j->go) CloseHandle(j->go);
-  if (j->helperGo) CloseHandle(j->helperGo);
+  for (HANDLE h : j->helperGo)
+    if (h) CloseHandle(h);
   if (j->preGo) CloseHandle(j->preGo);
   j->~Job();
   VirtualFree(j, 0, MEM_RELEASE);
   j = nullptr;
+}
+
+// Every handshake event unsignalled (Arm, the job's workers idle).
+void ResetEvents(Job& j) {
+  ResetEvent(j.start);
+  ResetEvent(j.go);
+  ResetEvent(j.preGo);
+  for (int t = 1; t < kThreads; ++t) ResetEvent(j.helperGo[t]);
 }
 
 // A t127 offsets buffer (dynamic structured uint) and its view, one per worker.
@@ -1635,7 +1722,7 @@ int PreTextures(Job& j, int t, Pre& p, const PreMat& pm) {
       CensusAdd(g_census, vt, inner ? *static_cast<void* const*>(inner) : nullptr);  // as TexClassOk read them
       return kRTexClass;
     }
-    if (j.preSetCount[t] == kMaxSetRefs) return kRTooMany;
+    if (j.preSetCount[t] == kPreSets) return kRTooMany;
     const int32_t type = *reinterpret_cast<const int32_t*>(recs + h * 0x50 + 0xc);
     j.preSets[t][j.preSetCount[t]++] = {tex, aux, type, static_cast<int32_t>(h), static_cast<uint8_t>(read)};
     ++p.setCount;
@@ -1691,22 +1778,30 @@ void PreOne(Job& j, int t, size_t i) {
   }
 }
 
-// Reads chunks of casters until none is left (t: 0 primary, 1 helper).
+// Reads the chunk starting at caster `from` on thread t and publishes it
+// (chunkGen, release: its Pre entries and thread t's tables it points into).
+void PreChunk(Job& j, int t, uint32_t from) {
+  const uint32_t n = static_cast<uint32_t>(j.n);
+  const uint32_t to = from + kPreChunk < n ? from + kPreChunk : n;
+  for (uint32_t i = from; i < to; ++i) PreOne(j, t, i);
+  j.th[t].pre += to - from;
+  j.chunkGen[from / kPreChunk].store(j.gen, std::memory_order_release);
+  j.preDone.fetch_add(to - from, std::memory_order_release);
+}
+
+// Reads chunks of casters until none is left (t: 0 primary, 1.. helpers).
 void PreChunks(Job& j, int t) {
   LoadScope load(g_load);
   const uint32_t n = static_cast<uint32_t>(j.n);
   for (;;) {
     const uint32_t from = j.preNext.fetch_add(kPreChunk, std::memory_order_relaxed);
     if (from >= n) return;
-    const uint32_t to = from + kPreChunk < n ? from + kPreChunk : n;
-    for (uint32_t i = from; i < to; ++i) PreOne(j, t, i);
-    if (t) j.preHelper += to - from;
-    j.preDone.fetch_add(to - from, std::memory_order_release);
+    PreChunk(j, t, from);
   }
 }
 
-// Primary: every chunk read (the helper's last one included). False after
-// kPreWaitUs (the helper stalled: the job is not built).
+// Primary: every chunk read (the helpers' last ones included). False after
+// kPreWaitUs (a helper stalled: the job is not built).
 bool WaitPre(Job& j) {
   const int64_t t0 = defrec::Qpc();
   const double k = defrec::QpcToUs();
@@ -1858,23 +1953,27 @@ int Classify(Job& j, size_t i) {
 int BeginBuild(Job& j) {
   j.recCount = j.matCount = j.pageCount = j.wantCount = j.recorded = 0;
   j.texKeyCount = j.setCount = j.vt23Count = j.swapCount = j.textured = j.texRecorded = 0;
-  j.groupCount = j.groupsTex = j.draws = j.drawsHelper = 0;
-  j.needGo = j.helperUsed = j.helperDrew = j.resolved = false;
+  j.groupCount = j.groupsTex = j.draws = 0;
+  j.needGo = j.resolved = false;
   j.missCount = j.refreshCount = 0;
   j.chunkFail.store(false, std::memory_order_relaxed);
   j.nextGroup.store(0, std::memory_order_relaxed);
-  j.p1State.store(kGoWait, std::memory_order_relaxed);  // the helper reads it only after preGo
   j.texTo = j.chunk = 0;
-  j.cbBytes = j.cbBytesHelper = 0;
-  j.recordUs = j.helperRecordUs = 0;
+  j.cbBytes = 0;
+  j.recordUs = j.commitUs = j.resolveUs = 0;
   memset(j.reasons, 0, sizeof(j.reasons));
   j.n = 0;
   j.begin = nullptr;
   j.result = kBuildNone;
   j.preNext.store(0, std::memory_order_relaxed);
   j.preDone.store(0, std::memory_order_relaxed);
-  j.preSetCount[0] = j.preSetCount[1] = 0;
-  j.preHelper = 0;
+  for (uint32_t& c : j.preSetCount) c = 0;
+  for (ThreadOut& o : j.th) o = ThreadOut();  // the helpers touch theirs only after preGo
+  j.joined.store(0, std::memory_order_relaxed);
+  j.recPhase.store(kRpWait, std::memory_order_relaxed);  // published to the helpers by preGo
+  j.recClosed.store(kRpWait, std::memory_order_relaxed);
+  j.recActive.store(0, std::memory_order_relaxed);
+  j.tCommit = j.tP1 = 0;
   auto** begin = static_cast<void**>(j.vec[0]);
   auto** end = static_cast<void**>(j.vec[1]);
   j.begin = begin;
@@ -1892,23 +1991,78 @@ int BeginBuild(Job& j) {
     memset(j.gHashGen, 0, sizeof(j.gHashGen));
     memset(j.preMats, 0, sizeof(j.preMats));
     memset(j.preMeshGen, 0, sizeof(j.preMeshGen));
+    for (auto& g : j.chunkGen) g.store(0, std::memory_order_relaxed);
     j.gen = 1;
   }
   return kBuildOk;
 }
 
-int CommitBuild(Job& j) {
-  const size_t n = j.n;
-  for (size_t i = 0; i < n; ++i) {
+// The commit of casters [from, to), in vector order (their reads are done).
+void CommitRange(Job& j, size_t from, size_t to) {
+  for (size_t i = from; i < to; ++i) {
     j.want[i] = 0;
     const int r = Classify(j, i);
     j.reason[i] = static_cast<uint8_t>(r);
     ++j.reasons[r];
   }
+}
+
+int CommitEnd(Job& j) {
   for (uint32_t m = 0; m < j.matCount; ++m) j.mats[m].last = j.matSlots[j.mats[m].slot].last;
-  for (size_t i = 0; i < n; ++i)
+  for (size_t i = 0; i < j.n; ++i)
     if (j.group[i] && j.reason[i] != kRecorded) GroupMarked(j, j.group[i], true);
   return j.result = kBuildOk;
+}
+
+int CommitBuild(Job& j) {
+  CommitRange(j, 0, j.n);
+  return CommitEnd(j);
+}
+
+// Primary: the reads and the commit pipelined. The next chunk in vector
+// order is committed as soon as it is read (by any thread); while it is not
+// ready the primary reads an untaken chunk itself, else waits (bounded). The
+// classification equals CommitBuild's after all reads: the same Classify
+// calls in the same order on the same reads. False when a helper stalled
+// (kPreWaitUs): the job is not built.
+bool PreAndCommit(Job& j) {
+  const uint32_t n = static_cast<uint32_t>(j.n);
+  const uint32_t chunks = (n + kPreChunk - 1) / kPreChunk;
+  const double k = defrec::QpcToUs();
+  double commitUs = 0;
+  uint32_t next = 0;
+  int64_t w0 = 0;  // start of a wait for a chunk a helper holds
+  {
+    LoadScope load(g_load);
+    while (next < chunks) {
+      if (j.chunkGen[next].load(std::memory_order_acquire) == j.gen) {
+        const int64_t c0 = defrec::Qpc();
+        const size_t from = static_cast<size_t>(next) * kPreChunk;
+        CommitRange(j, from, from + kPreChunk < n ? from + kPreChunk : n);
+        commitUs += (defrec::Qpc() - c0) * k;
+        ++next;
+        w0 = 0;
+        continue;
+      }
+      if (j.preNext.load(std::memory_order_relaxed) < n) {
+        const uint32_t from = j.preNext.fetch_add(kPreChunk, std::memory_order_relaxed);
+        if (from < n) {
+          PreChunk(j, 0, from);
+          continue;
+        }
+      }
+      if (!w0) w0 = defrec::Qpc();
+      if ((defrec::Qpc() - w0) * k > kPreWaitUs) {
+        j.commitUs = commitUs;
+        return false;
+      }
+      _mm_pause();
+    }
+  }
+  const int64_t c0 = defrec::Qpc();
+  CommitEnd(j);
+  j.commitUs = commitUs + (defrec::Qpc() - c0) * k;
+  return true;
 }
 
 // The texture keys from the table (worker, after the commit, the table's lock
@@ -2294,21 +2448,20 @@ bool RecordJob(defrec::Worker& w, Job& j) {
   return RecordGroups(w, j, 0, j.groupCount, 0, &j.draws, &j.cbBytes);
 }
 
-// Primary worker: stage A, phase 1 (untextured groups recorded at once), the
-// wait for the texture snapshot, phase 2 (textured groups; the second half on
-// the helper's list when splitting).
-// The helper (if queued) has nothing (more) to do.
-void ReleaseHelper(Job& j) {
+// The helpers (if queued) have nothing (more) to do: stage A is aborted if
+// it did not open, and no phase follows. Idempotent.
+void ReleaseHelpers(Job& j) {
   int ps = kGoWait;
   if (j.preState.compare_exchange_strong(ps, kGoAbort, std::memory_order_acq_rel)) SetEvent(j.preGo);
-  j.helperState.store(kGoAbort, std::memory_order_release);
-  SetEvent(j.helperGo);
+  j.recPhase.store(kRpEnd, std::memory_order_seq_cst);
+  for (int t = 1; t < kThreads; ++t)
+    if (j.helperGo[t]) SetEvent(j.helperGo[t]);
 }
 
 bool RecordChunks(defrec::Worker& w, Job& j, int list, uint32_t* draws, uint64_t* cbBytes);
 
-// RecordChunks with the texture table's lock held shared (the helper's
-// textured chunks; the primary holds it until all chunks are taken).
+// RecordChunks with the texture table's lock held shared (a helper's
+// textured chunks; the primary holds it for the whole job).
 bool RecordChunksLocked(defrec::Worker& w, Job& j, int list, uint32_t* draws, uint64_t* cbBytes) {
   bool r = false;
   SRWLOCK* lock = j.texLock;
@@ -2321,14 +2474,16 @@ bool RecordChunksLocked(defrec::Worker& w, Job& j, int list, uint32_t* draws, ui
   return r;
 }
 
-// Takes chunks of textured groups until none is left (primary: list 0,
-// helper: list 1). False (and the job marked failed) when one cannot be recorded.
+// Takes chunks of the open phase's groups until none is left (primary: list
+// 0, helper t: list t, which then joins the pass). False (and the job marked
+// failed) when one cannot be recorded.
 bool RecordChunks(defrec::Worker& w, Job& j, int list, uint32_t* draws, uint64_t* cbBytes) {
   for (;;) {
     if (j.chunkFail.load(std::memory_order_acquire)) return false;
     const uint32_t from = j.nextGroup.fetch_add(j.chunk, std::memory_order_acq_rel);
     if (from >= j.texTo) return true;
     const uint32_t to = from + j.chunk < j.texTo ? from + j.chunk : j.texTo;
+    if (list) j.joined.fetch_or(1u << list, std::memory_order_relaxed);  // read after recActive drops (seq_cst)
     if (!RecordGroups(w, j, from, to, list, draws, cbBytes)) {
       j.chunkFail.store(true, std::memory_order_release);
       return false;
@@ -2336,51 +2491,67 @@ bool RecordChunks(defrec::Worker& w, Job& j, int list, uint32_t* draws, uint64_t
   }
 }
 
+// Phases (primary). A phase's groups [from, to) are shared in chunks with the
+// helpers (depth only, GREATER, no blend: the order does not matter; the
+// helpers' lists run after the primary's). OpenPhase publishes them (the
+// primary's first chunk is its own) and returns that chunk's end; ClosePhase
+// returns once no helper is inside the phase (every chunk taken is recorded),
+// so the next phase may reuse the chunk counters. A helper enters a phase
+// only by raising recActive and then finding it not closed (both seq_cst:
+// either the primary sees it inside, or it sees the phase closed).
+uint32_t OpenPhase(Job& j, int ph, uint32_t from, uint32_t to) {
+  j.texTo = to;
+  j.chunk = ChunkFor(to - from, 1 + j.helpers);
+  const uint32_t first = from + (j.chunk < to - from ? j.chunk : to - from);
+  j.nextGroup.store(first, std::memory_order_relaxed);
+  j.recPhase.store(ph, std::memory_order_seq_cst);  // publishes texTo, chunk, the groups
+  for (uint32_t t = 1; t <= j.helpers && t < static_cast<uint32_t>(kThreads); ++t) SetEvent(j.helperGo[t]);
+  if (g_testP1Wait.load(std::memory_order_relaxed)) {  // offline tests: let every helper take a chunk first
+    const uint32_t want = ((1u << (j.helpers + 1)) - 1) & ~1u;
+    const int64_t t0 = defrec::Qpc();
+    while ((j.joined.load(std::memory_order_acquire) & want) != want &&
+           j.nextGroup.load(std::memory_order_acquire) < j.texTo && (defrec::Qpc() - t0) * defrec::QpcToUs() < 1e6)
+      SwitchToThread();
+  }
+  return first;
+}
+
+bool ClosePhase(Job& j, int ph) {
+  j.recClosed.store(ph, std::memory_order_seq_cst);
+  const int64_t t0 = defrec::Qpc();
+  const double k = defrec::QpcToUs();
+  for (uint32_t spin = 0; j.recActive.load(std::memory_order_seq_cst) != 0; ++spin) {
+    if ((defrec::Qpc() - t0) * k > kP1WaitUs) {
+      j.chunkFail.store(true, std::memory_order_release);
+      return false;
+    }
+    if (spin < 4096)
+      _mm_pause();
+    else
+      SwitchToThread();
+  }
+  return !j.chunkFail.load(std::memory_order_acquire);
+}
+
+// One phase's groups [from, to) on the primary's list, shared with the
+// helpers when there are enough of them (`shared`: OpenPhase already ran and
+// returned `first`). Returns once every chunk is recorded. False on a failure.
+bool RecordPhase(defrec::Worker& w, Job& j, int ph, uint32_t from, uint32_t to, bool shared, uint32_t first) {
+  if (!shared) return RecordGroups(w, j, from, to, 0, &j.draws, &j.cbBytes);
+  bool ok = RecordGroups(w, j, from, first, 0, &j.draws, &j.cbBytes);
+  if (!ok) j.chunkFail.store(true, std::memory_order_release);
+  ok = ok && RecordChunks(w, j, 0, &j.draws, &j.cbBytes);
+  return ClosePhase(j, ph) && ok;
+}
+
+// A phase of `groups` groups is worth sharing.
+inline bool SharePhase(const Job& j, uint32_t groups) {
+  return j.helpers && groups >= j.minSplit && groups > kMinChunk;
+}
+
 // Starts an armed job on vector `vec` (the sort hook on a pool thread, or the
 // render thread at RenderGraph::render entry; the first one wins). False when
 // the job was not armed (already started, aborted, idle).
-// Phase 1: the untextured groups, shared in chunks with the helper when the
-// cascade splits (depth only, GREATER, no blend: the order does not matter;
-// the helper's list runs after the primary's). Returns once the helper (if it
-// took part) has finished its last chunk, so phase 2 may reuse the chunk
-// counters. False when a chunk could not be recorded.
-bool RecordUntextured(defrec::Worker& w, Job& j) {
-  const uint32_t n = j.groupsTex;
-  if (!j.splitAllowed || n < j.minSplit || n < 2 * kMinChunk) return RecordGroups(w, j, 0, n, 0, &j.draws, &j.cbBytes);
-  j.texTo = n;
-  j.chunk = n / kChunks > kMinChunk ? n / kChunks : kMinChunk;
-  const uint32_t first = j.chunk < n ? j.chunk : n;
-  j.nextGroup.store(first, std::memory_order_relaxed);  // the primary's first chunk is its own
-  j.p1State.store(kGoRun, std::memory_order_release);    // publishes texTo, chunk, the groups
-  SetEvent(j.helperGo);
-  if (g_testP1Wait.load(std::memory_order_relaxed)) {  // offline tests: let the helper in first
-    const int64_t t0 = defrec::Qpc();
-    while (j.p1State.load(std::memory_order_acquire) == kGoRun && (defrec::Qpc() - t0) * defrec::QpcToUs() < 1e6)
-      SwitchToThread();
-  }
-  bool ok = RecordGroups(w, j, 0, first, 0, &j.draws, &j.cbBytes);
-  if (!ok) j.chunkFail.store(true, std::memory_order_release);
-  ok = ok && RecordChunks(w, j, 0, &j.draws, &j.cbBytes);
-  int e = kGoRun;
-  if (!j.p1State.compare_exchange_strong(e, kP1Closed, std::memory_order_acq_rel)) {
-    // The helper took part: its list joins the pass; wait for its last chunk.
-    j.helperUsed = true;
-    const int64_t t0 = defrec::Qpc();
-    const double k = defrec::QpcToUs();
-    for (uint32_t spin = 0; j.p1State.load(std::memory_order_acquire) != kP1Done; ++spin) {
-      if ((defrec::Qpc() - t0) * k > kP1WaitUs) {
-        j.chunkFail.store(true, std::memory_order_release);
-        return false;
-      }
-      if (spin < 4096)
-        _mm_pause();
-      else
-        SwitchToThread();
-    }
-  }
-  return ok && !j.chunkFail.load(std::memory_order_acquire);
-}
-
 bool StartJob(Job& j, void** vec, bool early) {
   int st = kStartArmed;
   if (!j.startState.compare_exchange_strong(st, kStartRun, std::memory_order_acq_rel)) return false;
@@ -2395,12 +2566,13 @@ bool JobBody(defrec::Worker& w, Job& j);
 
 // From its start to its end the job holds the texture table's lock shared:
 // the views it picks stay alive until its lists hold their own references.
+// The helpers are let go even when a DCS read faults (the pool latches off).
 bool JobMain(defrec::Worker& w, void* u) {
   Job& j = *static_cast<Job*>(u);
   WaitForSingleObject(j.start, kStartWaitMs);
   int st = kStartArmed;
   if (j.startState.compare_exchange_strong(st, kStartAbort, std::memory_order_acq_rel) || st != kStartRun) {
-    ReleaseHelper(j);  // nobody started it: the helper ends too
+    ReleaseHelpers(j);  // nobody started it: the helpers end too
     j.phase.store(kJobEmpty, std::memory_order_release);
     return false;
   }
@@ -2410,43 +2582,60 @@ bool JobMain(defrec::Worker& w, void* u) {
   __try {
     r = JobBody(w, j);
   } __finally {
+    ReleaseHelpers(j);
     if (lock) ReleaseSRWLockShared(lock);
   }
   return r;
 }
 
+// Primary worker: stage A (reads with the helpers, commit pipelined), phase 1
+// (untextured groups, shared; the texture keys are resolved meanwhile), the
+// wait for the texture snapshot (no table only), phase 2 (textured groups,
+// shared).
 bool JobBody(defrec::Worker& w, Job& j) {
   const int64_t t0 = defrec::Qpc();
+  const double k = defrec::QpcToUs();
   if (BeginBuild(j) == kBuildOk) {
-    if (j.splitAllowed) {  // the helper (queued with the job) reads casters too
+    if (j.helpers) {  // the helpers (queued with the job) read casters too
       j.preState.store(kGoRun, std::memory_order_release);
       SetEvent(j.preGo);
     }
-    PreChunks(j, 0);
-    if (WaitPre(j)) CommitBuild(j);
+    PreAndCommit(j);  // j.result stays kBuildNone when a helper stalled
   }
-  if (j.result == kBuildOk && j.tex && j.needGo) {
-    ResolveTexKeys(j);
-    j.needGo = false;  // no snapshot to wait for
+  j.tCommit = defrec::Qpc();
+  const bool built = j.result == kBuildOk;
+  bool share1 = false;
+  uint32_t first1 = 0;
+  if (built) {
+    // Phase 1's groups need no texture key: the helpers start on them while
+    // the primary resolves the keys.
+    FinishPhase(j, false, false);
+    BuildGroups(j, false, j.instancing);
+    j.groupsTex = j.groupCount;
+    share1 = SharePhase(j, j.groupsTex);
+    if (share1) first1 = OpenPhase(j, kRpUntex, 0, j.groupsTex);
+    if (j.tex && j.needGo) {
+      const int64_t q0 = defrec::Qpc();
+      ResolveTexKeys(j);
+      j.needGo = false;  // no snapshot to wait for
+      j.resolveUs = (defrec::Qpc() - q0) * k;
+    }
   }
-  j.buildUs = (defrec::Qpc() - t0) * defrec::QpcToUs();
   j.tStageA = defrec::Qpc();
-  if (j.result == kBuildOk && j.needGo && j.snapBell)
+  j.buildUs = (j.tStageA - t0) * k;
+  if (built && j.needGo && j.snapBell)
     j.snapBell->fetch_or(j.slotBit, std::memory_order_release);  // the render thread snapshots at its next pass boundary
   j.stageA.store(1, std::memory_order_release);
-  if (j.result != kBuildOk) {
-    ReleaseHelper(j);
+  if (!built) {
+    ReleaseHelpers(j);
     j.phase.store(kJobBuilt, std::memory_order_release);
     return false;
   }
   const int64_t r0 = defrec::Qpc();
-  FinishPhase(j, false, false);
-  BuildGroups(j, false, j.instancing);
-  j.groupsTex = j.groupCount;
-  bool ok = RecordUntextured(w, j);
+  bool ok = RecordPhase(w, j, kRpUntex, 0, j.groupsTex, share1, first1);
   j.tP1 = defrec::Qpc();
-  j.recordUs = (defrec::Qpc() - r0) * defrec::QpcToUs();
-  bool snapshot = j.resolved, split2 = false;
+  j.recordUs = (j.tP1 - r0) * k;
+  bool snapshot = j.resolved;
   if (ok && j.needGo) {
     WaitForSingleObject(j.go, kGoWaitMs);
     const int g = j.goState.load(std::memory_order_acquire);
@@ -2458,69 +2647,67 @@ bool JobBody(defrec::Worker& w, Job& j) {
     FinishPhase(j, true, snapshot);
     BuildGroups(j, true, j.instancing);
     const uint32_t texGroups = j.groupCount - j.groupsTex;
-    j.texTo = j.groupCount;
-    j.chunk = texGroups / kChunks > kMinChunk ? texGroups / kChunks : kMinChunk;
-    const uint32_t first = j.groupsTex + (j.chunk < texGroups ? j.chunk : texGroups);
-    j.nextGroup.store(first, std::memory_order_relaxed);  // the primary's first chunk is its own
-    if (j.splitAllowed && texGroups >= j.minSplit && texGroups >= 2 && first < j.texTo) {
-      j.helperUsed = true;
-      split2 = true;
-      j.helperState.store(kGoRun, std::memory_order_release);  // publishes texTo, chunk, the groups
-      SetEvent(j.helperGo);
-    }
-    ok = RecordGroups(w, j, j.groupsTex, first, 0, &j.draws, &j.cbBytes);
-    if (!ok) j.chunkFail.store(true, std::memory_order_release);
-    ok = ok && RecordChunks(w, j, 0, &j.draws, &j.cbBytes);
+    const bool share2 = SharePhase(j, texGroups);
+    const uint32_t first2 = share2 ? OpenPhase(j, kRpTex, j.groupsTex, j.groupCount) : 0;
+    ok = RecordPhase(w, j, kRpTex, j.groupsTex, j.groupCount, share2, first2);
     FinishList(j);
-    j.recordUs += (defrec::Qpc() - r1) * defrec::QpcToUs();
+    j.recordUs += (defrec::Qpc() - r1) * k;
   }
-  if (!split2) ReleaseHelper(j);  // the helper (if queued) records nothing (more)
+  ReleaseHelpers(j);  // no further phase
   j.tDone = defrec::Qpc();
   j.phase.store(kJobBuilt, std::memory_order_release);
   return ok && j.recorded > 0 && j.draws > 0;
 }
 
-// Helper worker: its share of stage A, of the untextured groups and of the
-// textured groups, on its own list. Every wait is bounded.
-bool WaitHelperGo(Job& j, bool phase1, int64_t t0) {
+// Helper t: waits for recPhase to move past `seen` (spins kHelperSpinUs,
+// then blocks on its own event; bounded from t0). The new phase, or kRpEnd.
+int WaitPhase(Job& j, int t, int seen, int64_t t0) {
   const double k = defrec::QpcToUs();
   const double limitMs = kStartWaitMs + kGoWaitMs + 50;
+  const int64_t s0 = defrec::Qpc();
   for (;;) {
-    if (j.helperState.load(std::memory_order_acquire) != kGoWait) return true;
-    if (phase1 && j.p1State.load(std::memory_order_acquire) != kGoWait) return true;
-    const double spentMs = (defrec::Qpc() - t0) * k / 1000.0;
-    if (spentMs >= limitMs) return false;
-    WaitForSingleObject(j.helperGo, static_cast<DWORD>(limitMs - spentMs) + 1);
+    const int ph = j.recPhase.load(std::memory_order_seq_cst);
+    if (ph != seen) return ph;  // phases only move forward
+    const int64_t now = defrec::Qpc();
+    if ((now - s0) * k < kHelperSpinUs) {
+      _mm_pause();
+      continue;
+    }
+    const double spentMs = (now - t0) * k / 1000.0;
+    if (spentMs >= limitMs) return kRpEnd;
+    WaitForSingleObject(j.helperGo[t], static_cast<DWORD>(limitMs - spentMs) + 1);
   }
 }
 
+// Helper worker T (1..kThreads-1): its share of stage A, then chunks of each
+// phase while it is open, on its own list. Every wait is bounded.
+template <int T>
 bool HelperMain(defrec::Worker& w, void* u) {
+  static_assert(T >= 1 && T < kThreads, "helper index");
   Job& j = *static_cast<Job*>(u);
-  // Stage A: its share of the casters' reads.
   WaitForSingleObject(j.preGo, kStartWaitMs + 50);
   if (j.preState.load(std::memory_order_acquire) != kGoRun) return false;
-  PreChunks(j, 1);
+  ThreadOut& o = j.th[T];
+  PreChunks(j, T);
   const int64_t t0 = defrec::Qpc();
   bool ok = true;
-  // The untextured groups, if the primary shares them and is not done yet.
-  WaitHelperGo(j, true, t0);
-  int e = kGoRun;
-  if (j.p1State.compare_exchange_strong(e, kP1Busy, std::memory_order_acq_rel)) {
-    const int64_t r0 = defrec::Qpc();
-    ok = RecordChunks(w, j, 1, &j.drawsHelper, &j.cbBytesHelper);
-    j.helperRecordUs += (defrec::Qpc() - r0) * defrec::QpcToUs();
-    j.p1State.store(kP1Done, std::memory_order_release);
+  for (int seen = kRpWait; ok;) {
+    const int ph = WaitPhase(j, T, seen, t0);
+    if (ph == kRpEnd || ph == kRpWait) break;
+    seen = ph;
+    j.recActive.fetch_add(1, std::memory_order_seq_cst);
+    if (j.recClosed.load(std::memory_order_seq_cst) < ph) {
+      const int64_t r0 = defrec::Qpc();
+      ok = ph == kRpTex ? RecordChunksLocked(w, j, T, &o.draws, &o.cbBytes) : RecordChunks(w, j, T, &o.draws, &o.cbBytes);
+      o.recordUs += (defrec::Qpc() - r0) * defrec::QpcToUs();
+    }
+    j.recActive.fetch_sub(1, std::memory_order_seq_cst);
   }
-  // The textured groups, once the primary lets it in.
-  if (ok && WaitHelperGo(j, false, t0) && j.helperState.load(std::memory_order_acquire) == kGoRun) {
-    const int64_t r0 = defrec::Qpc();
-    ok = RecordChunksLocked(w, j, 1, &j.drawsHelper, &j.cbBytesHelper);
-    j.helperRecordUs += (defrec::Qpc() - r0) * defrec::QpcToUs();
-  }
-  j.helperDrew = ok && j.drawsHelper > 0;  // nothing left when it woke: no list, the primary drew them all
-  j.tHelperDone = defrec::Qpc();
-  return j.helperDrew;
+  o.drew = ok && o.draws > 0;  // nothing taken: no list, the others drew every chunk
+  o.tDone = defrec::Qpc();
+  return o.drew;
 }
+constexpr defrec::JobFn kHelperMain[kThreads] = {nullptr, &HelperMain<1>, &HelperMain<2>, &HelperMain<3>};
 
 // Render thread, at the pass: the job still describes this vector, its pages
 // and the CB bytes its keys' shaders read (kPExecuted = 0 when so).
@@ -3114,18 +3301,27 @@ instcount::OverrideFn g_prevOverride = nullptr;
 DWORD g_renderTid = 0;
 Env g_env;
 Tables g_tab;
-defrec::Pool g_pool;  // workers 0-3: cascades 0-3; 4-7: their helpers
+defrec::Pool g_pool;  // worker Wk(s, t): cascade s's primary (t 0) and helpers (t 1..kThreads-1)
+inline int Wk(int s, int t) { return s + kSlots * t; }
+inline bool SlotBusy(int s) {
+  for (int t = 0; t < kThreads; ++t)
+    if (g_pool.Busy(Wk(s, t))) return true;
+  return false;
+}
 ID3D11DeviceContext* g_ctx = nullptr;
-ID3D11Buffer* g_offBuf[2 * kSlots] = {};               // t127 per worker
-ID3D11ShaderResourceView* g_offSrv[2 * kSlots] = {};
+ID3D11Buffer* g_offBuf[kThreads * kSlots] = {};               // t127 per worker
+ID3D11ShaderResourceView* g_offSrv[kThreads * kSlots] = {};
 // [Model] ShadowRecorderWaitUs: the render thread's wait for a job at the pass
 // (longer: the pass is drawn stock and counted late); ShadowRecorderPriority:
 // worker thread priority (-2..2, THREAD_PRIORITY_*); ShadowRecorderSplit:
-// cascades whose textured groups are split over two workers (bits 0-3);
+// cascades whose jobs are shared with helper workers (bits 0-3);
+// ShadowRecorderHelpers: at most this many helpers per job (0-3; the count
+// follows the cascade's casters and lateness, HelpersFor);
 // ShadowRecorderInstancing: groups as one instanced draw.
 std::atomic<uint32_t> g_waitUs{200};
 std::atomic<int> g_priority{THREAD_PRIORITY_NORMAL};
-std::atomic<uint32_t> g_split{0x3};
+std::atomic<uint32_t> g_split{0xf};
+std::atomic<uint32_t> g_helpers{kThreads - 1};
 std::atomic<bool> g_instancing{true};
 int g_priorityApplied = 0x7fff;
 // Timeline (render thread): this render entry, and top-level passes since.
@@ -3180,6 +3376,8 @@ struct Stat {
   std::atomic<int64_t> latePass{0}, lateStart{0}, lateStageA{0}, lateDone{0}, lateP1{0}, lateSnap{0};
   std::atomic<uint64_t> lateSnapSamples{0};
   std::atomic<int64_t> tlP1{0};  // untextured groups recorded (jobs in time)
+  std::atomic<int64_t> tlCommit{0}, lateCommit{0};  // stage A committed (before the keys' resolve)
+  std::atomic<uint64_t> helpersQueued{0}, commitNs{0}, resolveNs{0};  // jobs used: helpers, primary commit/resolve time
   std::atomic<uint64_t> snapEarly{0}, snapLate{0}, snapKeys{0}, snapPre{0}, rearmLate{0}, staleStart{0};
   std::atomic<uint64_t> verifyPasses{0}, verifyMismatch{0}, verifyTexels{0}, verifyBadTexels{0}, verifyErrors{0},
       verifySkipped{0};
@@ -3193,6 +3391,7 @@ struct Casc {
   UINT b7Bytes = 0;
   int64_t lateEntry = 0, latePassQpc = 0;  // the render entry and pass time of a late job (0: none)
   bool lateMaint = false;  // the late job's table maintenance is still due
+  uint32_t boost = 0;      // jobs left with one more helper (a recent job was late or tight)
   Stat st;
 };
 Casc g_casc[kSlots];
@@ -3390,8 +3589,7 @@ enum : int { kPsNone = 0, kPsArmed, kPsExecuted, kPsStock, kPsStockRun };
 struct PassCtx {
   int slot = 0;
   Job* job = nullptr;               // a built job whose snapshot is this pass's vector
-  ID3D11CommandList* cl = nullptr;  // armed: executed by the exec entry
-  ID3D11CommandList* cl2 = nullptr; // the helper's list (split textured groups), after cl
+  ID3D11CommandList* cl[kThreads] = {};  // armed: executed by the exec entry (primary's, then the helpers')
   int state = kPsNone;
   int reason = kPNoJob;
   bool first = false;
@@ -3439,9 +3637,10 @@ void FirstCaster(PassCtx& pc) {
       g_rtReplays += rt;
       g_ctx->CopyResource(cs.b7, t.b7);
       const int64_t e0 = defrec::Qpc();
-      g_ctx->ExecuteCommandList(pc.cl, TRUE);
-      if (pc.cl2) g_ctx->ExecuteCommandList(pc.cl2, TRUE);
+      for (ID3D11CommandList* l : pc.cl)
+        if (l) g_ctx->ExecuteCommandList(l, TRUE);
       pc.executeNs = NsSince(e0);
+      pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
       if (sfilt::Live()) sfilt::g_sh.ForgetAll();  // restored exactly, but the filter's shadow is cheap to rebuild
       pc.state = kPsExecuted;
       pc.reason = kPExecuted;
@@ -3857,7 +4056,7 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, shadowpass::ExecFn orig, voi
   Stat& st = g_casc[pc.slot].st;
   PassCtx a = pc;
   a.state = kPsStockRun;
-  a.cl = nullptr;
+  for (auto*& l : a.cl) l = nullptr;  // pc's (released by WrapTarget)
   a.captureDepth = true;
   a.probesLeft = 0;
   RunPass(a, pass, ctx, orig, vec);
@@ -3965,12 +4164,13 @@ int64_t QpcNs(int64_t a, int64_t b) {
 // Waits (within [Model] ShadowRecorderWaitUs) for this render entry's job of
 // slot s, its snapshot taken first if still due; decides what the pass does
 // with it. Not ready in time: the pass is drawn stock (counted late), the job
-// finishes on its worker and is dropped.
+// finishes on its workers and is dropped. The helpers whose lists join the
+// pass (Job::joined, final once the primary is idle) are waited for too;
+// the others hold no list.
 void TakeJob(PassCtx& pc, void** vec) {
   Casc& cs = g_casc[pc.slot];
   Stat& st = cs.st;
   Job& j = *cs.job;
-  const int h = pc.slot + kSlots;
   const int64_t t0 = defrec::Qpc();
   const double budget = static_cast<double>(g_waitUs.load());
   const double k = defrec::QpcToUs();
@@ -3984,10 +4184,12 @@ void TakeJob(PassCtx& pc, void** vec) {
     SnapshotIfReady(pc.slot, true);
   }
   bool ready = WaitWorkerUs(pc.slot, left());
-  if (ready && j.helperUsed && !WaitWorkerUs(h, left())) {
-    ready = false;
-    st.helperLate++;
-  }
+  const uint32_t joined = ready ? j.joined.load(std::memory_order_acquire) : 0;
+  for (int t = 1; ready && t < kThreads; ++t)
+    if (((joined >> t) & 1) && !WaitWorkerUs(Wk(pc.slot, t), left())) {
+      ready = false;
+      st.helperLate++;
+    }
   const uint64_t ns = NsSince(t0);
   st.waitNs += ns;
   NoteMax(st.waitMaxNs, ns);
@@ -3996,30 +4198,46 @@ void TakeJob(PassCtx& pc, void** vec) {
     cs.lateMaint = true;
     cs.lateEntry = g_entryQpc;  // its timeline is read once the workers are idle
     cs.latePassQpc = t0;
+    cs.boost = kBoostJobs;  // one more helper for the next jobs
     return;
   }
-  ID3D11CommandList* cl = g_pool.TakeList(pc.slot);
-  ID3D11CommandList* cl2 = g_pool.Busy(h) ? nullptr : g_pool.TakeList(h);
-  if (!j.helperDrew) SafeRel(cl2);
+  ID3D11CommandList* cl[kThreads] = {};
+  auto drop = [&] {
+    for (auto*& l : cl) SafeRel(l);
+  };
+  cl[0] = g_pool.TakeList(pc.slot);
+  bool lists = cl[0] != nullptr;
+  for (int t = 1; t < kThreads; ++t) {
+    const int h = Wk(pc.slot, t);
+    if ((joined >> t) & 1) {
+      cl[t] = g_pool.TakeList(h);
+      lists = lists && cl[t] && j.th[t].drew;
+    } else if (!g_pool.Busy(h)) {
+      if (ID3D11CommandList* l = g_pool.TakeList(h)) l->Release();  // none expected: it took no chunk
+    }
+  }
   if (j.phase.load(std::memory_order_acquire) != kJobBuilt || j.chunkFail.load(std::memory_order_acquire)) {
-    SafeRel(cl);
-    SafeRel(cl2);
+    drop();
     pc.reason = kPFailed;
     return;
   }
-  const defrec::Worker& w = g_pool.At(pc.slot);
   st.jobsUsed++;
   st.buildNs += static_cast<uint64_t>(j.buildUs * 1000.0);
+  st.commitNs += static_cast<uint64_t>(j.commitUs * 1000.0);
+  st.resolveNs += static_cast<uint64_t>(j.resolveUs * 1000.0);
+  st.helpersQueued += j.helpers;
   // Recording time proper (the worker's lastRecordUs also holds its waits for the start and the snapshot).
-  if (cl) st.recordNs += static_cast<uint64_t>((j.recordUs + w.lastFinishUs) * 1000.0);
-  if (cl2) st.recordNs += static_cast<uint64_t>((j.helperRecordUs + g_pool.At(h).lastFinishUs) * 1000.0);
-  st.preHelper += j.preHelper;
+  if (cl[0]) st.recordNs += static_cast<uint64_t>((j.recordUs + g_pool.At(pc.slot).lastFinishUs) * 1000.0);
+  for (int t = 1; t < kThreads; ++t)
+    if (cl[t]) st.recordNs += static_cast<uint64_t>((j.th[t].recordUs + g_pool.At(Wk(pc.slot, t)).lastFinishUs) * 1000.0);
+  st.preHelper += HelperReads(j);
   st.casterReads += j.n;
   // Timeline from the render entry.
   st.tlSamples++;
   st.early += j.startedEarly;
   st.tlPass += QpcNs(g_entryQpc, t0);
   st.tlStart += QpcNs(g_entryQpc, j.tStart);
+  st.tlCommit += QpcNs(g_entryQpc, j.tCommit >= j.tStart ? j.tCommit : j.tStageA);
   st.tlStageA += QpcNs(g_entryQpc, j.tStageA);
   st.tlDone += QpcNs(g_entryQpc, j.tDone);
   st.tlP1 += QpcNs(g_entryQpc, j.tP1 >= j.tStart ? j.tP1 : j.tDone);
@@ -4028,13 +4246,15 @@ void TakeJob(PassCtx& pc, void** vec) {
     st.tlSnapSamples++;
     st.tlSnap += QpcNs(g_entryQpc, j.tSnap);
   }
-  if (j.helperUsed) {
+  if (joined) {
     st.tlHelperSamples++;
-    st.tlHelper += QpcNs(g_entryQpc, j.tHelperDone);
+    st.tlHelper += QpcNs(g_entryQpc, HelpersDone(j));
   }
+  // Ready with less than kTightMs to spare: one more helper for the next jobs.
+  const int64_t done = HelpersDone(j) > j.tDone ? HelpersDone(j) : j.tDone;
+  if (done && (t0 - done) * k < kTightMs * 1000.0) cs.boost = kBoostJobs;
   if (j.vec != vec || j.result != kBuildOk) {
-    SafeRel(cl);
-    SafeRel(cl2);
+    drop();
     pc.reason = j.result == kBuildOversize ? kPOversize : kPIdentity;
     return;
   }
@@ -4042,22 +4262,19 @@ void TakeJob(PassCtx& pc, void** vec) {
   const int why = CheckJobGuarded(j);
   st.checkNs += NsSince(c0);
   if (why == kPIdentity) {
-    SafeRel(cl);
-    SafeRel(cl2);
+    drop();
     pc.reason = why;  // the snapshot is not this vector: no probes from it either
     return;
   }
   pc.job = &j;
   st.casters += j.n;
   for (int r = 0; r < kCasterReasons; ++r) st.casterReason[r] += j.reasons[r];
-  if (why || !cl || (j.helperDrew && !cl2) || j.chunkFail.load(std::memory_order_acquire)) {
-    SafeRel(cl);
-    SafeRel(cl2);
+  if (why || !lists || j.chunkFail.load(std::memory_order_acquire)) {
+    drop();
     pc.reason = why ? why : j.recorded ? kPFailed : kPNothing;
     return;
   }
-  pc.cl = cl;
-  pc.cl2 = cl2;
+  for (int t = 0; t < kThreads; ++t) pc.cl[t] = cl[t];
   pc.state = kPsArmed;
 }
 
@@ -4083,11 +4300,16 @@ bool Arm(int s);
 // Slot s's job served this entry's pass (or was late for it): once its
 // workers are idle, its leftovers are released and the next frame's job is
 // armed, so the sort hook can start it early. Render thread.
+// The slot's lists nobody took (a late job's), released (its workers idle).
+void DropLists(int s) {
+  for (int t = 0; t < kThreads; ++t)
+    if (ID3D11CommandList* l = g_pool.TakeList(Wk(s, t))) l->Release();
+}
+
 bool RearmIfIdle(int s) {
   Casc& cs = g_casc[s];
-  if (g_pool.Busy(s) || g_pool.Busy(s + kSlots)) return false;
-  if (ID3D11CommandList* l = g_pool.TakeList(s)) l->Release();  // a late job's lists nobody took
-  if (ID3D11CommandList* l = g_pool.TakeList(s + kSlots)) l->Release();
+  if (SlotBusy(s)) return false;
+  DropLists(s);
   ReleaseSnapshot(*cs.job);  // the executed lists hold their own references
   cs.armed = false;
   return Arm(s);
@@ -4109,23 +4331,22 @@ void WrapTarget(int s, void* pass, void* ctx, shadowpass::ExecFn orig) {
     VerifyPass(pc, pass, ctx, orig, vec);
   else
     RunPass(pc, pass, ctx, orig, vec);
-  SafeRel(pc.cl);
-  SafeRel(pc.cl2);
+  for (auto*& l : pc.cl) SafeRel(l);
   if (pc.state == kPsExecuted) {
     const Job& j = *pc.job;
     cs.st.recorded += j.recorded;
     cs.st.textured += j.texRecorded;
-    cs.st.cbBytes += j.cbBytes + (j.helperUsed ? j.cbBytesHelper : 0);
+    cs.st.cbBytes += j.cbBytes + HelperCbBytes(j);
     cs.st.draws += j.draws;
-    cs.st.drawsHelper += j.helperUsed ? j.drawsHelper : 0;
+    cs.st.drawsHelper += HelperDraws(j);
     cs.st.groups += j.groupCount;
-    cs.st.splitJobs += j.helperUsed;
+    cs.st.splitJobs += j.joined.load(std::memory_order_relaxed) != 0;
     cs.st.execNs += pc.execNs;
     cs.st.replayNs += pc.replayNs;
     cs.st.executeNs += pc.executeNs;
   }
   cs.st.passReason[pc.state == kPsExecuted ? kPExecuted : pc.reason]++;
-  if (mine && job.resolved && !g_pool.Busy(s) && !g_pool.Busy(s + kSlots)) QueueMaint(job);
+  if (mine && job.resolved && !SlotBusy(s)) QueueMaint(job);
   TryMaintain();
   // Consumed: arm the next frame's job now, so the sort hook can start it as
   // soon as its vector is final. A late job stays armed (dropped at the next
@@ -4162,9 +4383,6 @@ size_t VectorCountGuarded(void* rg, void* renderables) {
   }
 }
 
-// Arms slot s's job for its next render entry (render thread, workers idle):
-// every input but the vector, which the starter gives (StartJob). Primary
-// and helper are queued now and wait for the start.
 // The timeline of the cascade's last late job, from the render entry it
 // served (workers idle).
 void NoteLate(Casc& cs, const Job& j) {
@@ -4173,12 +4391,13 @@ void NoteLate(Casc& cs, const Job& j) {
   cs.lateEntry = 0;
   if (!j.tStart) return;
   int64_t done = j.tDone;
-  if (j.helperUsed && j.tHelperDone > done) done = j.tHelperDone;
+  if (HelpersDone(j) > done) done = HelpersDone(j);
   if (done < j.tStart) return;  // aborted before it finished
   Stat& st = cs.st;
   st.lateSamples++;
   st.latePass += QpcNs(e, cs.latePassQpc);
   st.lateStart += QpcNs(e, j.tStart);
+  st.lateCommit += QpcNs(e, j.tCommit >= j.tStart ? j.tCommit : done);
   st.lateStageA += QpcNs(e, j.tStageA >= j.tStart ? j.tStageA : done);
   st.lateDone += QpcNs(e, done);
   st.lateP1 += QpcNs(e, j.tP1 >= j.tStart ? j.tP1 : done);
@@ -4188,13 +4407,16 @@ void NoteLate(Casc& cs, const Job& j) {
   }
 }
 
+// Arms slot s's job for its next render entry (render thread, workers idle):
+// every input but the vector, which the starter gives (StartJob). The
+// primary and its helpers (HelpersFor: the last job's caster count, one more
+// after a late or tight job) are queued now and wait for the start.
 bool Arm(int s) {
   Casc& cs = g_casc[s];
   Job& j = *cs.job;
-  const int h = s + kSlots;
   const Learned& l = cs.learn;
   if (cs.armed || !l.cascade || !l.target || !l.dsv || !cs.b7) return cs.armed;
-  if (g_pool.Busy(s) || g_pool.Busy(h)) {
+  if (SlotBusy(s)) {
     cs.st.refused++;  // a late job of an earlier frame still runs
     return false;
   }
@@ -4223,39 +4445,43 @@ bool Arm(int s) {
   j.tex = g_tex.e ? &g_tex : nullptr;
   j.texLock = &g_texLock;
   j.useGen = g_entryGen;
-  j.offBuf[0] = g_offBuf[s];
-  j.offSrv[0] = g_offSrv[s];
-  j.offBuf[1] = g_offBuf[h];
-  j.offSrv[1] = g_offSrv[h];
+  for (int t = 0; t < kThreads; ++t) {
+    j.offBuf[t] = g_offBuf[Wk(s, t)];
+    j.offSrv[t] = g_offSrv[Wk(s, t)];
+  }
   j.instancing = g_instancing.load();
   j.splitAllowed = (g_split.load() >> s) & 1;
-  j.minSplit = 2;  // split cascades always share their textured groups
+  j.minSplit = 2;  // split cascades always share their groups
+  const uint32_t helpers = j.splitAllowed ? HelpersFor(j.n, cs.boost > 0, g_helpers.load()) : 0;
+  if (cs.boost) --cs.boost;
   j.result = kBuildNone;
   j.snapped = false;
   j.needGo = false;
-  j.helperUsed = false;
   j.startedEarly = false;
   j.entryGen = 0;
-  j.tStart = j.tStageA = j.tSnap = j.tDone = j.tHelperDone = j.tP1 = 0;
+  j.tStart = j.tCommit = j.tStageA = j.tSnap = j.tDone = j.tP1 = 0;
   j.armRg = l.rg;
   j.armIdx = l.idx;
   j.stageA.store(0, std::memory_order_relaxed);
   j.goState.store(kGoWait, std::memory_order_relaxed);
-  j.helperState.store(kGoWait, std::memory_order_relaxed);
-  ResetEvent(j.start);
-  ResetEvent(j.go);
-  ResetEvent(j.helperGo);
-  ResetEvent(j.preGo);
+  j.recPhase.store(kRpWait, std::memory_order_relaxed);
+  j.joined.store(0, std::memory_order_relaxed);
+  ResetEvents(j);
   j.preState.store(kGoWait, std::memory_order_relaxed);
   j.snapBell = &g_snapBell;
   j.slotBit = 1u << s;
   j.phase.store(kJobEmpty, std::memory_order_relaxed);
   j.startState.store(kStartArmed, std::memory_order_release);  // the sort hook may start it from here on
-  if (j.splitAllowed && !g_pool.Submit(h, &HelperMain, &j, nullptr)) j.splitAllowed = false;
+  // Helpers first (they wait for stage A to open); one that cannot be queued ends the count.
+  j.helpers = 0;
+  for (uint32_t t = 1; t <= helpers; ++t) {
+    if (!g_pool.Submit(Wk(s, static_cast<int>(t)), kHelperMain[t], &j, nullptr)) break;
+    j.helpers = t;
+  }
   if (!g_pool.Submit(s, &JobMain, &j, nullptr)) {
     int st = kStartArmed;
     if (!j.startState.compare_exchange_strong(st, kStartIdle)) j.startState.store(kStartIdle);
-    ReleaseHelper(j);  // a queued helper ends at once
+    ReleaseHelpers(j);  // queued helpers end at once
     cs.st.refused++;
     return false;
   }
@@ -4269,18 +4495,16 @@ bool Arm(int s) {
 bool DropStale(int s) {
   Casc& cs = g_casc[s];
   Job& j = *cs.job;
-  if (g_pool.Busy(s) || g_pool.Busy(s + kSlots)) {
+  if (SlotBusy(s)) {
     if (j.startState.load() == kStartRun && !j.snapped && j.stageA.load()) {  // waiting for a snapshot: release it
       j.goState.store(kGoAbort, std::memory_order_release);
       SetEvent(j.go);
     }
     const int64_t t0 = defrec::Qpc();
-    while ((g_pool.Busy(s) || g_pool.Busy(s + kSlots)) && (defrec::Qpc() - t0) * defrec::QpcToUs() < 200.0)
-      _mm_pause();
-    if (g_pool.Busy(s) || g_pool.Busy(s + kSlots)) return false;
+    while (SlotBusy(s) && (defrec::Qpc() - t0) * defrec::QpcToUs() < 200.0) _mm_pause();
+    if (SlotBusy(s)) return false;
   }
-  if (ID3D11CommandList* l = g_pool.TakeList(s)) l->Release();
-  if (ID3D11CommandList* l = g_pool.TakeList(s + kSlots)) l->Release();
+  DropLists(s);
   ReleaseSnapshot(j);
   cs.armed = false;
   return true;
@@ -4613,10 +4837,11 @@ bool Install() {
   for (auto*& p : g_execVtbl) p = reinterpret_cast<void*>(&ExecNop);
   g_execVtbl[1] = reinterpret_cast<void*>(&ExecVt1);
   for (int s = 0; s < kSlots; ++s) g_execObj[s] = {g_execVtbl, s};
-  for (int w = 0; w < 2 * kSlots; ++w)
+  static_assert(kThreads * kSlots <= defrec::Pool::kMaxWorkers, "a worker per cascade thread");
+  for (int w = 0; w < kThreads * kSlots; ++w)
     if (!g_offBuf[w] && !CreateOffsets(dev, &g_offBuf[w], &g_offSrv[w])) return fail("no t127 offset buffers");
   defrec::PoolConfig pc;
-  pc.workers = 2 * kSlots;
+  pc.workers = kThreads * kSlots;
   pc.cb.mode = defrec::CbMode::kOffsets;
   pc.priority = g_priority.load();
   pc.name = "shadow recorder";
@@ -4644,9 +4869,10 @@ bool Install() {
   g_state = 1;
   Log("shadow recorder: ready (scope 0x%x: cascades 0-3 by bit, untextured bit 8, textured bit 9; %d workers; the "
       "cascade loop runs over [exec entry, residual casters]; texture snapshots %s)",
-      g_scope.load(), 2 * kSlots, ptiming::g_orig ? "after the top-level passes" : "at the cascade pass");
-  Log("shadow recorder: worker priority %d, wait budget %u us, split mask 0x%x, instancing %d; jobs start %s",
-      g_priority.load(), g_waitUs.load(), g_split.load(), g_instancing.load() ? 1 : 0,
+      g_scope.load(), kThreads * kSlots, ptiming::g_orig ? "after the top-level passes" : "at the cascade pass");
+  Log("shadow recorder: worker priority %d, wait budget %u us, split mask 0x%x (up to %u helpers per job), "
+      "instancing %d; jobs start %s",
+      g_priority.load(), g_waitUs.load(), g_split.load(), g_helpers.load(), g_instancing.load() ? 1 : 0,
       early ? "when Scene's sort finishes their vector (3 call sites patched)" : "at RenderGraph::render entry");
   return true;
 }
@@ -4685,8 +4911,7 @@ void Shutdown() {
       SetEvent(cs.job->start);
       cs.job->goState.store(kGoAbort);
       SetEvent(cs.job->go);
-      cs.job->helperState.store(kGoAbort);
-      SetEvent(cs.job->helperGo);
+      ReleaseHelpers(*cs.job);
     }
   const bool stopped = g_pool.Stop();
   if (!stopped || g_inside.load() != 0 || g_sortInside.load() != 0) {
@@ -4723,6 +4948,8 @@ void ResetCounters() {
     s.tlPass = s.tlStart = s.tlStageA = s.tlSnap = s.tlDone = s.tlHelper = 0;
     s.lateSamples = 0;
     s.latePass = s.lateStart = s.lateStageA = s.lateDone = s.lateP1 = s.lateSnap = s.tlP1 = 0;
+    s.tlCommit = s.lateCommit = 0;
+    s.helpersQueued = s.commitNs = s.resolveNs = 0;
     s.lateSnapSamples = 0;
     s.snapEarly = s.snapLate = s.snapKeys = s.snapPre = s.rearmLate = s.staleStart = 0;
     s.verifyPasses = s.verifyMismatch = s.verifyTexels = s.verifyBadTexels = s.verifyErrors = s.verifySkipped = 0;
@@ -4764,27 +4991,32 @@ void LogCounters(const char* label, double frames) {
         casters ? 100.0 * s.recorded.load() / casters : 0.0, s.textured.load() / f,
         static_cast<unsigned long long>(s.jobs.load()), static_cast<unsigned long long>(used),
         static_cast<unsigned long long>(s.refused.load()));
-    Log("  shadow recorder %s cascade %d times (ms/frame): worker build %.3f + record %.3f (per job %.3f + %.3f); "
+    Log("  shadow recorder %s cascade %d times (ms/frame): worker build %.3f + record %.3f (per job %.3f + %.3f; "
+        "the primary's commit %.3f and key resolve %.3f per job); "
         "render thread: wait %.3f (max %.3f ms), checks %.3f, replay + b7 copy + execute %.3f, restore %.3f; CB ring "
         "%.2f MB/frame; streaming replays %.0f/frame; texture snapshots %llu early (%llu before render entry), %llu at "
-        "the pass (%.0f keys/frame); late jobs re-armed after a top-level pass %llu, stale early starts dropped %llu",
+        "the pass (%.0f keys/frame); jobs re-armed after a top-level pass (late, or a helper still ending) %llu, stale "
+        "early starts dropped %llu",
         label, c, ms(s.buildNs), ms(s.recordNs), used ? s.buildNs.load() / 1e6 / used : 0.0,
-        used ? s.recordNs.load() / 1e6 / used : 0.0, ms(s.waitNs), s.waitMaxNs.load() / 1e6, ms(s.checkNs),
+        used ? s.recordNs.load() / 1e6 / used : 0.0, used ? s.commitNs.load() / 1e6 / used : 0.0,
+        used ? s.resolveNs.load() / 1e6 / used : 0.0, ms(s.waitNs), s.waitMaxNs.load() / 1e6, ms(s.checkNs),
         ms(s.execNs), ms(s.restoreNs), s.cbBytes.load() / 1048576.0 / f, s.vt23.load() / f,
         static_cast<unsigned long long>(s.snapEarly.load()), static_cast<unsigned long long>(s.snapPre.load()),
         static_cast<unsigned long long>(s.snapLate.load()), s.snapKeys.load() / f,
         static_cast<unsigned long long>(s.rearmLate.load()), static_cast<unsigned long long>(s.staleStart.load()));
     const double tl = s.tlSamples.load() ? 1e6 * s.tlSamples.load() : 1.0;  // ns sums -> ms per job (signed)
     Log("  shadow recorder %s cascade %d draws: %.0f/frame for %.0f recorded casters (%.0f on helper lists, %llu split "
-        "jobs, %llu helper late), %.0f groups/frame; render thread: replay+checks %.3f, ExecuteCommandList %.3f "
-        "ms/frame; timeline from RenderGraph::render entry (ms, mean per used job, negative = before): start %.3f "
-        "(%llu of %llu started by the sort hook), stage A %.3f, snapshot %.3f (%llu jobs), primary done %.3f, helper "
-        "done %.3f (%llu), pass %.3f after %.1f top-level passes; stage A reads %.1f%% on the helper",
+        "jobs, %.2f helpers queued per job, %llu helper late), %.0f groups/frame; render thread: replay+checks %.3f, "
+        "ExecuteCommandList %.3f ms/frame; timeline from RenderGraph::render entry (ms, mean per used job, negative = "
+        "before): start %.3f (%llu of %llu started by the sort hook), committed %.3f, stage A %.3f, snapshot %.3f "
+        "(%llu jobs), primary done %.3f, helpers done %.3f (%llu), pass %.3f after %.1f top-level passes; stage A "
+        "reads %.1f%% on the helpers",
         label, c, (s.draws.load() + s.drawsHelper.load()) / f, s.recorded.load() / f, s.drawsHelper.load() / f,
-        static_cast<unsigned long long>(s.splitJobs.load()), static_cast<unsigned long long>(s.helperLate.load()),
+        static_cast<unsigned long long>(s.splitJobs.load()), used ? static_cast<double>(s.helpersQueued.load()) / used : 0.0,
+        static_cast<unsigned long long>(s.helperLate.load()),
         s.groups.load() / f, ms(s.replayNs), ms(s.executeNs), s.tlStart.load() / tl,
         static_cast<unsigned long long>(s.early.load()), static_cast<unsigned long long>(s.tlSamples.load()),
-        s.tlStageA.load() / tl,
+        s.tlCommit.load() / tl, s.tlStageA.load() / tl,
         s.tlSnapSamples.load() ? s.tlSnap.load() / (1e6 * s.tlSnapSamples.load()) : 0.0,
         static_cast<unsigned long long>(s.tlSnapSamples.load()), s.tlDone.load() / tl,
         s.tlHelperSamples.load() ? s.tlHelper.load() / (1e6 * s.tlHelperSamples.load()) : 0.0,
@@ -4869,6 +5101,8 @@ struct StockSnap {
   uint64_t tlN[kSlots] = {}, tlSnapN[kSlots] = {}, lateSnapN[kSlots] = {};
   int64_t tlStageA[kSlots] = {}, tlDone[kSlots] = {}, tlPass[kSlots] = {}, tlP1[kSlots] = {}, tlSnap[kSlots] = {};
   int64_t lateP1[kSlots] = {}, lateSnap[kSlots] = {};
+  int64_t tlCommit[kSlots] = {}, lateCommit[kSlots] = {};
+  uint64_t used[kSlots] = {}, helpers[kSlots] = {};
   LoadSnap load;
 };
 
@@ -4896,6 +5130,10 @@ StockSnap TakeStock() {
     s.lateP1[c] = st.lateP1.load(rl);
     s.lateSnapN[c] = st.lateSnapSamples.load(rl);
     s.lateSnap[c] = st.lateSnap.load(rl);
+    s.tlCommit[c] = st.tlCommit.load(rl);
+    s.lateCommit[c] = st.lateCommit.load(rl);
+    s.used[c] = st.jobsUsed.load(rl);
+    s.helpers[c] = st.helpersQueued.load(rl);
   }
   s.executed = s.pass[kPExecuted];
   s.load = TakeLoad(g_load);
@@ -4914,16 +5152,18 @@ std::string StockText(const StockSnap& a, const StockSnap& b, double frames) {
   s += ReasonList(kPassReasonName, a.pass, b.pass, kPassReasons, 1, frames, 6);
   s += "; residual casters: ";
   s += ReasonList(kCasterReasonName, a.caster, b.caster, kCasterReasons, 2, frames, 4);  // not SMR/model: never
-  // Per cascade from the render entry (ms): jobs in time (stage A, done, pass), late jobs (pass, start, stage A,
-  // done).
+  // Per cascade from the render entry (ms): jobs in time (committed, stage A, untextured, done, pass; helpers per
+  // used job), late jobs (pass, start, committed, stage A, untextured, done).
   for (int c = 0; c < kSlots; ++c) {
     const uint64_t m = b.tlN[c] - a.tlN[c];
     if (m) {
       const double d = 1e6 * m;
       const uint64_t sn = b.tlSnapN[c] - a.tlSnapN[c];
-      snprintf(buf, sizeof(buf), "; c%d in time (%llu): stage A %.2f, untextured recorded %.2f, snapshot %.2f (%llu), "
-               "done %.2f, pass %.2f",
-               c, static_cast<unsigned long long>(m), (b.tlStageA[c] - a.tlStageA[c]) / d, (b.tlP1[c] - a.tlP1[c]) / d,
+      const uint64_t u = b.used[c] - a.used[c];
+      snprintf(buf, sizeof(buf), "; c%d in time (%llu, %.1f helpers): committed %.2f, stage A %.2f, untextured "
+               "recorded %.2f, snapshot %.2f (%llu), done %.2f, pass %.2f",
+               c, static_cast<unsigned long long>(m), u ? static_cast<double>(b.helpers[c] - a.helpers[c]) / u : 0.0,
+               (b.tlCommit[c] - a.tlCommit[c]) / d, (b.tlStageA[c] - a.tlStageA[c]) / d, (b.tlP1[c] - a.tlP1[c]) / d,
                sn ? (b.tlSnap[c] - a.tlSnap[c]) / (1e6 * sn) : 0.0, static_cast<unsigned long long>(sn),
                (b.tlDone[c] - a.tlDone[c]) / d, (b.tlPass[c] - a.tlPass[c]) / d);
       s += buf;
@@ -4933,12 +5173,13 @@ std::string StockText(const StockSnap& a, const StockSnap& b, double frames) {
     const double d = 1e6 * n;
     const uint64_t sn = b.lateSnapN[c] - a.lateSnapN[c];
     snprintf(buf, sizeof(buf),
-             "; late c%d (%llu): pass %.2f, start %.2f, stage A %.2f, untextured recorded %.2f, snapshot %.2f (%llu), "
-             "done %.2f",
+             "; late c%d (%llu): pass %.2f, start %.2f, committed %.2f, stage A %.2f, untextured recorded %.2f, "
+             "snapshot %.2f (%llu), done %.2f",
              c, static_cast<unsigned long long>(n), (b.latePass[c] - a.latePass[c]) / d,
-             (b.lateStart[c] - a.lateStart[c]) / d, (b.lateStageA[c] - a.lateStageA[c]) / d,
-             (b.lateP1[c] - a.lateP1[c]) / d, sn ? (b.lateSnap[c] - a.lateSnap[c]) / (1e6 * sn) : 0.0,
-             static_cast<unsigned long long>(sn), (b.lateDone[c] - a.lateDone[c]) / d);
+             (b.lateStart[c] - a.lateStart[c]) / d, (b.lateCommit[c] - a.lateCommit[c]) / d,
+             (b.lateStageA[c] - a.lateStageA[c]) / d, (b.lateP1[c] - a.lateP1[c]) / d,
+             sn ? (b.lateSnap[c] - a.lateSnap[c]) / (1e6 * sn) : 0.0, static_cast<unsigned long long>(sn),
+             (b.lateDone[c] - a.lateDone[c]) / d);
     s += buf;
   }
   s += "; ";

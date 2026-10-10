@@ -201,7 +201,12 @@ struct Config {
   bool suiteJoinTailCount = false;       // [Suite] JoinTailCount (R15 F3: render-thread chunk tail at the culling join)
   bool suiteShadowRecCount = false;      // [Suite] ShadowRecCount (R17 S0: shadow recorder counters)
   bool suiteGBufferRecCount = false;     // [Suite] GBufferRecCount (R18 S0: G-buffer recorder counters and gates)
+  bool suiteForwardRecCount = false;     // [Suite] ForwardRecCount (R21 S0: SimplePassData recorder counters and gates)
   bool suiteGpuPassTiming = false;       // [Suite] GpuPassTiming (gpu_pass_timing.h: GPU ms and context ops per pass)
+  bool suiteGpuPassStats = false;        // [Suite] GpuPassStats (with GpuPassTiming: pipeline statistics and samples passed per pass)
+  bool suiteVramCount = false;           // [Suite] VramCount (vram_count.h: DXGI budget/usage, our memory, texture tables)
+  int suiteVramCountSec = 20;            // [Suite] VramCountSec
+  bool suiteVramCountCreates = true;     // [Suite] VramCountCreates: count DCS's buffer/texture creates during the phase
   bool splitFilter = false;              // [D3D] SplitFilter (split_filter.h, R15 F5)
   uint32_t splitFilterOps = 0x4ff;       // [D3D] SplitFilterOps (sfilt::kDefaultOps: no blend, no depth)
   bool suiteSplitFilterVerify = false;   // [Suite] SplitFilterVerify
@@ -215,7 +220,8 @@ struct Config {
   uint32_t shadowRecorderScope = 0x101; // [Model] ShadowRecorderScope: bits 0-3 cascades, 8 untextured, 9 textured (0x30f: all)
   int shadowRecorderWaitUs = 200;       // [Model] ShadowRecorderWaitUs: render-thread wait for a job at the pass
   int shadowRecorderPriority = 0;       // [Model] ShadowRecorderPriority: worker THREAD_PRIORITY_* (-2..2)
-  uint32_t shadowRecorderSplit = 0x3;   // [Model] ShadowRecorderSplit: cascades with a helper worker (bits 0-3)
+  uint32_t shadowRecorderSplit = 0xf;   // [Model] ShadowRecorderSplit: cascades with helper workers (bits 0-3)
+  int shadowRecorderHelpers = 3;        // [Model] ShadowRecorderHelpers: at most this many helpers per job (0-3)
   bool shadowRecorderInstancing = true;  // [Model] ShadowRecorderInstancing
   bool suiteShadowRecVerify = false;    // [Suite] ShadowRecVerify
   int suiteShadowRecVerifySec = 5;      // [Suite] ShadowRecVerifySec
@@ -229,10 +235,19 @@ struct Config {
   int gbufferRecorderIsland = 30;          // [Model] GBufferRecorderIsland: shortest recorded run
   int gbufferRecorderMaxSegments = 12;     // [Model] GBufferRecorderMaxSegments: lists per execution (1-16)
   int gbufferRecorderHelpers = 2;          // [Model] GBufferRecorderHelpers: helper workers per job (0-2)
+  bool gbufferRecorderCockpit = false;     // [Model] GBufferRecorderCockpit: cockpit draws and executions (R24)
+  bool gbufferRecorderByOrdinal = false;   // [Model] GBufferRecorderByOrdinal: slots by plain ordinal (before R24)
   bool suiteGBufferRecVerify = false;      // [Suite] GBufferRecVerify
   int suiteGBufferRecVerifySec = 6;        // [Suite] GBufferRecVerifySec
   int suiteGBufferRecVerifyStride = 0;     // [Suite] GBufferRecVerifyStride: every N-th draw residual (R18 T10)
   bool suiteBenchGBufferRecorder = false;  // [Suite] BenchGBufferRecorder (bench mode 29)
+  uint32_t passFlush = 0;                  // [Model] PassFlush: pass_flush.h mask (0 = off)
+  bool suiteBenchPassFlush = false;        // [Suite] BenchPassFlush (bench mode 30)
+  uint32_t suiteBenchPassFlushMask = 0;    // [Suite] BenchPassFlushMask: the ON mask (0 = [Model] PassFlush)
+  bool srvTailTrim = false;                // [Model] SrvTailTrim (srv_tail_trim.h, R15 F2)
+  bool suiteSrvTailTrimVerify = false;     // [Suite] SrvTailTrimVerify
+  int suiteSrvTailTrimVerifySec = 10;      // [Suite] SrvTailTrimVerifySec
+  bool suiteBenchSrvTailTrim = false;      // [Suite] BenchSrvTailTrim (bench mode 31)
   int holdYawDeg = -1;               // [Suite] HoldYawDeg: constant view yaw for unattended runs (-1 = off)
   bool suiteYawScan = false;         // [Suite] YawScan: fps per held yaw, 0..345 in 15 deg steps
   bool suiteYawProfile = false;      // [Suite] YawProfile: cost split and bound per held yaw (view_profile.h)
@@ -240,6 +255,11 @@ struct Config {
   bool suiteRotationProfile = false;  // [Suite] RotationProfile: cost split, transients and spikes while turning
   int suiteRotationDegPerSec = 60;    // [Suite] RotationDegPerSec
   int suiteRotationSeconds = 20;      // [Suite] RotationSeconds
+  bool suiteFrameStartGap = false;    // [Suite] FrameStartGap: frame-start GPU bubble attribution (frame_start.h, R22 E1)
+  int suiteFrameStartGapSec = 10;     // [Suite] FrameStartGapSec: standalone phase (0 = only inside Yaw/RotationProfile)
+  bool suiteRunnableThreads = false;  // [Suite] RunnableThreads: runnable-waiting DCS threads (run_threads.h, R22 E3)
+  int suiteRunnableThreadsSec = 10;   // [Suite] RunnableThreadsSec: standalone phase (0 = only inside the profiles)
+  int suiteRunnableThreadsEvery = 16; // [Suite] RunnableThreadsEvery: frames between snapshots
   uint32_t bigPageBytes = 4u << 20;  // [Model] BigPageBytes
   bool suiteBenchFrameHeap = false;     // [Suite] MotionProfile: CPU profile of the sweep's translation phase        // [Suite] Quick: configuration check + A/B only
   int suiteBenchFilter = 1;  // 1 = end-to-end A/B, 2 = also filter vs hooks
@@ -282,6 +302,8 @@ void ApplyShadowBatch();
 void ApplyGBufferBatch();
 void ApplyShadowRecorder();
 void ApplyGBufferRecorder();
+void ApplyPassFlush();
+void ApplySrvTailTrim(bool on);
 void ApplyHoldYaw(int deg);
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
@@ -481,7 +503,12 @@ void LoadConfig(bool initial) {
   c.suiteJoinTailCount = GetPrivateProfileIntW(L"Suite", L"JoinTailCount", 0, ini.c_str()) != 0;
   c.suiteShadowRecCount = GetPrivateProfileIntW(L"Suite", L"ShadowRecCount", 0, ini.c_str()) != 0;
   c.suiteGBufferRecCount = GetPrivateProfileIntW(L"Suite", L"GBufferRecCount", 0, ini.c_str()) != 0;
+  c.suiteForwardRecCount = GetPrivateProfileIntW(L"Suite", L"ForwardRecCount", 0, ini.c_str()) != 0;
   c.suiteGpuPassTiming = GetPrivateProfileIntW(L"Suite", L"GpuPassTiming", 0, ini.c_str()) != 0;
+  c.suiteGpuPassStats = GetPrivateProfileIntW(L"Suite", L"GpuPassStats", 0, ini.c_str()) != 0;
+  c.suiteVramCount = GetPrivateProfileIntW(L"Suite", L"VramCount", 0, ini.c_str()) != 0;
+  c.suiteVramCountSec = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"VramCountSec", 20, ini.c_str()));
+  c.suiteVramCountCreates = GetPrivateProfileIntW(L"Suite", L"VramCountCreates", 1, ini.c_str()) != 0;
   c.splitFilter = GetPrivateProfileIntW(L"D3D", L"SplitFilter", 0, ini.c_str()) != 0;
   {
     wchar_t ops[32];
@@ -509,9 +536,12 @@ void LoadConfig(bool initial) {
   if (c.shadowRecorderPriority > 2) c.shadowRecorderPriority = 2;
   {
     wchar_t split[32];
-    GetPrivateProfileStringW(L"Model", L"ShadowRecorderSplit", L"0x3", split, 32, ini.c_str());
+    GetPrivateProfileStringW(L"Model", L"ShadowRecorderSplit", L"0xf", split, 32, ini.c_str());
     c.shadowRecorderSplit = static_cast<uint32_t>(wcstoul(split, nullptr, 0)) & 0xf;
   }
+  c.shadowRecorderHelpers = static_cast<int>(GetPrivateProfileIntW(L"Model", L"ShadowRecorderHelpers", 3, ini.c_str()));
+  if (c.shadowRecorderHelpers < 0) c.shadowRecorderHelpers = 0;
+  if (c.shadowRecorderHelpers > 3) c.shadowRecorderHelpers = 3;
   c.shadowRecorderInstancing = GetPrivateProfileIntW(L"Model", L"ShadowRecorderInstancing", 1, ini.c_str()) != 0;
   c.suiteShadowRecVerify = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerify", 0, ini.c_str()) != 0;
   c.suiteShadowRecVerifySec = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerifySec", 5, ini.c_str());
@@ -539,6 +569,8 @@ void LoadConfig(bool initial) {
   c.gbufferRecorderHelpers = GetPrivateProfileIntW(L"Model", L"GBufferRecorderHelpers", 2, ini.c_str());
   if (c.gbufferRecorderHelpers < 0) c.gbufferRecorderHelpers = 0;
   if (c.gbufferRecorderHelpers > 2) c.gbufferRecorderHelpers = 2;
+  c.gbufferRecorderCockpit = GetPrivateProfileIntW(L"Model", L"GBufferRecorderCockpit", 0, ini.c_str()) != 0;
+  c.gbufferRecorderByOrdinal = GetPrivateProfileIntW(L"Model", L"GBufferRecorderByOrdinal", 0, ini.c_str()) != 0;
   c.suiteGBufferRecVerify = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerify", 0, ini.c_str()) != 0;
   c.suiteGBufferRecVerifySec = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifySec", 6, ini.c_str());
   if (c.suiteGBufferRecVerifySec < 1) c.suiteGBufferRecVerifySec = 1;
@@ -546,6 +578,20 @@ void LoadConfig(bool initial) {
   c.suiteGBufferRecVerifyStride = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyStride", 0, ini.c_str());
   if (c.suiteGBufferRecVerifyStride < 0 || c.suiteGBufferRecVerifyStride == 1) c.suiteGBufferRecVerifyStride = 0;
   c.suiteBenchGBufferRecorder = GetPrivateProfileIntW(L"Suite", L"BenchGBufferRecorder", 0, ini.c_str()) != 0;
+  {
+    wchar_t mask[32];
+    GetPrivateProfileStringW(L"Model", L"PassFlush", L"0", mask, 32, ini.c_str());
+    c.passFlush = static_cast<uint32_t>(wcstoul(mask, nullptr, 0)) & 0xff;  // decimal or 0x hex
+    GetPrivateProfileStringW(L"Suite", L"BenchPassFlushMask", L"0", mask, 32, ini.c_str());
+    c.suiteBenchPassFlushMask = static_cast<uint32_t>(wcstoul(mask, nullptr, 0)) & 0xff;
+  }
+  c.suiteBenchPassFlush = GetPrivateProfileIntW(L"Suite", L"BenchPassFlush", 0, ini.c_str()) != 0;
+  c.srvTailTrim = GetPrivateProfileIntW(L"Model", L"SrvTailTrim", 0, ini.c_str()) != 0;
+  c.suiteSrvTailTrimVerify = GetPrivateProfileIntW(L"Suite", L"SrvTailTrimVerify", 0, ini.c_str()) != 0;
+  c.suiteSrvTailTrimVerifySec = GetPrivateProfileIntW(L"Suite", L"SrvTailTrimVerifySec", 10, ini.c_str());
+  if (c.suiteSrvTailTrimVerifySec < 1) c.suiteSrvTailTrimVerifySec = 1;
+  if (c.suiteSrvTailTrimVerifySec > 120) c.suiteSrvTailTrimVerifySec = 120;
+  c.suiteBenchSrvTailTrim = GetPrivateProfileIntW(L"Suite", L"BenchSrvTailTrim", 0, ini.c_str()) != 0;
   c.holdYawDeg = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"HoldYawDeg", -1, ini.c_str()));
   c.suiteYawScan = GetPrivateProfileIntW(L"Suite", L"YawScan", 0, ini.c_str()) != 0;
   c.suiteYawProfile = GetPrivateProfileIntW(L"Suite", L"YawProfile", 0, ini.c_str()) != 0;
@@ -553,6 +599,14 @@ void LoadConfig(bool initial) {
   c.suiteRotationProfile = GetPrivateProfileIntW(L"Suite", L"RotationProfile", 0, ini.c_str()) != 0;
   c.suiteRotationDegPerSec = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"RotationDegPerSec", 60, ini.c_str()));
   c.suiteRotationSeconds = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"RotationSeconds", 20, ini.c_str()));
+  c.suiteFrameStartGap = GetPrivateProfileIntW(L"Suite", L"FrameStartGap", 0, ini.c_str()) != 0;
+  c.suiteFrameStartGapSec =
+      std::max(0, std::min(120, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FrameStartGapSec", 10, ini.c_str()))));
+  c.suiteRunnableThreads = GetPrivateProfileIntW(L"Suite", L"RunnableThreads", 0, ini.c_str()) != 0;
+  c.suiteRunnableThreadsSec =
+      std::max(0, std::min(120, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"RunnableThreadsSec", 10, ini.c_str()))));
+  c.suiteRunnableThreadsEvery = std::max(
+      2, std::min(1024, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"RunnableThreadsEvery", 16, ini.c_str()))));
   {
     const uint32_t v = GetPrivateProfileIntW(L"Model", L"BigPageBytes", 4 << 20, ini.c_str());
     c.bigPageBytes = v < (1u << 20) ? (1u << 20) : v > (64u << 20) ? (64u << 20) : v;
@@ -606,6 +660,8 @@ void LoadConfig(bool initial) {
   ApplyGBufferBatch();
   ApplyShadowRecorder();
   ApplyGBufferRecorder();
+  ApplyPassFlush();
+  ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
   ApplyHoldYaw(c.holdYawDeg);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
@@ -901,6 +957,7 @@ void RestoreD3dHooks();
 #include <condition_variable>
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
+#include <dxgi1_4.h>
 #include "deferred_rec.h"  // R15 A1 infrastructure (not wired yet)
 namespace {
 
@@ -1176,10 +1233,15 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "join_tail_count.h"
 #include "shadow_rec_count.h"
 #include "split_filter.h"
+#include "srv_tail_trim.h"
+#include "pass_flush.h"
 #include "shadow_rec.h"
 #include "gb_rec_count.h"
 #include "gb_rec.h"
+#include "fwd_rec_count.h"
 #include "gpu_pass_timing.h"
+#include "run_threads.h"
+#include "frame_start.h"
 #include "frame_heap.h"
 #include "big_pages.h"
 #include "par_upload.h"
@@ -1188,6 +1250,7 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "motion_probes.h"
 #include "motion.h"
 #include "view_profile.h"
+#include "vram_count.h"
 
 void ApplyThreadsMax(void* scene) {
   if (g_cfg.collectThreadsMax <= 0 || g_threadsApplied.exchange(true)) return;
@@ -1537,6 +1600,35 @@ void ApplySplitFilter(bool on) {
   if (!sfilt::Live()) sfilt::Attach();
 }
 
+// R15 F2 [Model] SrvTailTrim: installed on first use (dx11backend checks;
+// retried every second until dx11backend is loaded). Off = both call sites
+// restored (stock). A verify mismatch latches it off.
+void ApplySrvTailTrim(bool on) {
+  if (srvtrim::g_disabled.load()) on = false;
+  if (!on) {
+    if (srvtrim::g_patched.load()) {
+      srvtrim::Detach();
+      if (srvtrim::g_disabled.load()) Log("srv tail trim: off for this session (verify mismatch)");
+    }
+    return;
+  }
+  if (!srvtrim::Install()) return;
+  if (srvtrim::g_patched.load() != 1 && srvtrim::Attach(false)) Log("srv tail trim: on");
+}
+
+// Suite: installs (whatever [Model] SrvTailTrim says); false (logged) when it cannot run.
+bool SrvTailTrimReady() {
+  if (srvtrim::g_disabled.load()) {
+    Log("  srv tail trim is latched off for this session");
+    return false;
+  }
+  if (!srvtrim::Install()) {
+    Log("  srv tail trim not available (install state %d, see the log above)", srvtrim::g_state.load());
+    return false;
+  }
+  return true;
+}
+
 // Suite: installs and attaches (whatever [D3D] SplitFilter says) and waits
 // for the context; false (logged) when the filter cannot run.
 bool SplitFilterReady() {
@@ -1624,6 +1716,7 @@ void ApplyShadowRecorder() {
   shrec::g_waitUs = static_cast<uint32_t>(g_cfg.shadowRecorderWaitUs);
   shrec::g_priority = g_cfg.shadowRecorderPriority;  // THREAD_PRIORITY_* are -2..2
   shrec::g_split = g_cfg.shadowRecorderSplit;
+  shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
   const bool on = g_cfg.shadowRecorder && !g_engineOff.load() && !(g_cfg.gbufferBatch && g_cfg.shadowInst);
   if (on && !shrec::Install()) {
@@ -1643,6 +1736,8 @@ void ApplyGBufferRecorder() {
   gbrec::g_stride = static_cast<uint32_t>(g_cfg.suiteGBufferRecVerifyStride);
   gbrec::g_maxSeg = static_cast<uint32_t>(g_cfg.gbufferRecorderMaxSegments);
   gbrec::g_helpers = static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers);
+  gbrec::g_cockpit = g_cfg.gbufferRecorderCockpit;
+  gbrec::g_byOrdinal = g_cfg.gbufferRecorderByOrdinal;
   const bool on = g_cfg.gbufferRecorder && g_cfg.shadowInst && !g_engineOff.load() && !g_cfg.gbufferBatch;
   if (on && (!shadowinst::g_onGb.load() || !shadowinst::g_gbInstalled.load())) shadowinst::SetOnGb(true);
   if (on && !gbrec::Install()) {
@@ -1650,6 +1745,241 @@ void ApplyGBufferRecorder() {
     return;
   }
   gbrec::g_on = on;
+}
+
+// pass_flush.h: DCS's immediate context and the pass execute hook. The device
+// comes from shadow_inst ([Model] ShadowInstancing) or the split filter.
+bool PassFlushPrepare() {
+  if (pflush::Ready()) return true;
+  ptiming::Install();
+  ID3D11Device* dev = shadowinst::g_device;
+  if (dev)
+    dev->AddRef();
+  else if (sfilt::Ctx* c = sfilt::g_ctx.load())
+    c->GetDevice(&dev);
+  const bool ok = dev && pflush::Prepare(dev, &g_quadFrame);
+  if (dev) dev->Release();
+  return ok;
+}
+
+std::atomic<bool> g_passFlushPhase{false};  // bench mode 30 running: its xrBeginFrame hook stays
+
+// R20 (h) [Model] PassFlush: Flush at the chosen pass boundaries; waits for
+// DCS's device and GraphicsCore (retried every second). 0 = callback removed,
+// xrBeginFrame hook removed: as without pass_flush.h.
+void ApplyPassFlush() {
+  static uint32_t logged = 0;
+  const uint32_t mask = g_engineOff.load() ? 0 : g_cfg.passFlush;
+  if (mask && !PassFlushPrepare()) return;  // retried
+  if (mask & pflush::kAfterXrBegin)
+    pflush::InstallXr();
+  else if (!g_passFlushPhase.load())
+    pflush::UninstallXr();
+  pflush::SetMask(mask);
+  if (pflush::g_mask.load() != logged) {
+    logged = pflush::g_mask.load();
+    Log("pass flush: mask 0x%x (%s)", logged, pflush::MaskText(logged).c_str());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bench mode 30 ([Suite] BenchPassFlush): OFF = no Flush, ON = the mask. Per
+// block: GPU timestamps in light mode (gpu_pass_timing.h: idle between
+// top-level passes, frame-start gap), Flush counts and CPU, and the
+// frame-start probe (render thread from xrEndFrame to the first pass).
+// ---------------------------------------------------------------------------
+
+std::atomic<uint32_t> g_passFlushBenchMask{0};
+
+struct PfBlock {
+  bool on = false, valid = false, gpu = false;
+  int64_t qa = 0, qb = 0;
+  uint64_t frames = 0, flushes = 0, ticks = 0;
+  uint64_t reasons[pflush::kReasons] = {};
+  double period = 0, span = 0, gaps = 0, afterXr = -1;
+  int gpuFrames = 0;
+  pflush::Probe probe;
+};
+std::vector<PfBlock> g_pfBlocks;
+uint64_t g_pfF0 = 0, g_pfFl0 = 0, g_pfTk0 = 0, g_pfR0[pflush::kReasons] = {};
+
+void PfBlockBegin(bool on) {
+  gpt::TakeDone();  // frames before this block
+  pflush::g_probe = false;
+  Sleep(20);  // a render thread still writing the probe
+  pflush::ProbeReset();
+  PfBlock b;
+  b.on = on;
+  g_pfF0 = g_quadFrame.load();
+  pflush::Snapshot(&g_pfFl0, &g_pfTk0, g_pfR0);
+  b.qa = pflush::Qpc();
+  g_pfBlocks.push_back(std::move(b));
+  pflush::g_probe = true;
+}
+
+void PfBlockEnd(bool on, bool valid) {
+  if (g_pfBlocks.empty()) return;
+  PfBlock& b = g_pfBlocks.back();
+  b.qb = pflush::Qpc();
+  b.on = on;
+  b.valid = valid;
+  b.frames = g_quadFrame.load() - g_pfF0;
+  pflush::g_probe = false;
+  uint64_t fl = 0, tk = 0, r[pflush::kReasons] = {};
+  pflush::Snapshot(&fl, &tk, r);
+  b.flushes = fl - g_pfFl0;
+  b.ticks = tk - g_pfTk0;
+  for (int i = 0; i < pflush::kReasons; ++i) b.reasons[i] = r[i] - g_pfR0[i];
+  Sleep(150);  // GPU frames are read back a few frames late
+  b.probe = pflush::g_pr;
+  std::vector<gpt::Done> done = gpt::TakeDone(), in;
+  for (gpt::Done& d : done)
+    if (d.qpc >= b.qa && d.qpc <= b.qb) in.push_back(std::move(d));
+  if (in.size() < 3) return;
+  gpt::Result res = gpt::Analyze(in, [](void* p) -> std::string { return ptiming::RttiName(p); });
+  if (!res.frames || res.span.empty()) return;
+  b.gpu = true;
+  b.gpuFrames = res.frames;
+  b.period = gpt::Mean(res.period);
+  b.span = gpt::Mean(res.span);
+  b.gaps = gpt::Mean(res.gaps);
+  b.afterXr = res.afterXr.empty() ? -1 : gpt::Mean(res.afterXr);
+}
+
+double PfMs(double us, uint64_t n) { return n ? us / static_cast<double>(n) / 1000.0 : 0.0; }
+
+void PfReport() {
+  const size_t n = g_pfBlocks.size();
+  std::vector<bool> on(n), valid(n), gpuValid(n), xrValid(n), prValid(n), bgValid(n);
+  for (size_t i = 0; i < n; ++i) {
+    const PfBlock& b = g_pfBlocks[i];
+    on[i] = b.on;
+    valid[i] = b.valid && b.frames > 0;
+    gpuValid[i] = valid[i] && b.gpu;
+    xrValid[i] = gpuValid[i] && b.afterXr >= 0;
+    prValid[i] = valid[i] && b.probe.withXr > 0;
+    bgValid[i] = valid[i] && b.probe.withBegin > 0;
+  }
+  auto field = [&](double (*get)(const PfBlock&)) {
+    std::vector<double> v(n);
+    for (size_t i = 0; i < n; ++i) v[i] = get(g_pfBlocks[i]);
+    return v;
+  };
+  auto row = [&](const char* name, const std::vector<double>& v, const std::vector<bool>& ok) {
+    const pflush::Paired p = pflush::PairedChange(v, on, ok);
+    if (!p.pairs) {
+      Log("  %-50s n/a", name);
+      return;
+    }
+    Log("  %-50s OFF %8.3f  ON %8.3f  change %+7.3f +/- %.3f %s", name, p.off, p.on, p.delta, p.ci,
+        p.pairs > 1 && std::fabs(p.delta) > p.ci ? "(significant)" : "(within noise)");
+  };
+  Log("  pass flush, ON blocks vs the mean of their OFF neighbours (ms unless noted):");
+  row("gpu: idle between top-level passes", field([](const PfBlock& b) { return b.gaps; }), gpuValid);
+  row("gpu: xrEndFrame end -> next first pass", field([](const PfBlock& b) { return b.afterXr; }), xrValid);
+  row("gpu: passes span", field([](const PfBlock& b) { return b.span; }), gpuValid);
+  row("gpu: frame period", field([](const PfBlock& b) { return b.period; }), gpuValid);
+  row("flushes per frame (count)",
+      field([](const PfBlock& b) { return b.frames ? b.flushes / static_cast<double>(b.frames) : 0.0; }), valid);
+  row("render-thread CPU in Flush per frame",
+      field([](const PfBlock& b) { return PfMs(b.ticks * g_qpcToUs, b.frames); }), valid);
+  row("cpu: xrEndFrame end -> first pass",
+      field([](const PfBlock& b) { return PfMs(b.probe.xrToPassUs, b.probe.withXr); }), prValid);
+  row("cpu: xrEndFrame end -> xrBeginFrame wrapper",
+      field([](const PfBlock& b) { return PfMs(b.probe.xrToBeginUs, b.probe.withBegin); }), bgValid);
+  row("cpu: xrBeginFrame wrapper (begin, 4 x acquire/wait)",
+      field([](const PfBlock& b) { return PfMs(b.probe.beginUs, b.probe.withBegin); }), bgValid);
+  row("cpu: xrBeginFrame wrapper end -> first pass",
+      field([](const PfBlock& b) { return PfMs(b.probe.beginToPassUs, b.probe.withBegin); }), bgValid);
+  row("cpu: first top-level pass",
+      field([](const PfBlock& b) { return PfMs(b.probe.firstPassUs, b.probe.firstPassN); }), prValid);
+  // Totals by side: Flush reasons, probe coverage and the frame-start p95.
+  for (int side = 0; side < 2; ++side) {
+    uint64_t frames = 0, fl = 0, r[pflush::kReasons] = {}, pf = 0, px = 0, pb = 0, po = 0, pc = 0;
+    std::vector<float> x2p;
+    void* firstVt = nullptr;
+    for (size_t i = 0; i < n; ++i) {
+      const PfBlock& b = g_pfBlocks[i];
+      if (!valid[i] || b.on != (side == 1)) continue;
+      frames += b.frames;
+      fl += b.flushes;
+      for (int k = 0; k < pflush::kReasons; ++k) r[k] += b.reasons[k];
+      pf += b.probe.frames;
+      px += b.probe.withXr;
+      pb += b.probe.withBegin;
+      po += b.probe.beginOutside;
+      pc += b.probe.counterFirst;
+      x2p.insert(x2p.end(), b.probe.xrToPass.begin(), b.probe.xrToPass.end());
+      if (!firstVt) firstVt = b.probe.firstVt;
+    }
+    if (!frames) continue;
+    std::string reasons;
+    char buf[96];
+    for (int k = 0; k < pflush::kReasons; ++k)
+      if (r[k]) {
+        snprintf(buf, sizeof(buf), "%s%s %.2f", reasons.empty() ? "" : ", ", pflush::kReasonNames[k],
+                 r[k] / static_cast<double>(frames));
+        reasons += buf;
+      }
+    double p95 = 0;
+    if (!x2p.empty()) {
+      const size_t k = std::min(x2p.size() - 1, static_cast<size_t>(x2p.size() * 0.95));
+      std::nth_element(x2p.begin(), x2p.begin() + k, x2p.end());
+      p95 = x2p[k] / 1000.0;
+    }
+    const std::string firstName = firstVt ? ptiming::RttiName(firstVt) : std::string("?");
+    Log("  %s: %.2f flushes/frame%s%s%s; probe: %llu first passes, %llu after an xrEndFrame end, %llu also first "
+        "since the frame counter moved (bit 0x80's point), %llu with the xrBeginFrame wrapper between, %llu wrapper "
+        "calls elsewhere; cpu xrEndFrame end -> first pass p95 %.3f ms; first pass %s",
+        side ? "ON " : "OFF", fl / static_cast<double>(frames), reasons.empty() ? "" : " (", reasons.c_str(),
+        reasons.empty() ? "" : ")", static_cast<unsigned long long>(pf), static_cast<unsigned long long>(px),
+        static_cast<unsigned long long>(pc), static_cast<unsigned long long>(pb), static_cast<unsigned long long>(po),
+        p95, firstName.c_str());
+  }
+  Log("  (gpu rows: GpuPassTiming light mode, %s; cpu rows: render-thread QPC)",
+      gpt::g_xrSlot ? "xrEndFrame stamped" : "xrEndFrame not stamped, no frame-start row");
+}
+
+// The phase. False when aborted.
+bool PassFlushBench(uint32_t mask) {
+  if (!PassFlushPrepare()) {
+    Log("  pass flush: DCS's device or the pass execute hook is not available (the device comes from [Model] "
+        "ShadowInstancing=1 or [D3D] SplitFilter=1)");
+    return true;
+  }
+  g_passFlushPhase = true;
+  g_passFlushBenchMask = mask & pflush::kMaskBits;
+  if (!pflush::InstallXr())
+    Log("  pass flush: xrBeginFrame not hooked: no wrapper rows%s",
+        (mask & pflush::kAfterXrBegin) ? ", and the after-xrBeginFrame bit does nothing" : "");
+  pflush::SetMask(0);
+  pflush::SetSession(true);
+  const bool gpu = gpt::Begin(g_quadFrame, true);
+  if (!gpu) Log("  pass flush: GPU timestamps not available; GPU rows n/a");
+  g_pfBlocks.clear();
+  g_benchBlockBegin = &PfBlockBegin;
+  g_benchBlockEnd = &PfBlockEnd;
+  const uint64_t xb0 = pflush::g_xrBeginCalls.load(), f0 = g_quadFrame.load();
+  const bool ok = RunBenchmark(30, false);  // ends with ApplyPassFlush (the configured mask back)
+  g_benchBlockBegin = nullptr;
+  g_benchBlockEnd = nullptr;
+  const uint64_t frames = std::max<uint64_t>(1, g_quadFrame.load() - f0);
+  if (gpu)
+    Log("  pass flush: GPU frames %llu opened, %llu read (truncated %llu, disjoint %llu, dropped unread %llu); "
+        "timestamp cost on the render thread %.3f ms/frame (both sides)",
+        static_cast<unsigned long long>(gpt::g_s.framesOpened), static_cast<unsigned long long>(gpt::g_s.framesRead),
+        static_cast<unsigned long long>(gpt::g_s.truncated), static_cast<unsigned long long>(gpt::g_s.disjoint),
+        static_cast<unsigned long long>(gpt::g_s.dropped), gpt::OverheadMsPerFrame());
+  gpt::End();
+  pflush::SetSession(false);
+  g_passFlushPhase = false;
+  ApplyPassFlush();  // the configured mask; the xrBeginFrame hook only if it asks for it
+  Log("  pass flush: render thread %s; xrBeginFrame wrapper calls on it %.2f per frame",
+      pflush::g_rt.load() ? "latched at the first cascade" : "NOT latched (no cascade pass seen)",
+      (pflush::g_xrBeginCalls.load() - xb0) / static_cast<double>(frames));
+  if (ok) PfReport();
+  g_pfBlocks.clear();
+  return ok;
 }
 
 // Installed on first use; detached (DCS's own slot 5) while off. Its masks
@@ -1697,6 +2027,8 @@ void SetEngineOff(bool off) {
   ApplyGBufferBatch();
   ApplyShadowRecorder();
   ApplyGBufferRecorder();
+  ApplyPassFlush();
+  ApplySrvTailTrim(g_cfg.srvTailTrim && !off);
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
@@ -1977,6 +2309,7 @@ bool ShadowRecPhase(bool verify) {
   shrec::g_waitUs = static_cast<uint32_t>(g_cfg.shadowRecorderWaitUs);
   shrec::g_priority = g_cfg.shadowRecorderPriority;
   shrec::g_split = g_cfg.shadowRecorderSplit;
+  shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
   if (g_cfg.gbufferBatch && g_cfg.shadowInst) {
     Log("  shadow recorder: off while [Model] GBufferBatching=1");
@@ -2024,6 +2357,8 @@ bool GBufferRecPhase(bool verify) {
   gbrec::g_stride = static_cast<uint32_t>(g_cfg.suiteGBufferRecVerifyStride);
   gbrec::g_maxSeg = static_cast<uint32_t>(g_cfg.gbufferRecorderMaxSegments);
   gbrec::g_helpers = static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers);
+  gbrec::g_cockpit = g_cfg.gbufferRecorderCockpit;
+  gbrec::g_byOrdinal = g_cfg.gbufferRecorderByOrdinal;
   if (g_cfg.gbufferBatch && g_cfg.shadowInst) {
     Log("  gbuffer recorder: off while [Model] GBufferBatching=1");
     return false;
@@ -2255,12 +2590,16 @@ DWORD WINAPI SuiteThread(void*) {
   }
   if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
     Log("-- FX pass Apply: same pass again (R14 lead 4 counter, 5 s) --");
+    srvtrim::Detach();  // its code check covers the trim's call sites: measured on stock
     fxapply::Measure(5000, g_quadFrame, g_tscHz);
+    ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
     Chime(1000, 60);
   }
   if (ok && g_cfg.suiteSrvSpanCount && !g_benchAbort) {
     Log("-- setShaderResources: passed span vs changed span, identical tail (R15 F2 counter, 5 s) --");
+    srvtrim::Detach();  // same call sites: the counter measures stock
     srvspan::Measure(5000, g_quadFrame, g_tscHz);
+    ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
     Chime(1000, 60);
   }
   if (ok && g_cfg.suiteJoinTailCount && !g_benchAbort) {
@@ -2281,10 +2620,26 @@ DWORD WINAPI SuiteThread(void*) {
     gbreccount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteForwardRecCount && !g_benchAbort) {
+    Log("-- forward recorder S0 counters: SimplePassData calls by pass name, item mix and loop time, gb_rec rules per "
+        "model draw, segments per island, blended share, RDEF census, pass setup stability, material bytes (R21, 1 s "
+        "discovery, key compiles, 5 s) --");
+    fwdreccount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteGpuPassTiming && !g_benchAbort) {
     Log("-- render passes, GPU time (D3D11 timestamps) and context copies/clears/dispatches per pass kind, with "
         "render-thread CPU for comparison (5 s) --");
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
     gpt::Measure(5000, g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteVramCount && !g_benchAbort) {
+    Log("-- video memory: DXGI budget and usage per second, DcsQvCull's own buffers, model-data pages, the recorders' "
+        "texture tables (stale and orphaned views)%s (%d s) --",
+        g_cfg.suiteVramCountCreates ? ", DCS's buffer/texture creates" : "", g_cfg.suiteVramCountSec);
+    vramc::Measure(g_cfg.suiteVramCountSec, g_cfg.suiteVramCountCreates, g_quadFrame, g_benchAbort);
     Chime(1000, 60);
   }
   if (ok && g_cfg.suiteYawScan && !g_benchAbort) {
@@ -2312,6 +2667,23 @@ DWORD WINAPI SuiteThread(void*) {
     else
       posesweep::Hold(false, 0);
   }
+  if (ok && g_cfg.suiteFrameStartGap && g_cfg.suiteFrameStartGapSec > 0 && !g_benchAbort) {
+    Log("-- frame start: xrEndFrame return -> first pass on the render thread, GPU drain and gap, OpenXR and driver "
+        "waits, per-frame class (R22 E1, %d s%s) --",
+        g_cfg.suiteFrameStartGapSec, posesweep::Holding() ? ", held view" : "");
+    fstart::RunPhase(g_cfg.suiteFrameStartGapSec, g_quadFrame, g_benchAbort);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteRunnableThreads && g_cfg.suiteRunnableThreadsSec > 0 && !g_benchAbort) {
+    Log("-- runnable threads: DCS threads running / runnable-waiting at render entry and at a recorder job start, "
+        "late recorder jobs, per-thread CPU (R22 E3, %d s, a snapshot every %d frames%s) --",
+        g_cfg.suiteRunnableThreadsSec, g_cfg.suiteRunnableThreadsEvery, posesweep::Holding() ? ", held view" : "");
+    rthreads::RunPhase(g_cfg.suiteRunnableThreadsSec, g_cfg.suiteRunnableThreadsEvery, g_tscHz, g_benchAbort);
+    Chime(1000, 60);
+  }
+  vprof::g_withFs = g_cfg.suiteFrameStartGap;
+  vprof::g_withRt = g_cfg.suiteRunnableThreads;
+  vprof::g_rtEvery = g_cfg.suiteRunnableThreadsEvery;
   if (ok && g_cfg.suiteYawProfile && !g_benchAbort) {
     Log("-- yaw profile: cost split and limit per held view yaw, every %d deg (2 s settle + 2.5 s each) --",
         std::max(5, std::min(180, g_cfg.suiteYawProfileStep)));
@@ -2445,6 +2817,32 @@ DWORD WINAPI SuiteThread(void*) {
     sfilt::LogCounters("A/B, whole run (filter in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteSrvTailTrimVerify && !g_benchAbort) {
+    Log("-- setShaderResources identical-tail trim (R15 F2): every trimmed call checked against stock's call on "
+        "d3d11 (%d s) --",
+        g_cfg.suiteSrvTailTrimVerifySec);
+    if (SrvTailTrimReady()) {
+      srvtrim::ResetCounters();
+      const uint64_t f0 = g_quadFrame.load();
+      if (srvtrim::Attach(true)) {
+        for (int t = 0; t < g_cfg.suiteSrvTailTrimVerifySec * 20 && !g_benchAbort && !srvtrim::g_disabled.load(); ++t)
+          Sleep(50);
+        srvtrim::Detach();
+        srvtrim::LogCounters("verify", static_cast<double>(g_quadFrame.load() - f0));
+        if (srvtrim::g_disabled.load())
+          Log("  verify: mismatches found -> srv tail trim NOT SAFE, latched off for this session");
+        else
+          Log("  verify: 0 mismatches");
+      }
+      ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchSrvTailTrim && !g_benchAbort && SrvTailTrimReady()) {
+    Log("-- A/B: setShaderResources identical-tail trim (OFF = stock call sites, ON = trim, no counting) --");
+    ok = RunBenchmark(31, false);  // ends with ApplySrvTailTrim (the configured state back)
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteBenchShadowInst && shadowbatch::Install() && !g_benchAbort) {
     Log("-- A/B: shadow caster instancing --");
     ok = RunBenchmark(22, false);
@@ -2480,6 +2878,17 @@ DWORD WINAPI SuiteThread(void*) {
       ok = RunBenchmark(29, false);
       gbrec::LogCounters("A/B, whole run (recorder in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
     }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchPassFlush && !g_benchAbort) {
+    const uint32_t mask = g_cfg.suiteBenchPassFlushMask ? g_cfg.suiteBenchPassFlushMask : g_cfg.passFlush;
+    Log("-- A/B: Flush at pass boundaries (OFF = no Flush, ON = mask 0x%x: %s); GPU timestamps (light) and the "
+        "frame-start probe run in both --",
+        mask, pflush::MaskText(mask).c_str());
+    if (!mask)
+      Log("  nothing to compare: [Suite] BenchPassFlushMask and [Model] PassFlush are 0");
+    else
+      ok = PassFlushBench(mask);
     Chime(1000, 60);
   }
   if (ok && g_cfg.suiteBenchShadowPlanAsync && shadowbatch::Install() && !g_benchAbort) {
@@ -2824,11 +3233,17 @@ DWORD WINAPI WorkerThread(void*) {
         ApplyShadowRecorder();
       if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
         ApplyGBufferRecorder();
+      if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
       // Split filter: waits for dx11backend and the first draw; detaches after a verify mismatch.
       if (!g_benchRunningFlag.load() &&
           ((g_cfg.splitFilter && !g_engineOff.load() && sfilt::g_state.load() >= 0 && !sfilt::Live()) ||
            (sfilt::g_disabled.load() && sfilt::g_attached.load())))
         ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
+      // Srv tail trim: waits for dx11backend; detaches after a verify mismatch.
+      if (!g_benchRunningFlag.load() &&
+          ((g_cfg.srvTailTrim && !g_engineOff.load() && srvtrim::g_state.load() == 0) ||
+           (srvtrim::g_disabled.load() && srvtrim::g_patched.load())))
+        ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
     }
     // Re-read the Quad-Views-Foveated edge smoothing every 10 s once quad views run.
     static ULONGLONG lastQv = 0;
@@ -3044,6 +3459,17 @@ void SetBenchVariant(bool on) {
     gbrec::g_on = on;
     return;
   }
+  if (g_benchActiveMode.load() == 30) {
+    pflush::SetMask(on ? g_passFlushBenchMask.load() : 0);
+    return;
+  }
+  if (g_benchActiveMode.load() == 31) {
+    if (on)
+      srvtrim::Attach(false);
+    else
+      srvtrim::Detach();
+    return;
+  }
   if (g_benchActiveMode.load() == 25) {
     shadowbatch::g_async = on;
     return;
@@ -3162,10 +3588,14 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through
   d3ds::Uninstall();
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
+  srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
+  pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
+  vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running
   sfilt::Shutdown();    // call sites, FX call-table entries and context table back to stock
   jointail::Shutdown();
   shadowrec::Shutdown();  // chained pointers and class slots back before batching's own shutdown
+  fwdreccount::Shutdown();  // forward S0: SimplePassData slot 19, chain, class slots, sort observer out
   gbreccount::Shutdown();  // G-buffer S0 chain, class slots, sort observer (and its own sort patch) out
   gbrec::Shutdown();      // G-buffer recorder chain out, its workers joined (before the shadow recorder's sort sites)
   shrec::Shutdown();      // recorder chain out, its worker joined, before batching's shutdown

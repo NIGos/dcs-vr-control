@@ -2,7 +2,7 @@
 
 A free Windows app that makes DCS World run faster, on a monitor or in VR, and sets up VR on Pimax headsets in one click.
 
-- **Every pilot** (monitor, Quest, Varjo, Reverb, Pimax…): **Engine Optimizations** remove CPU work inside DCS without changing the image, about **+60 % FPS** at a busy airfield when DCS is CPU-bound. Once applied they stay on every time DCS starts, also from Steam or a desktop shortcut.
+- **Every pilot** (monitor, Quest, Varjo, Reverb, Pimax…): **Engine Optimizations** remove CPU work inside DCS without changing the image, about **+50-60 % FPS** at a busy airfield when DCS is CPU-bound. Once applied they stay on every time DCS starts, also from Steam or a desktop shortcut.
 - **Pimax pilots** additionally get foveated rendering, DLSS 5 on the area you look at and frame generation, set up and launched with one button.
 
 Everything the app changes is backed up and comes back with **Back to stock DCS**.
@@ -21,7 +21,7 @@ Everything the app changes is backed up and comes back with **Back to stock DCS*
 
 **For every pilot, on a monitor or with any headset**
 
-- **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR: about **+60 % FPS** and **p95 frame time −39 %**; with everything on, the GPU becomes the limit. How much you gain depends on how CPU-bound you are.
+- **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR: about **+50-60 % FPS** and **p95 frame time −34 %**; with everything on, the GPU becomes the limit. How much you gain depends on how CPU-bound you are.
 - **CPU Boost:** gives DCS priority and its fastest cores while it runs, and fixes a DCS terrain loop that wastes CPU time (the fix also works when DCS starts from Steam).
 - **Free VRAM:** closes memory-hungry apps before the flight and reopens them after.
 
@@ -39,7 +39,7 @@ After each flight the Overview shows a **Last flight** summary.
 ## Quick start
 
 1. **You need:** Windows 10 or 11 (64-bit; tested on 11) and DCS World 2.9. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (tested with 310.8, not included).
-2. **Download** `DcsControl-0.5.0-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-control/releases), unzip it anywhere and double-click `DcsControl.exe`. Inside you find only `DcsControl.exe`, `Install DCS Control.cmd` (adds it to the Start menu) and a `files` folder that must stay next to it.
+2. **Download** `DcsControl-0.5.1-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-control/releases), unzip it anywhere and double-click `DcsControl.exe`. Inside you find only `DcsControl.exe`, `Install DCS Control.cmd` (adds it to the Start menu) and a `files` folder that must stay next to it.
 3. **Choose how you fly** in the right panel: **Pimax**, **Sboys**, or **Optimizations only** (monitor or another headset). **Detect my setup** and **Guided setup** can do it for you.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
 5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.

@@ -824,8 +824,8 @@ struct Dev {
   // Instancing: the instanced VS variants and a t127 buffer per worker.
   ID3D11VertexShader* vsI = nullptr;
   ID3D11VertexShader* vsTexI = nullptr;
-  ID3D11Buffer* offBuf[8] = {};
-  ID3D11ShaderResourceView* offSrv[8] = {};
+  ID3D11Buffer* offBuf[kThreads * kSlots] = {};
+  ID3D11ShaderResourceView* offSrv[kThreads * kSlots] = {};
 };
 
 // The instanced variant of a key's VS (what shadow_inst's map gives the recorder).
@@ -1033,7 +1033,7 @@ bool CreateDev(Dev& d, Compiler& c, World& w, bool* warp) {
   if (!(b = c.Build(kVsA, sizeof(kVsA) - 1, "vsTexI", "vs_5_0", nullptr))) return false;
   d.dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &d.vsTexI);
   b->Release();
-  for (int k = 0; k < 8; ++k) ok = ok && CreateOffsets(d.dev, &d.offBuf[k], &d.offSrv[k]);
+  for (int k = 0; k < kThreads * kSlots; ++k) ok = ok && CreateOffsets(d.dev, &d.offBuf[k], &d.offSrv[k]);
   return ok && d.vsTex && d.psTex && d.samp && d.vsI && d.vsTexI;
 }
 
@@ -1380,6 +1380,18 @@ void PsMapTests() {
             "inconclusive; foreign names, PS b7 and texture reads without a PS reject the key");
 }
 
+// Helpers per job and chunk sizes (pure).
+void SchedulingTests() {
+  bool ok = HelpersFor(0, false, 3) == 3 && HelpersFor(100, false, 3) == 1 && HelpersFor(399, false, 3) == 1 &&
+            HelpersFor(400, false, 3) == 2 && HelpersFor(1499, false, 3) == 2 && HelpersFor(1500, false, 3) == 3 &&
+            HelpersFor(100, true, 3) == 2 && HelpersFor(5000, true, 3) == 3 && HelpersFor(5000, false, 1) == 1 &&
+            HelpersFor(5000, true, 0) == 0 && HelpersFor(5000, false, 9) == static_cast<uint32_t>(kThreads - 1);
+  ok = ok && ChunkFor(0, 1) == kMinChunk && ChunkFor(10, 4) == kMinChunk && ChunkFor(1200, 4) == 1200 / 24 &&
+       ChunkFor(1200, 2) == 100 && ChunkFor(1200, 0) == 200;
+  Check(ok, "shadow rec scheduling: helpers by caster count (+1 after a late or tight job, capped), chunks of a "
+            "phase about 6 per thread");
+}
+
 uint32_t CountReason(const Job& j, int r) {
   uint32_t n = 0;
   for (size_t i = 0; i < j.n; ++i) n += j.reason[i] == r;
@@ -1423,6 +1435,28 @@ void TextureJobTests() {
   for (uint32_t k = 0; k < j->texKeyCount; ++k) reads += j->texKeys[k].read;
   ok = ok && reads == 3;  // the three Diffuse textures; Specular is skipped (its streaming request only)
   Check(ok, "shadow rec S4 job: textured casters collect their (texture, aux, type) keys, read and skipped");
+  // Another build of the same vector classifies exactly as j.
+  auto sameAs = [&](const Job& j2) {
+    const uint32_t n = static_cast<uint32_t>(j2.n);
+    bool same = n == j->n && j2.result == kBuildOk && j2.recCount == j->recCount && j2.setCount == j->setCount &&
+                j2.texKeyCount == j->texKeyCount && j2.matCount == j->matCount && j2.needGo == j->needGo &&
+                memcmp(j2.reason, j->reason, n) == 0 && memcmp(j2.group, j->group, n * sizeof(uint64_t)) == 0 &&
+                memcmp(j2.setKeys, j->setKeys, j->setCount * sizeof(uint16_t)) == 0 &&
+                memcmp(j2.reasons, j->reasons, sizeof(j->reasons)) == 0;
+    for (uint32_t r = 0; same && r < j->recCount; ++r) {
+      const Rec &a = j->recs[r], &b = j2.recs[r];
+      same = a.key == b.key && a.mesh == b.mesh && a.srv == b.srv && a.caster == b.caster && a.mat == b.mat &&
+             a.pso == b.pso && a.setFirst == b.setFirst && a.setCount == b.setCount && a.tex == b.tex &&
+             memcmp(a.psKey, b.psKey, sizeof(a.psKey)) == 0;
+    }
+    for (uint32_t m = 0; same && m < j->matCount; ++m)
+      same = j->mats[m].mat == j2.mats[m].mat && j->mats[m].last == j2.mats[m].last &&
+             memcmp(j->mats[m].cb, j2.mats[m].cb, kCbLen) == 0;
+    for (uint32_t k = 0; same && k < j->texKeyCount; ++k)
+      same = j->texKeys[k].tex == j2.texKeys[k].tex && j->texKeys[k].aux == j2.texKeys[k].aux &&
+             j->texKeys[k].type == j2.texKeys[k].type && j->texKeys[k].read == j2.texKeys[k].read;
+    return same;
+  };
   {
     // Stage A's reads split over two threads (chunks alternating, taken in
     // reverse order): the commit gives the single-thread result exactly.
@@ -1436,23 +1470,53 @@ void TextureJobTests() {
       for (uint32_t c = (n + kPreChunk - 1) / kPreChunk; same && c-- > 0;)
         for (uint32_t i = c * kPreChunk; i < n && i < (c + 1) * kPreChunk; ++i) PreOne(*j2, c & 1, i);
       j2->preDone.store(n);
-      same = same && WaitPre(*j2) && CommitBuild(*j2) == kBuildOk && j2->preSetCount[1] > 0;
-      same = same && j2->recCount == j->recCount && j2->setCount == j->setCount &&
-             j2->texKeyCount == j->texKeyCount && j2->matCount == j->matCount && j2->needGo == j->needGo &&
-             memcmp(j2->reason, j->reason, n) == 0 && memcmp(j2->group, j->group, n * sizeof(uint64_t)) == 0 &&
-             memcmp(j2->setKeys, j->setKeys, j->setCount * sizeof(uint16_t)) == 0;
-      for (uint32_t r = 0; same && r < j->recCount; ++r) {
-        const Rec &a = j->recs[r], &b = j2->recs[r];
-        same = a.key == b.key && a.mesh == b.mesh && a.srv == b.srv && a.caster == b.caster && a.mat == b.mat &&
-               a.pso == b.pso && a.setFirst == b.setFirst && a.setCount == b.setCount && a.tex == b.tex &&
-               memcmp(a.psKey, b.psKey, sizeof(a.psKey)) == 0;
-      }
-      for (uint32_t k = 0; same && k < j->texKeyCount; ++k)
-        same = j->texKeys[k].tex == j2->texKeys[k].tex && j->texKeys[k].aux == j2->texKeys[k].aux &&
-               j->texKeys[k].type == j2->texKeys[k].type && j->texKeys[k].read == j2->texKeys[k].read;
+      same = same && WaitPre(*j2) && CommitBuild(*j2) == kBuildOk && j2->preSetCount[1] > 0 && sameAs(*j2);
       FreeJob(j2);
     }
     Check(same, "shadow rec stage A: reads split over two threads commit to the single-thread classification");
+  }
+  {
+    // The pipelined commit (PreAndCommit), deterministic: helpers 1-3 have
+    // read chunks 1.. from the back; the primary reads chunk 0 itself (it is
+    // not ready), then commits every chunk in vector order.
+    Job* j2 = NewJob();
+    bool same = j2 != nullptr;
+    if (j2) {
+      InitJob(*j2, *w, t);
+      j2->scope = 0x30f;
+      same = BeginBuild(*j2) == kBuildOk;
+      const uint32_t n = static_cast<uint32_t>(j2->n);
+      const uint32_t chunks = (n + kPreChunk - 1) / kPreChunk;
+      for (uint32_t c = chunks; same && c-- > 1;) PreChunk(*j2, 1 + static_cast<int>(c % 3), c * kPreChunk);
+      same = same && chunks > 3 && PreAndCommit(*j2) && j2->th[0].pre == kPreChunk &&
+             j2->preSetCount[1] + j2->preSetCount[2] + j2->preSetCount[3] > 0 && sameAs(*j2);
+      FreeJob(j2);
+    }
+    // Live threads: three helpers read while the primary commits (and reads), many interleavings.
+    for (int rep = 0; rep < 64 && same; ++rep) {
+      Job* j3 = NewJob();
+      if (!j3) {
+        same = false;
+        break;
+      }
+      InitJob(*j3, *w, t);
+      j3->scope = 0x30f;
+      same = BeginBuild(*j3) == kBuildOk;
+      std::atomic<bool> go{false};
+      std::thread hs[kThreads - 1];
+      for (int h = 1; h < kThreads; ++h)
+        hs[h - 1] = std::thread([&, h] {
+          while (!go.load()) _mm_pause();
+          PreChunks(*j3, h);
+        });
+      go = true;
+      same = PreAndCommit(*j3) && same;
+      for (auto& th : hs) th.join();
+      same = same && sameAs(*j3) && j3->commitUs >= 0;
+      FreeJob(j3);
+    }
+    Check(same, "shadow rec stage A: the commit pipelined with the reads (helpers 1-3 reading chunks while the "
+                "primary commits in vector order) gives the single-thread classification, deterministic and threaded");
   }
   // Snapshot (render thread) and stage B.
   TakeSnapshot(*j);
@@ -1690,7 +1754,7 @@ void DeviceMultiTests(Compiler& comp) {
         "shadow rec S4 device: the alpha-tested key maps Diffuse to PS t2, its sampler s15 and its CB slot");
   defrec::Pool pool;
   defrec::PoolConfig pc;
-  pc.workers = 8;  // 0-3 cascades, 4-7 helpers
+  pc.workers = kThreads * kSlots;  // Wk(c, t): cascade c's primary (t 0) and helpers
   pc.cb.mode = defrec::CbMode::kOffsets;
   pc.name = "shadow rec test (4 cascades)";
   g_instDev = &d;
@@ -1734,17 +1798,18 @@ void DeviceMultiTests(Compiler& comp) {
       j.pool[15]->AddRef();
       exec[c] = {nullptr, c};
       j.execObj = &exec[c];
-      j.offBuf[0] = d.offBuf[c];
-      j.offSrv[0] = d.offSrv[c];
-      j.offBuf[1] = d.offBuf[c + 4];
-      j.offSrv[1] = d.offSrv[c + 4];
-      j.splitAllowed = c >= 2;  // cascades 2, 3 share their groups with a helper (only 3 has textured ones)
+      for (int th = 0; th < kThreads; ++th) {
+        j.offBuf[th] = d.offBuf[Wk(c, th)];
+        j.offSrv[th] = d.offSrv[Wk(c, th)];
+      }
+      // Cascade 0 alone, 1 with one helper, 2 with three, 3 with two (only 3 has textured groups).
+      static const uint32_t kHelpers[4] = {0, 1, 3, 2};
+      j.helpers = kHelpers[c];
+      j.splitAllowed = j.helpers > 0;
       j.minSplit = 2;
-      ResetEvent(j.start);
-      ResetEvent(j.go);
-      ResetEvent(j.helperGo);
-      ResetEvent(j.preGo);
-      if (j.splitAllowed) sub &= pool.Submit(c + 4, &HelperMain, &j, nullptr);
+      ResetEvents(j);
+      j.preState.store(kGoWait);
+      for (uint32_t th = 1; th <= j.helpers; ++th) sub &= pool.Submit(Wk(c, th), kHelperMain[th], &j, nullptr);
       sub &= pool.Submit(c, &JobMain, &j, nullptr);
     }
     g_testP1Wait = true;  // the helpers take a share of the untextured groups (deterministic)
@@ -1772,23 +1837,25 @@ void DeviceMultiTests(Compiler& comp) {
     pool.Wait(10000);  // false when a helper had nothing to record: check the workers instead
     g_testP1Wait = false;
     bool waited = sub;
-    for (int c = 0; c < 8; ++c) waited &= !pool.Busy(c);
-    ID3D11CommandList* cl[4] = {};
-    ID3D11CommandList* cl2[4] = {};
-    for (int c = 0; c < 4; ++c) {
-      cl[c] = pool.TakeList(c);
-      cl2[c] = pool.TakeList(c + 4);
-    }
+    for (int c = 0; c < kThreads * kSlots; ++c) waited &= !pool.Busy(c);
+    ID3D11CommandList* cl[4][kThreads] = {};
+    for (int c = 0; c < 4; ++c)
+      for (int th = 0; th < kThreads; ++th) cl[c][th] = pool.TakeList(Wk(c, th));
     bool allOk = waited, replayOk = true, restored = true;
     size_t diffs = 0, written = 0;
-    uint32_t recorded = 0, texRecorded = 0, draws = 0, split = 0;
+    uint32_t recorded = 0, texRecorded = 0, draws = 0, split = 0, lists = 0;
+    std::vector<uint32_t> refs[4];
     for (int c = 0; c < 4 && waited; ++c) {
       Job& j = *jobs[c];
-      allOk &= cl[c] != nullptr && j.recorded > 0 && (!j.helperDrew || cl2[c] != nullptr);
+      const uint32_t joined = j.joined.load();
+      allOk &= cl[c][0] != nullptr && j.recorded > 0;
+      for (int th = 1; th < kThreads; ++th)  // a list exactly for each helper that took a chunk
+        allOk &= (((joined >> th) & 1) != 0) == (cl[c][th] != nullptr) && (cl[c][th] != nullptr) == j.th[th].drew;
+      for (auto* l : cl[c]) lists += l != nullptr;
       recorded += j.recorded;
       texRecorded += j.texRecorded;
-      draws += j.draws + (j.helperDrew ? j.drawsHelper : 0);
-      split += j.helperUsed;
+      draws += j.draws + HelperDraws(j);
+      split += joined != 0;
       // Stock: DCS draws the cascade's casters in order.
       PassSetup(d, d.dsvC[c]);
       g_vt23.clear();
@@ -1801,11 +1868,12 @@ void DeviceMultiTests(Compiler& comp) {
       }
       const std::map<void*, int> stockVt23 = g_vt23;
       const std::vector<uint32_t> ref = ReadDepth(d, d.depthC[c]);
+      refs[c] = ref;
       for (uint32_t v : ref) written += v != 0;
       // Recorded: DCS's loop over the exec list.
       PassSetup(d, d.dsvC[c]);
       g_vt23.clear();
-      for (uint32_t e = 0; e < j.swapCount && cl[c]; ++e) {
+      for (uint32_t e = 0; e < j.swapCount && cl[c][0]; ++e) {
         void* entry = j.swapList[e];
         if (entry == j.execObj) {
           ReplayStreamingRaw(j);
@@ -1813,8 +1881,8 @@ void DeviceMultiTests(Compiler& comp) {
           defrec::PassState before = {}, after = {};
           defrec::Capture(d.imm, &before);
           d.imm->CopyResource(d.ourB7C[c], d.dcsB7);
-          d.imm->ExecuteCommandList(cl[c], TRUE);
-          if (cl2[c]) d.imm->ExecuteCommandList(cl2[c], TRUE);
+          for (ID3D11CommandList* l : cl[c])
+            if (l) d.imm->ExecuteCommandList(l, TRUE);
           defrec::Capture(d.imm, &after);
           restored &= defrec::Equal(before, after);
           defrec::Release(before);
@@ -1836,19 +1904,97 @@ void DeviceMultiTests(Compiler& comp) {
       for (uint32_t v = 0; v < j.vt23Count; ++v) replayOk &= g_vt23[j.vt23[v]] >= 1;
       ReleaseSnapshot(j);
     }
-    printf("     4 cascades: %u casters recorded (%u textured) in %u draws, %u split over a helper, %zu texels "
-           "written, %zu differ\n",
-           recorded, texRecorded, draws, split, written, diffs);
-    const bool p1 = jobs[2]->helperDrew && jobs[2]->drawsHelper > 0 && jobs[2]->texTo == jobs[2]->groupsTex &&
-                    jobs[3]->resolved && !jobs[3]->snapped;  // views from the table, no snapshot
-    Check(allOk && texRecorded > 0 && draws < recorded && split == 2 && p1 && diffs == 0 &&
+    auto bits = [](uint32_t m) {
+      uint32_t n = 0;
+      for (; m; m &= m - 1) ++n;
+      return n;
+    };
+    const uint32_t j2 = jobs[2]->joined.load(), j3 = jobs[3]->joined.load();
+    printf("     4 cascades: %u casters recorded (%u textured) in %u draws on %u lists, %u split over helpers (cascade 2: "
+           "%u helpers took chunks, cascade 3: %u), %zu texels written, %zu differ\n",
+           recorded, texRecorded, draws, lists, split, bits(j2), bits(j3), written, diffs);
+    // Cascade 2 (untextured only) shared phase 1 with two or three helpers (its chunks run out); cascade 3 shared
+    // with its two (textured views from the table, no snapshot).
+    const bool shared = bits(j2) >= 2 && HelperDraws(*jobs[2]) > 0 && jobs[2]->texTo == jobs[2]->groupsTex &&
+                        jobs[3]->groupCount > jobs[3]->groupsTex && bits(j3) == 2 && jobs[3]->resolved &&
+                        !jobs[3]->snapped && jobs[0]->joined.load() == 0;
+    Check(allOk && texRecorded > 0 && draws < recorded && split >= 2 && shared && diffs == 0 &&
               written > 4u * kDepth * kDepth / 100 && restored,
-          "shadow rec S5 device: four cascades on four workers, textured and untextured (cascade 2's untextured and "
-          "cascade 3's groups shared with a helper), DCS's loop over the exec list: depth equals stock bit for bit; "
-          "state restored");
+          "shadow rec S5 device: four cascades on 0-3 helpers each, textured and untextured (both phases' groups "
+          "shared in chunks, one list per helper that took a chunk), DCS's loop over the exec list: depth equals "
+          "stock bit for bit; state restored");
     Check(replayOk, "shadow rec S4 device: streaming requests reach the same textures as stock");
-    for (auto*& l : cl) SafeRel(l);
-    for (auto*& l : cl2) SafeRel(l);
+    for (auto& row : cl)
+      for (auto*& l : row) SafeRel(l);
+    // Free-running rounds (no test wait): the helpers race the primary for
+    // stage A chunks, both phases' chunks, the closes and the end; helper
+    // counts rotate. Every round's lists + residual casters equal stock.
+    int rounds = 0, badRounds = 0;
+    uint32_t joinedSeen = 0;
+    for (int round = 0; round < 40 && waited && allOk; ++round, ++rounds) {
+      for (int c = 0; c < 4; ++c) {
+        Job& j = *jobs[c];
+        j.helpers = static_cast<uint32_t>((c + round) % kThreads);
+        j.splitAllowed = j.helpers > 0;
+        j.result = kBuildNone;
+        j.snapped = j.needGo = j.startedEarly = false;
+        j.stageA.store(0);
+        j.goState.store(kGoWait);
+        j.recPhase.store(kRpWait);
+        j.joined.store(0);
+        j.preState.store(kGoWait);
+        j.phase.store(kJobEmpty);
+        ResetEvents(j);
+        j.startState.store(kStartArmed);
+        bool ok = true;
+        for (uint32_t th = 1; th <= j.helpers; ++th) ok &= pool.Submit(Wk(c, th), kHelperMain[th], &j, nullptr);
+        ok &= pool.Submit(c, &JobMain, &j, nullptr);
+        allOk &= ok;
+      }
+      for (int c = 3; c >= 0; --c) StartJob(*jobs[c], desc[c], false);
+      for (int spin = 0; spin < 10000; ++spin) {
+        bool busy = false;
+        for (int k = 0; k < kThreads * kSlots; ++k) busy |= pool.Busy(k);
+        if (!busy) break;
+        Sleep(1);
+      }
+      ID3D11CommandList* rl[4][kThreads] = {};
+      for (int c = 0; c < 4; ++c)
+        for (int th = 0; th < kThreads; ++th) rl[c][th] = pool.TakeList(Wk(c, th));
+      bool good = true;
+      for (int c = 0; c < 4; ++c) {
+        Job& j = *jobs[c];
+        const uint32_t joined = j.joined.load();
+        joinedSeen |= joined;
+        good &= rl[c][0] != nullptr && j.recorded > 0 && !j.chunkFail.load();
+        for (int th = 1; th < kThreads; ++th) good &= (((joined >> th) & 1) != 0) == (rl[c][th] != nullptr);
+        PassSetup(d, d.dsvC[c]);
+        for (uint32_t e = 0; e < j.swapCount && rl[c][0]; ++e) {
+          void* entry = j.swapList[e];
+          if (entry == j.execObj) {
+            d.imm->CopyResource(d.ourB7C[c], d.dcsB7);
+            for (ID3D11CommandList* l : rl[c])
+              if (l) d.imm->ExecuteCommandList(l, TRUE);
+            continue;
+          }
+          const int i = indexOf(entry);
+          if (w->Smr(i))
+            DrawDcs(d, *w, i);
+          else
+            DrawOther(d);
+        }
+        good &= ReadDepth(d, d.depthC[c]) == refs[c];
+      }
+      badRounds += good ? 0 : 1;
+      for (auto& row : rl)
+        for (auto*& l : row) SafeRel(l);
+    }
+    printf("     %d free-running rounds (helpers rotating 0-3 per cascade), %d differ or fail; helper slots that took "
+           "chunks: 0x%x\n",
+           rounds, badRounds, joinedSeen);
+    Check(rounds == 40 && badRounds == 0 && joinedSeen != 0,
+          "shadow rec S5 device: free-running helpers (no test wait, 0-3 per job): every round equals stock bit for "
+          "bit");
   }
   g_instDev = nullptr;
   pool.Stop();
@@ -1866,6 +2012,7 @@ void Run() {
   StreamTests();
   JobTests();
   PsMapTests();
+  SchedulingTests();
   TextureJobTests();
   SortSiteTests();
   Compiler c;

@@ -512,7 +512,7 @@ function buildFields() {
     {prop:'flightDisplayMode',get:p => displayModeKey(p),set:(p,v) => { const [w,h,hz] = v.split(/[x@]/).map(Number); p.flightDisplayWidth = w; p.flightDisplayHeight = h; p.flightDisplayRefresh = hz; }});
   // Engine Optimizations page: the DcsQvCull module, installed in Saved Games with the profile.
   const engine = p => p.engineOptimizations;
-  c = card('engineControls','Engine Optimizations','Measured together on a busy airfield in VR: about 60% more FPS, p95 frame time 39% lower, and the GPU becomes the limit. No visual change.');
+  c = card('engineControls','Engine Optimizations','Measured together on a busy airfield in VR: about 50 to 60% more FPS depending on the scene, p95 frame time about 35% lower, and the GPU becomes the limit. No visual change.');
   field(c,'engineOptimizations','Engine Optimizations','Launch DCS (or Apply) installs a small module that DCS loads by itself from Saved Games\\DCS\\Scripts, so it stays on every time DCS starts, also from Steam or a desktop shortcut, until you turn it off or use Back to stock DCS. Nothing in the DCS install changes. Tested on DCS 2.9.30 in single player.','toggle');
   field(c,'engineShaderTimeCache','Streaming timer cache','DCS reads a high-resolution clock on every texture bind, only to timestamp texture-streaming use. The module serves it from a value refreshed every millisecond; streaming decisions are unchanged. Measured: 5 to 6% more FPS.','toggle',null,engine);
   field(c,'enginePartitionBoost','Culling partition boost','DCS splits the search for visible objects into 12 uneven tasks and waits for the slowest. The module splits the same work into 16; the same objects are found. Measured: 2% more FPS, p95 frame time 3% lower.','toggle',null,engine);

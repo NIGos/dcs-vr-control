@@ -169,9 +169,77 @@ void Device() {
   dev->Release();
 }
 
+// Pipeline statistics: aggregation per kind and call (synthetic), then the
+// query pairs on a real device (outermost passes only, read with the frame).
+void Stats() {
+  std::vector<gpt::Done> done(2);
+  for (int f = 0; f < 2; ++f) {
+    gpt::Done& d = done[f];
+    d.serial = 3 + f;
+    d.freq = 1000000;
+    d.ev = {{kA, gpt::kBegin, 0}, {kA, gpt::kEnd, 0}, {kA, gpt::kBegin, 0}, {kA, gpt::kEnd, 0}};
+    d.ticks = {10, 20, 30, 40};
+    if (f == 0) d.stats = {{kA, 1, 2, 3, 4, 0, 5}, {kA, 10, 20, 30, 40, 0, 50}};  // frame 1: statistics late
+  }
+  gpt::Result r = gpt::Analyze(done, &NameOf);
+  const gpt::KindPipe& kp = r.pipe["A"];
+  Check(r.statFrames == 1 && kp.frames == 1 && kp.sum.ps == 44 && kp.sum.samples == 55 && kp.occ.size() == 2 &&
+            kp.occ[1].cPrims == 30 && kp.occN[0] == 1,
+        "gpu pass timing: pipeline statistics per kind and per call");
+
+  ID3D11Device* dev = nullptr;
+  ID3D11DeviceContext* ctx = nullptr;
+  D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev,
+                               nullptr, &ctx)) &&
+      FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
+                               &ctx))) {
+    Check(false, "gpu pass timing: create a D3D11 device (statistics)");
+    return;
+  }
+  std::atomic<uint64_t> frames{0};
+  gpt::g_statsOn = true;
+  gpt::g_light = true;  // timestamps only: no context-op hooks (statistics are off in light mode)
+  Check(gpt::Prepare(dev, ctx, &frames, false), "gpu pass timing: prepare with statistics");
+  gpt::g_light = false;
+  Check(gpt::g_statsOn.load() && gpt::g_ring[0].pq[0] && gpt::g_ring[0].oq[0],
+        "gpu pass timing: statistics queries created");
+  gpt::g_xrTid = 0;
+  gpt::g_want = 1;
+  for (int f = 0; f < 20; ++f) {
+    ++frames;
+    gpt::OnBoundary(kA, true, 0);
+    gpt::OnBoundary(kB, true, 1);
+    gpt::OnBoundary(kB, false, 1);
+    gpt::OnBoundary(kA, false, 0);
+    ctx->Flush();
+    Sleep(3);
+  }
+  Sleep(50);
+  gpt::g_want = 0;
+  gpt::OnBoundary(kA, true, 0);  // deactivates (last reads, hooks out, queries released)
+  std::vector<gpt::Done> got;
+  {
+    std::lock_guard<std::mutex> lock(gpt::g_doneMutex);
+    got.swap(gpt::g_done);
+  }
+  r = gpt::Analyze(got, &NameOf);
+  printf("     statistics: %d of %zu read frames (%llu late)\n", r.statFrames, got.size(),
+         static_cast<unsigned long long>(gpt::g_s.statsLate));
+  Check(r.statFrames > 0 && r.pipe.count("A") && !r.pipe.count("B") && r.pipe["A"].occ.size() == 1,
+        "gpu pass timing: statistics for the outermost pass only, read with the frames");
+  Check(!gpt::g_queriesReady.load() && !gpt::g_ring[0].pq[0], "gpu pass timing: statistics queries released");
+  gpt::g_statsOn = false;
+  gpt::g_ctx = nullptr;
+  gpt::g_dev = nullptr;
+  ctx->Release();
+  dev->Release();
+}
+
 void Run() {
   Synthetic();
   Device();
+  Stats();
 }
 
 }  // namespace gpttest

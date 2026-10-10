@@ -34,15 +34,42 @@
 // shadow_rec.h's ExecuteCommandList inside the cascade pass lands between that
 // pass's two timestamps, so the replay is timed with the pass.
 //
+// Pipeline statistics ([Suite] GpuPassStats, default 0, only with
+// GpuPassTiming and never in light mode): one D3D11_QUERY_PIPELINE_STATISTICS
+// and one D3D11_QUERY_OCCLUSION bracket every pass that starts while no such
+// pair is open (the outermost passes; the pairs never overlap), read back with
+// the frame's timestamps (a frame whose statistics are not ready yet keeps
+// its timestamps). Reported per pass kind and, for kinds with several calls,
+// per call: input primitives, VS invocations, rasterised primitives, PS
+// invocations, depth/stencil-passing samples (shadow cascades: the depth
+// writes, compared with the cascade's viewport area), CS invocations.
+//
+// Identification: kinds whose short name is shared by unrelated passes
+// (PassData, SimplePassData) are listed per call with the full RTTI name and
+// the code and vtable pointers found in the pass object (module+RVA), so the
+// costly calls can be looked up in the binaries.
+//
 // Included once from main.cpp after pass_timing.h, d3dstate.h, shadow_inst.h,
-// split_filter.h and the globals it uses (Log, g_qpcToUs, HookSlot).
+// split_filter.h, pass_flush.h and the globals it uses (Log, g_qpcToUs, HookSlot).
 #pragma once
+
+// Measure-only probes defined later (frame_start.h, run_threads.h); each
+// returns at once unless its suite counter is running.
+namespace fstart {
+void OnXrEndEnter(DWORD tid);
+void OnXrEndReturn(DWORD tid);
+void OnTopPass(int64_t qpc, uint64_t gpuSerial);
+}  // namespace fstart
+namespace rthreads {
+void OnXrEndEnter(DWORD tid);
+}  // namespace rthreads
 
 namespace gpt {
 
 constexpr int kRing = 6;            // frames in flight
 constexpr int kMaxEvents = 2048;    // timestamps per frame
 constexpr int kMaxDepth = 64;
+constexpr int kMaxStats = 256;      // statistics query pairs per frame (outermost passes)
 
 enum EvType : uint8_t { kBegin, kEnd, kXrBegin, kXrEnd };
 struct Event {
@@ -67,12 +94,17 @@ struct Counts {
 };
 
 // A frame read back: its events and their GPU ticks.
+struct PassStats {
+  void* pass = nullptr;
+  uint64_t ia = 0, vs = 0, cPrims = 0, ps = 0, cs = 0, samples = 0;  // input prims, VS, rasterised prims, PS, CS, samples passed
+};
 struct Done {
   uint64_t serial = 0;
   uint64_t freq = 0;
   int64_t qpc = 0;  // CPU QPC when the frame opened (first top-level pass)
   std::vector<Event> ev;
   std::vector<uint64_t> ticks;
+  std::vector<PassStats> stats;  // GpuPassStats: outermost passes in order (empty when off or not ready)
 };
 
 struct FrameSlot {
@@ -84,6 +116,13 @@ struct FrameSlot {
   bool pending = false;  // ended, not read yet
   uint64_t serial = 0;
   int64_t qpc = 0;
+  // GpuPassStats
+  ID3D11Query* pq[kMaxStats] = {};  // pipeline statistics
+  ID3D11Query* oq[kMaxStats] = {};  // occlusion (samples passed)
+  void* sPass[kMaxStats] = {};
+  int ns = 0;
+  int sOpen = -1, sDepth = 0;
+  bool sBroken = false;  // a pair was ended by the frame end, not by its pass
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +141,9 @@ std::atomic<int> g_want{0};          // suite: 1 measure, 0 stop
 // no context-op hooks, no table re-patching, no per-pass op counters; set
 // before g_want and fixed while active.
 std::atomic<bool> g_light{false};
+// GpuPassStats: set by the suite before Measure; g_statsOn is fixed per session.
+std::atomic<bool> g_statsWanted{false};
+std::atomic<bool> g_statsOn{false};
 // xrEndFrame wrapper wall time on the render thread (QPC ticks, calls), while
 // the xrEndFrame hook is installed; read as differences.
 std::atomic<uint64_t> g_xrWallTicks{0}, g_xrWallCalls{0};
@@ -125,7 +167,7 @@ std::atomic<uint64_t> g_outside[kOpCount];
 
 struct Stats {
   uint64_t framesOpened, framesRead, disjoint, truncated, dropped, missing, rehooks, xrCalls, xrNested,
-      offThread, createFailed, rearms;
+      offThread, createFailed, rearms, statsRead, statsLate, statsFull;
 };
 Stats g_s{};
 
@@ -304,6 +346,14 @@ void ReleaseQueries() {
       if (q) q->Release();
       q = nullptr;
     }
+    for (auto*& q : f.pq) {
+      if (q) q->Release();
+      q = nullptr;
+    }
+    for (auto*& q : f.oq) {
+      if (q) q->Release();
+      q = nullptr;
+    }
     f.pending = false;
   }
   g_queriesReady = false;
@@ -328,7 +378,17 @@ bool CreateQueries() {
         ReleaseQueries();
         return false;
       }
+    if (g_statsOn.load()) {
+      D3D11_QUERY_DESC pd{D3D11_QUERY_PIPELINE_STATISTICS, 0};
+      D3D11_QUERY_DESC od{D3D11_QUERY_OCCLUSION, 0};
+      for (int i = 0; i < kMaxStats && g_statsOn.load(); ++i)
+        if ((!f.pq[i] && FAILED(g_dev->CreateQuery(&pd, &f.pq[i]))) ||
+            (!f.oq[i] && FAILED(g_dev->CreateQuery(&od, &f.oq[i]))))
+          g_statsOn = false;  // timestamps only (the created ones are released with the rest)
+    }
     f.n = 0;
+    f.ns = 0;
+    f.sOpen = -1;
     f.pending = false;
   }
   g_queriesReady = true;
@@ -359,6 +419,21 @@ bool TryRead(FrameSlot& f) {
       return true;
     }
   d.ev.assign(f.ev, f.ev + f.n);
+  if (g_statsOn.load(std::memory_order_relaxed) && f.ns && !f.sBroken) {
+    d.stats.resize(f.ns);
+    for (int i = 0; i < f.ns; ++i) {
+      D3D11_QUERY_DATA_PIPELINE_STATISTICS p{};
+      UINT64 smp = 0;
+      if (g_ctx->GetData(f.pq[i], &p, sizeof(p), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+          g_ctx->GetData(f.oq[i], &smp, sizeof(smp), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) {
+        d.stats.clear();  // not ready with the timestamps: this frame's timing is kept, its statistics dropped
+        ++g_s.statsLate;
+        break;
+      }
+      d.stats[i] = {f.sPass[i], p.IAPrimitives, p.VSInvocations, p.CPrimitives, p.PSInvocations, p.CSInvocations, smp};
+    }
+    if (!d.stats.empty()) ++g_s.statsRead;
+  }
   ++g_s.framesRead;
   std::lock_guard<std::mutex> lock(g_doneMutex);
   g_done.push_back(std::move(d));
@@ -393,6 +468,9 @@ void OpenFrame() {
     f.pending = false;
   }
   f.n = 0;
+  f.ns = 0;
+  f.sOpen = -1;
+  f.sBroken = false;
   f.truncated = false;
   f.serial = g_rSerial++;
   LARGE_INTEGER q;
@@ -405,9 +483,37 @@ void OpenFrame() {
   ++g_s.framesOpened;
 }
 
+// GpuPassStats: the outermost pass's query pair (render thread, non-light).
+void StatsBoundary(void* pass, bool begin, int depth) {
+  if (g_rOpen < 0) return;
+  FrameSlot& f = g_ring[g_rOpen];
+  if (begin) {
+    if (f.sOpen >= 0) return;
+    if (f.ns >= kMaxStats) {
+      ++g_s.statsFull;
+      return;
+    }
+    g_ctx->Begin(f.pq[f.ns]);
+    g_ctx->Begin(f.oq[f.ns]);
+    f.sPass[f.ns] = pass;
+    f.sOpen = f.ns++;
+    f.sDepth = depth;
+  } else if (f.sOpen >= 0 && depth == f.sDepth && f.sPass[f.sOpen] == pass) {
+    g_ctx->End(f.pq[f.sOpen]);
+    g_ctx->End(f.oq[f.sOpen]);
+    f.sOpen = -1;
+  }
+}
+
 void CloseFrame() {
   if (g_rOpen < 0) return;
   FrameSlot& f = g_ring[g_rOpen];
+  if (f.sOpen >= 0) {
+    g_ctx->End(f.pq[f.sOpen]);
+    g_ctx->End(f.oq[f.sOpen]);
+    f.sOpen = -1;
+    f.sBroken = true;
+  }
   g_ctx->End(f.disjoint);
   f.pending = true;
   g_rOpen = -1;
@@ -439,6 +545,12 @@ bool Activate() {
 // open one is abandoned, the hooks go and the queries are released.
 void Deactivate() {
   if (g_rOpen >= 0) {
+    FrameSlot& f = g_ring[g_rOpen];
+    if (f.sOpen >= 0) {
+      g_ctx->End(f.pq[f.sOpen]);
+      g_ctx->End(f.oq[f.sOpen]);
+      f.sOpen = -1;
+    }
     g_ctx->End(g_ring[g_rOpen].disjoint);
     g_rOpen = -1;
   }
@@ -482,19 +594,25 @@ void OnBoundary(void* pass, bool begin, int depth) {
   }
   LARGE_INTEGER a, b;
   QueryPerformanceCounter(&a);
-  if (begin && depth == 0) TopBoundary();
+  if (begin && depth == 0) {
+    TopBoundary();
+    fstart::OnTopPass(a.QuadPart, g_active.load(std::memory_order_relaxed) && g_rOpen >= 0 ? g_ring[g_rOpen].serial
+                                                                                            : ~0ull);
+  }
   if (g_active.load(std::memory_order_relaxed) && g_light.load(std::memory_order_relaxed)) {
     Stamp(begin ? kBegin : kEnd, pass, depth);
   } else if (g_active.load(std::memory_order_relaxed)) {
     if (g_opsHooked.load(std::memory_order_relaxed)) RepatchOps();
     if (begin) {
       Stamp(kBegin, pass, depth);
+      if (g_statsOn.load(std::memory_order_relaxed)) StatsBoundary(pass, true, depth);
       if (g_rSp < kMaxDepth) g_rStack[g_rSp] = t_cur;
       ++g_rSp;
       t_cur = &g_passCounts[pass];
     } else {
       if (g_rSp > 0 && --g_rSp < kMaxDepth) t_cur = g_rStack[g_rSp];
       if (g_rSp == 0) t_cur = nullptr;
+      if (g_statsOn.load(std::memory_order_relaxed)) StatsBoundary(pass, false, depth);
       Stamp(kEnd, pass, depth);
     }
   }
@@ -522,11 +640,15 @@ uint64_t __fastcall XrEndHook(void* a, void* b, void* c, void* d) {
   const bool on = g_active.load(std::memory_order_relaxed) && tid == g_rt.load(std::memory_order_relaxed);
   LARGE_INTEGER w0, w1;
   if (!on) {
+    fstart::OnXrEndEnter(tid);
+    rthreads::OnXrEndEnter(tid);
     QueryPerformanceCounter(&w0);
     const uint64_t r = g_xrOrig(a, b, c, d);
     QueryPerformanceCounter(&w1);
+    fstart::OnXrEndReturn(tid);
     g_xrWallTicks.fetch_add(static_cast<uint64_t>(w1.QuadPart - w0.QuadPart), std::memory_order_relaxed);
     g_xrWallCalls.fetch_add(1, std::memory_order_relaxed);
+    pflush::NoteXrEnd();  // bench mode 30's frame-start probe
     return r;
   }
   const bool light = g_light.load(std::memory_order_relaxed);
@@ -540,9 +662,12 @@ uint64_t __fastcall XrEndHook(void* a, void* b, void* c, void* d) {
   if (!light) t_cur = &g_xrCounts;
   QueryPerformanceCounter(&t1);
   g_rOverheadTicks += t1.QuadPart - t0.QuadPart;
-  w0 = t1;
+  fstart::OnXrEndEnter(tid);
+  rthreads::OnXrEndEnter(tid);
+  QueryPerformanceCounter(&w0);
   const uint64_t r = g_xrOrig(a, b, c, d);
   QueryPerformanceCounter(&t0);
+  fstart::OnXrEndReturn(tid);
   g_xrWallTicks.fetch_add(static_cast<uint64_t>(t0.QuadPart - w0.QuadPart), std::memory_order_relaxed);
   g_xrWallCalls.fetch_add(1, std::memory_order_relaxed);
   t_cur = g_rSavedCur;
@@ -552,6 +677,7 @@ uint64_t __fastcall XrEndHook(void* a, void* b, void* c, void* d) {
   g_rXrSeen = true;
   QueryPerformanceCounter(&t1);
   g_rOverheadTicks += t1.QuadPart - t0.QuadPart;
+  pflush::NoteXrEnd();
   return r;
 }
 
@@ -608,6 +734,14 @@ struct KindStat {
   uint64_t calls = 0;
   std::vector<double> occMs;     // exclusive GPU ms by call order within the frame
   std::vector<uint64_t> occN;
+  std::vector<void*> occPass;    // the pass object of each call (last frame seen)
+};
+// GpuPassStats per kind (sums over the frames that have statistics).
+struct KindPipe {
+  uint64_t frames = 0;  // frames with statistics in which the kind ran
+  PassStats sum;
+  std::vector<PassStats> occ;   // by call order (outermost calls of the kind)
+  std::vector<uint64_t> occN;
 };
 struct Result {
   int frames = 0;
@@ -619,6 +753,8 @@ struct Result {
   std::vector<double> period;    // first pass start -> next frame's first pass start
   std::vector<double> afterXr;   // xrEndFrame end (else last pass end) -> next frame's first pass start
   uint64_t unmatched = 0;
+  int statFrames = 0;            // frames with pipeline statistics
+  std::map<std::string, KindPipe> pipe;
 };
 
 Result Analyze(std::vector<Done>& done, std::string (*nameOf)(void*)) {
@@ -682,9 +818,11 @@ Result Analyze(std::vector<Done>& done, std::string (*nameOf)(void*)) {
           if (k.occMs.size() <= n) {
             k.occMs.resize(n + 1, 0.0);
             k.occN.resize(n + 1, 0);
+            k.occPass.resize(n + 1, nullptr);
           }
           k.occMs[n] += excl * ms;
           ++k.occN[n];
+          k.occPass[n] = e.pass;
           break;
         }
         case kXrBegin:
@@ -696,6 +834,26 @@ Result Analyze(std::vector<Done>& done, std::string (*nameOf)(void*)) {
       }
     }
     r.unmatched += st.size();
+    if (!d.stats.empty()) {
+      ++r.statFrames;
+      std::map<std::string, int> socc;
+      for (const PassStats& p : d.stats) {
+        const std::string& nm = name(p.pass);
+        KindPipe& kp = r.pipe[nm];
+        const size_t n = static_cast<size_t>(socc[nm]++);
+        if (n == 0) ++kp.frames;
+        kp.sum.ia += p.ia, kp.sum.vs += p.vs, kp.sum.cPrims += p.cPrims, kp.sum.ps += p.ps, kp.sum.cs += p.cs;
+        kp.sum.samples += p.samples;
+        if (kp.occ.size() <= n) {
+          kp.occ.resize(n + 1);
+          kp.occN.resize(n + 1, 0);
+        }
+        PassStats& o = kp.occ[n];
+        o.pass = p.pass;
+        o.ia += p.ia, o.vs += p.vs, o.cPrims += p.cPrims, o.ps += p.ps, o.cs += p.cs, o.samples += p.samples;
+        ++kp.occN[n];
+      }
+    }
     for (auto& kv : local) {
       KindStat& k = r.kinds[kv.first];
       if (k.perFrame.size() <= static_cast<size_t>(fi)) k.perFrame.resize(fi + 1, 0.0);
@@ -786,6 +944,134 @@ void Shutdown() {
   g_active = false;
 }
 
+// "Module.dll+0x1234" for an address inside a loaded image (false: none).
+bool ModRva(const void* p, char* out, size_t cap) {
+  HMODULE m = nullptr;
+  if (reinterpret_cast<uintptr_t>(p) < 0x10000 ||
+      !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          static_cast<LPCWSTR>(p), &m) ||
+      !m)
+    return false;
+  wchar_t path[MAX_PATH] = {};
+  GetModuleFileNameW(m, path, MAX_PATH);
+  const wchar_t* base = wcsrchr(path, L'\\');
+  base = base ? base + 1 : path;
+  snprintf(out, cap, "%ls+0x%llx", base,
+           static_cast<unsigned long long>(static_cast<const uint8_t*>(p) - reinterpret_cast<const uint8_t*>(m)));
+  return true;
+}
+
+bool Readable(const void* p) {
+  MEMORY_BASIC_INFORMATION mbi{};
+  return reinterpret_cast<uintptr_t>(p) >= 0x10000 && VirtualQuery(p, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+         !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+}
+
+// A pass object's identity (suite thread, SEH): full RTTI name, then up to 6
+// pointers into loaded images within its first 0x200 bytes (its vtable, code
+// pointers, callbacks), and the vtables of heap objects it points to
+// (std::function targets, callback objects), as +offset=module+RVA.
+void DescribeRaw(void* pass, char* out, size_t cap) {
+  ptiming::RttiRaw(pass, out, cap);
+  size_t len = strlen(out);
+  // The pass name copied inline by the pass constructor (length at +8, at most
+  // 32 chars at +0x10; GraphicsCore 0xa9310 for SimplePassData [V], R21):
+  // the only thing that tells the addSimpleRenderingPass calls apart.
+  {
+    const uint8_t* b = static_cast<const uint8_t*>(pass);
+    const uint64_t n = *reinterpret_cast<const uint64_t*>(b + 8);
+    bool printable = n > 0 && n <= 32;
+    for (uint64_t i = 0; printable && i < n; ++i) printable = b[0x10 + i] >= 0x20 && b[0x10 + i] <= 0x7e;
+    if (printable && b[0x10 + n] == 0 && len + n + 12 < cap)
+      len += snprintf(out + len, cap - len, " name \"%.*s\"", static_cast<int>(n), reinterpret_cast<const char*>(b + 0x10));
+  }
+  const void* const* q = static_cast<const void* const*>(pass);
+  int hits = 0;
+  char m[200];
+  for (int i = 0; i < 64 && hits < 6 && len + 8 < cap; ++i) {
+    const void* v = q[i];
+    if (ModRva(v, m, sizeof(m))) {
+      len += snprintf(out + len, cap - len, " +0x%x=%s", i * 8, m);
+      ++hits;
+      continue;
+    }
+    if (!Readable(v)) continue;
+    const void* inner = *static_cast<const void* const*>(v);
+    if (ModRva(inner, m, sizeof(m))) {
+      len += snprintf(out + len, cap - len, " +0x%x->%s", i * 8, m);
+      ++hits;
+    }
+    if (len >= cap) len = cap - 1;
+  }
+}
+
+void DescribeGuarded(void* pass, char* out, size_t cap) {
+  __try {
+    DescribeRaw(pass, out, cap);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    strncpy_s(out, cap, "(pass object not readable)", _TRUNCATE);
+  }
+}
+
+// CascadeShadowPassData: the cascade index at pass+0x60 (data+0, R17 1), -1 if unreadable.
+int CascadeOfGuarded(void* pass) {
+  __try {
+    const int v = *reinterpret_cast<const int*>(static_cast<const uint8_t*>(pass) + 0x60);
+    return v >= 0 && v < 8 ? v : -1;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+
+// GpuPassStats report: per kind (sorted like the timing rows) and per call.
+void ReportPipe(const Result& r, const std::vector<std::string>& order) {
+  if (!r.statFrames) {
+    if (g_statsOn.load() || g_s.statsLate)
+      Log("  pipeline statistics: no frame with complete statistics (%llu frames late, %llu pairs over the limit)",
+          static_cast<unsigned long long>(g_s.statsLate), static_cast<unsigned long long>(g_s.statsFull));
+    return;
+  }
+  const double sf = r.statFrames, M = 1e6;
+  Log("  pipeline statistics: %d frames (%llu late, %llu passes over the %d-pair limit); outermost passes, millions "
+      "per frame (samples = depth/stencil-passing samples, all bound targets):",
+      r.statFrames, static_cast<unsigned long long>(g_s.statsLate), static_cast<unsigned long long>(g_s.statsFull),
+      kMaxStats);
+  Log("    %-44s %9s %9s %9s %9s %9s %9s", "pass kind", "IA prims", "VS inv", "raster", "PS inv", "samples", "CS inv");
+  for (const std::string& nm : order) {
+    auto it = r.pipe.find(nm);
+    if (it == r.pipe.end()) continue;
+    const PassStats& t = it->second.sum;
+    Log("    %-44.44s %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f", nm.c_str(), t.ia / sf / M, t.vs / sf / M, t.cPrims / sf / M,
+        t.ps / sf / M, t.samples / sf / M, t.cs / sf / M);
+  }
+  Log("  pipeline statistics per call (millions per call; kinds with several calls and >= 0.1 M PS or samples):");
+  for (const std::string& nm : order) {
+    auto it = r.pipe.find(nm);
+    if (it == r.pipe.end() || it->second.occ.size() < 2) continue;
+    const KindPipe& kp = it->second;
+    const bool shadow = nm.find("(shadow)") != std::string::npos;
+    for (size_t n = 0; n < kp.occ.size() && n < 32; ++n) {
+      const PassStats& o = kp.occ[n];
+      const double c = static_cast<double>(std::max<uint64_t>(1, kp.occN[n]));
+      if ((o.ps + o.samples) / c < 0.1 * M) continue;
+      char extra[160] = "";
+      if (shadow) {
+        const int casc = CascadeOfGuarded(o.pass);
+        double area = 0;
+        if (casc >= 0 && casc < shrec::kSlots && shrec::g_casc[casc].learn.target)
+          area = static_cast<double>(shrec::g_casc[casc].learn.vp[0].Width) * shrec::g_casc[casc].learn.vp[0].Height;
+        if (area > 0)
+          snprintf(extra, sizeof(extra), "  cascade %d, viewport %.0f x %.0f: %.2f depth writes per texel", casc,
+                   shrec::g_casc[casc].learn.vp[0].Width, shrec::g_casc[casc].learn.vp[0].Height, o.samples / c / area);
+        else
+          snprintf(extra, sizeof(extra), "  cascade %d", casc);
+      }
+      Log("    %-30.30s #%-2zu IA %8.3f VS %8.3f raster %8.3f PS %8.3f samples %8.3f%s", nm.c_str(), n, o.ia / c / M,
+          o.vs / c / M, o.cPrims / c / M, o.ps / c / M, o.samples / c / M, extra);
+    }
+  }
+}
+
 void Report(uint64_t quadFrames, const std::map<std::string, ptiming::Stat>& cpu) {
   std::vector<Done> done;
   {
@@ -854,6 +1140,25 @@ void Report(uint64_t quadFrames, const std::map<std::string, ptiming::Stat>& cpu
     Log("    %-36.36s%s", w.name.c_str(), line.c_str());
   }
   Log("    (* = that call happened in fewer than 90%% of the frames)");
+  // Calls of kinds whose short name several unrelated passes share.
+  for (const Row& w : rows) {
+    if (w.name != "PassData" && w.name != "SimplePassData") continue;
+    Log("  %s calls >= 0.02 ms: full RTTI name, then image pointers in the pass object (+offset=module+RVA; "
+        "+offset->: the vtable of an object it points to):",
+        w.name.c_str());
+    for (size_t n = 0; n < w.k->occMs.size() && n < w.k->occPass.size(); ++n) {
+      const double msn = w.k->occMs[n] / f;
+      if (msn < 0.02 || !w.k->occPass[n]) continue;
+      char desc[1024] = {};
+      DescribeGuarded(w.k->occPass[n], desc, sizeof(desc));
+      Log("    #%-2zu %.3f ms: %s", n, msn, desc);
+    }
+  }
+  {
+    std::vector<std::string> order;
+    for (const Row& w : rows) order.push_back(w.name);
+    ReportPipe(r, order);
+  }
   // Context ops by pass kind (innermost pass), per measured frame.
   std::map<std::string, Counts> byName;
   for (auto& kv : g_passCounts) {
@@ -915,6 +1220,7 @@ bool Begin(std::atomic<uint64_t>& frameCounter, bool light) {
     if (static_cast<ID3D11DeviceContext*>(c) != ctx)
       Log("  gpu pass timing: note: the split filter's context %p is not the device's immediate context %p",
           static_cast<void*>(c), static_cast<void*>(ctx));
+  g_statsOn = g_statsWanted.load() && !light;
   if (!ctx || !Prepare(dev, ctx, &frameCounter, shadowinst::g_deviceSingleThreaded)) {
     if (ctx) ctx->Release();
     dev->Release();
@@ -960,6 +1266,7 @@ void End() {
   }
   if (g_s.createFailed) Log("  gpu pass timing: could not start on the render thread (queries or context hooks)");
   g_light = false;
+  g_statsOn = false;
   g_sessCtx->Release();
   g_sessDev->Release();
   g_sessCtx = nullptr;

@@ -39,6 +39,30 @@
 //    BM_ALPHA_TEST (A2C) draws besides BM_NONE. Default 0x10004: execution #2
 //    (the heaviest in the S0 GPU profile, 2.7 ms, and later in the frame than
 //    #0, so its job has more lead), BM_NONE and A2C.
+//  - Execution identity (R24 2): SceneRenderer adds per main viewport up to
+//    three G-buffer passes, each with its own collection: SM_GBUFFER_PBR_COCKPIT
+//    (4, F1 only, first), SM_GBUFFER_PBR (0) and SM_GBUFFER_PBR_DECAL (3); the
+//    MFD sensor views (TV/FLIR/NVD, alternate frames) run the same view setup
+//    before the main viewports [V SceneRenderer 0x39020, 0x22c8f, 0x23bdf]. So
+//    plain ordinals shift in F1 and on MFD frames. A slot is bound to a
+//    collection identity instead: (shading model, viewport tag, rank among
+//    the frame's collections with both equal), read from the render graph's
+//    collection descriptors [V GraphicsCore 0x56a60, 0x40a20, 0x50fa4]. The
+//    scope bits keep their meaning: bit o = the o-th non-cockpit execution of
+//    a base frame (one with no more executions than the frame before, seen
+//    twice with the same sequence), which is the plain ordinal in F2. [Model]
+//    GBufferRecorderByOrdinal=1: the plain ordinal (before R24).
+//  - Cockpit ([Model] GBufferRecorderCockpit, default 0; R24 4): for each
+//    scoped SM_GBUFFER_PBR execution, its view's cockpit execution in slot
+//    s + 4, and cockpit items (renderable byte 0x64) recorded with the
+//    normal_cockpit* technique [mat+0x1e0], P0 (stencil ref 40 from DCS's own
+//    state, as every key) [V NGModel 0x16015-0x160b2: the per-draw writes are
+//    the same, 0x190 is not written on the opaque pass-1 route]. A material
+//    drawn both in and out of the cockpit in one vector stays DCS's. A
+//    render-target texture of a segment must not be a target of the pass
+//    (else the segment is stock); whether it was drawn to since its last mip
+//    generation is counted at the exec entries (the writer-before-reader
+//    order, R24 3.4).
 //  - Recordable (S3): NGModel SceneRenderable items with ModelMaterialMT,
 //    model pass 1, opaque (props+0x33 == 0), not cockpit (ctx byte 0), blend
 //    mode in scope, key and mesh probed, sbPositions page view present, every
@@ -129,7 +153,8 @@ constexpr uint32_t kCbOff = 0x90, kCbLen = 0x130, kPsoCb = 0xfc;
 constexpr uint32_t kMatrixCb = 0x20, kMatrixLen = 0x40;  // mat+0xb0..0xef = item+0x60..0x9c
 constexpr uint32_t kRatioCb = 0x80, kRatioLen = 12;      // mat+0x110..0x11b
 constexpr uint32_t kDbgBits = 0x1 | 0x4 | 0x10 | 0x20 | 0x40;  // renderer+0x2120: skips (0x20: no sbPositions set)
-constexpr int kSlots = 4;
+constexpr int kSlots = 8;       // slots s < 4: the scope's executions; s + 4: the cockpit execution of slot s's view
+constexpr int kScopeSlots = 4;
 constexpr int kMaxSegments = 16;          // array size; [Model] GBufferRecorderMaxSegments (default 12) caps a job
 constexpr uint32_t kDefaultMaxSeg = 12;
 constexpr uint32_t kDefaultIsland = 30;
@@ -184,8 +209,9 @@ shrec::ClassCensus g_census;  // texture classes the table refused (shadow_rec.h
 enum : uint32_t { kScopeExec = 0xffff, kScopeA2c = 1u << 16 };
 constexpr uint32_t kDefaultScope = (1u << 2) | kScopeA2c;
 
-// The scoped ordinal of slot s (the s-th set bit, at most kSlots), or -1.
+// The scoped ordinal of slot s (the s-th set bit, at most kScopeSlots), or -1.
 inline int OrdinalOfSlot(uint32_t scope, int s) {
+  if (s < 0 || s >= kScopeSlots) return -1;
   int k = 0;
   for (int o = 0; o < 16; ++o)
     if (scope & (1u << o)) {
@@ -199,7 +225,146 @@ inline int SlotOfOrdinal(uint32_t scope, int o) {
   if (o < 0 || o > 15 || !(scope & (1u << o))) return -1;
   int k = 0;
   for (int b = 0; b < o; ++b) k += (scope >> b) & 1;
-  return k < kSlots ? k : -1;
+  return k < kScopeSlots ? k : -1;
+}
+
+// ---- Execution identity (R24 2) ----
+// GraphicsCore's render graph: per collection k (the item vector [rg+0x438] +
+// k * 24, the resource node with word +0x38 = k) one descriptor at
+// [rg+0x408] + k * 0x6d8: the shading model (word +0), the scene context
+// (+0x10, 0x588 bytes) and the viewport tag (dword +0x690) given to
+// addGBufferPass [V 0x56a60 pushes node and descriptor together; 0x40a20
+// copies +0 and +0x690; the collection dump 0x50fa4 reads node k, descriptor
+// k and vector k together].
+constexpr uint32_t kCollDescs = 0x408, kCollStride = 0x6d8, kCollTag = 0x690;
+constexpr uint16_t kSmGbuffer = 0, kSmDecal = 3, kSmCockpit = 4;  // SM_GBUFFER_PBR, _DECAL, _COCKPIT [V string table]
+struct CollKey {
+  uint16_t sm = 0, rank = 0;  // rank: earlier descriptors with the same model and tag
+  uint32_t tag = 0;
+  bool ok = false;
+};
+inline bool SameKey(const CollKey& a, const CollKey& b) {
+  return a.ok == b.ok && (!a.ok || (a.sm == b.sm && a.tag == b.tag && a.rank == b.rank));
+}
+inline uint32_t CollHash(const CollKey& k) {
+  return k.ok ? (static_cast<uint32_t>(k.sm) << 24 ^ static_cast<uint32_t>(k.rank) << 16 ^ k.tag * 0x9E3779B1u) | 1u
+              : 0u;
+}
+// The key of descriptor idx of an array of count descriptors. Plain.
+inline bool CollKeyAt(const uint8_t* descs, size_t count, uint32_t idx, CollKey* out) {
+  *out = CollKey();
+  if (!descs || idx >= count) return false;
+  const uint8_t* d = descs + static_cast<size_t>(idx) * kCollStride;
+  out->sm = *reinterpret_cast<const uint16_t*>(d);
+  out->tag = *reinterpret_cast<const uint32_t*>(d + kCollTag);
+  for (uint32_t k = 0; k < idx; ++k) {
+    const uint8_t* e = descs + static_cast<size_t>(k) * kCollStride;
+    if (*reinterpret_cast<const uint16_t*>(e) == out->sm && *reinterpret_cast<const uint32_t*>(e + kCollTag) == out->tag)
+      ++out->rank;
+  }
+  out->ok = true;
+  return true;
+}
+// Descriptor idx has key `want` (cheap fields first). Plain.
+inline bool CollIsAt(const uint8_t* descs, size_t count, uint32_t idx, const CollKey& want) {
+  if (!want.ok || !descs || idx >= count) return false;
+  const uint8_t* d = descs + static_cast<size_t>(idx) * kCollStride;
+  if (*reinterpret_cast<const uint16_t*>(d) != want.sm || *reinterpret_cast<const uint32_t*>(d + kCollTag) != want.tag)
+    return false;
+  CollKey k;
+  return CollKeyAt(descs, count, idx, &k) && k.rank == want.rank;
+}
+// The index of the descriptor with key `want`, or -1. Plain.
+inline int CollFindIn(const uint8_t* descs, size_t count, const CollKey& want) {
+  if (!want.ok || !descs) return -1;
+  uint32_t rank = 0;
+  for (size_t k = 0; k < count && k <= 0xffff; ++k) {
+    const uint8_t* e = descs + k * kCollStride;
+    if (*reinterpret_cast<const uint16_t*>(e) != want.sm || *reinterpret_cast<const uint32_t*>(e + kCollTag) != want.tag)
+      continue;
+    if (rank++ == want.rank) return static_cast<int>(k);
+  }
+  return -1;
+}
+// The render graph's descriptor array. Plain.
+inline const uint8_t* CollDescs(const void* rg, size_t* count) {
+  const uint8_t* b = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(rg) + kCollDescs);
+  const uint8_t* e = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(rg) + kCollDescs + 8);
+  *count = b && e > b && (e - b) % kCollStride == 0 ? static_cast<size_t>(e - b) / kCollStride : 0;
+  return *count ? b : nullptr;
+}
+
+// The scope's executions as identities. A frame's G-buffer executions in
+// order: the non-cockpit ones by position (the scope bits' ordinals), the
+// cockpit ones apart. A base frame has no more non-cockpit executions than
+// the frame before (MFD frames add theirs); its sequence binds the slots once
+// two base frames in a row agree.
+constexpr int kSeqMax = 16, kSeqCockpit = 8;
+struct FrameSeq {
+  uint32_t n = 0, nck = 0;  // non-cockpit and cockpit executions (all, beyond the arrays too)
+  CollKey id[kSeqMax];
+  CollKey ck[kSeqCockpit];
+};
+inline void SeqAdd(FrameSeq& s, const CollKey& k) {
+  if (k.ok && k.sm == kSmCockpit) {
+    if (s.nck < static_cast<uint32_t>(kSeqCockpit)) s.ck[s.nck] = k;
+    ++s.nck;
+    return;
+  }
+  if (s.n < static_cast<uint32_t>(kSeqMax)) s.id[s.n] = k;
+  ++s.n;
+}
+inline bool SameSeq(const FrameSeq& a, const FrameSeq& b) {
+  if (a.n != b.n || a.nck != b.nck) return false;
+  for (uint32_t k = 0; k < a.n && k < static_cast<uint32_t>(kSeqMax); ++k)
+    if (!SameKey(a.id[k], b.id[k])) return false;
+  for (uint32_t k = 0; k < a.nck && k < static_cast<uint32_t>(kSeqCockpit); ++k)
+    if (!SameKey(a.ck[k], b.ck[k])) return false;
+  return true;
+}
+struct Binder {
+  FrameSeq cur, base;
+  uint32_t prevN = 0, stable = 0;
+  uint64_t frames = 0, baseFrames = 0, extraFrames = 0, commits = 0;
+};
+// The frame in b.cur ended. True when b.base is a confirmed base sequence
+// (the slots are (re)bound from it). b.cur is cleared.
+inline bool EndFrame(Binder& b) {
+  bool commit = false;
+  if (b.cur.n || b.cur.nck) {
+    ++b.frames;
+    const bool isBase = b.cur.n > 0 && (b.prevN == 0 || b.cur.n <= b.prevN);
+    b.prevN = b.cur.n;
+    if (isBase) {
+      ++b.baseFrames;
+      if (b.stable && SameSeq(b.cur, b.base)) {
+        if (b.stable < 0xffff) ++b.stable;
+      } else {
+        b.base = b.cur;
+        b.stable = 1;
+      }
+      commit = b.stable >= 2;
+    } else {
+      ++b.extraFrames;
+    }
+  }
+  b.cur = FrameSeq();
+  if (commit) ++b.commits;
+  return commit;
+}
+// The identity of each slot under scope from a base sequence: s < 4 the
+// scope's ordinals; s + 4 (cockpit on) the cockpit execution with the same
+// tag and rank as slot s's SM_GBUFFER_PBR one.
+inline void BindSlots(uint32_t scope, bool cockpit, const FrameSeq& base, CollKey out[kSlots]) {
+  for (int s = 0; s < kSlots; ++s) out[s] = CollKey();
+  for (int s = 0; s < kScopeSlots; ++s) {
+    const int o = OrdinalOfSlot(scope, s);
+    if (o < 0 || o >= kSeqMax || static_cast<uint32_t>(o) >= base.n) continue;
+    out[s] = base.id[o];
+    if (!cockpit || !out[s].ok || out[s].sm != kSmGbuffer) continue;
+    for (uint32_t k = 0; k < base.nck && k < static_cast<uint32_t>(kSeqCockpit); ++k)
+      if (base.ck[k].ok && base.ck[k].tag == out[s].tag && base.ck[k].rank == out[s].rank) out[s + kScopeSlots] = base.ck[k];
+  }
 }
 
 enum ItemReason : int {
@@ -228,6 +393,7 @@ enum ItemReason : int {
   kRForced,
   kRIsland,
   kRSegments,
+  kRCockpitMix,
   kReasons
 };
 const char* const kReasonName[kReasons] = {
@@ -255,7 +421,8 @@ const char* const kReasonName[kReasons] = {
     "a job table is full",
     "forced residual (verify stride)",
     "in a run shorter than the island",
-    "beyond the segment limit"};
+    "beyond the segment limit",
+    "its material is drawn both in and out of the cockpit here"};
 
 // Per execution: every segment executed, or why the whole execution was stock.
 enum PassReason : int {
@@ -302,13 +469,15 @@ enum SegReason : int {
   kSFlags,
   kSRedo,
   kSFault,
+  kSRtBound,
   kSegReasons
 };
 const char* const kSegReasonName[kSegReasons] = {
     "executed", "a texture's view changed or a swap is due", "a material's shader-read CB dwords changed",
     "a page's sbPositions view changed", "a context buffer changed", "the sampler pool s5-s15 changed",
     "renderer flags (rasterizer index or debug bits) changed",
-    "a texture changed and the re-recorded list was not ready", "fault in the checks"};
+    "a texture changed and the re-recorded list was not ready", "fault in the checks",
+    "a render-target texture of the segment is a target of the pass"};
 
 // ---------------------------------------------------------------------------
 // Pure helpers (offline tested)
@@ -710,6 +879,8 @@ struct MatRec {
   bool excluded;      // an item of another pass, transparent
   bool shaderOk;      // a DX11Shader
   bool transparent;
+  bool ck;            // its items here are cockpit items (technique [mat+0x1e0]; cockpit jobs only)
+  bool mixed;         // cockpit and other items here (cockpit jobs only)
   uint32_t animN;
   uint32_t rec;       // recorded draws
   uint32_t segStamp;  // dedupe per segment
@@ -783,7 +954,13 @@ struct PreMat {
   void* techBegin;
   const ReadsEntry* rd;
   const GbKey* key;
+  uint64_t techCk;          // cockpit jobs: [mat+0x1e0] and its reads and key
+  const ReadsEntry* rdCk;
+  const GbKey* keyCk;
 };
+inline uint64_t PmTech(const PreMat* pm, bool ck) { return ck ? pm->techCk : pm->tech; }
+inline const ReadsEntry* PmReads(const PreMat* pm, bool ck) { return ck ? pm->rdCk : pm->rd; }
+inline const GbKey* PmKey(const PreMat* pm, bool ck) { return ck ? pm->keyCk : pm->key; }
 
 // Stage A's reads per item (any thread; the serial commit decides from them).
 enum : uint8_t { kPreNone = 0, kPreModel = 1 };
@@ -844,7 +1021,10 @@ struct Job {
   void** vec = nullptr;
   uint32_t scope = 0, flags = 0, island = kDefaultIsland, stride = 0;
   uint32_t splitMin = kSplitMinDraws;  // fewer recorded draws: one worker records them
-  uint32_t keyScope = 0;               // keys of this execution's collection
+  uint32_t keyScope = 0;               // keys of this execution's collection (its identity hash, R24)
+  bool cockpit = false;                // [Model] GBufferRecorderCockpit: cockpit items are candidates
+  bool armById = false;                // the sort observer starts it by armKey (else by armIdx)
+  CollKey armKey;
   ID3D11RenderTargetView* rtv[kRtv] = {};  // references held by the job
   ID3D11DepthStencilView* dsv = nullptr;
   UINT nvp = 0, nsc = 0;
@@ -1097,8 +1277,9 @@ void AddRefresh(Job& j, const TexEntry* e) {
   j.refresh[j.refreshCount++] = e;
 }
 
-// Material-level facts, at its first item in the job (pass 1 of stage A).
-MatRec* MatFor(Job& j, uint8_t* mat, uint32_t* idx) {
+// Material-level facts, at its first item in the job (pass 1 of stage A);
+// ck: that item is a cockpit item of a cockpit job (technique [mat+0x1e0]).
+MatRec* MatFor(Job& j, uint8_t* mat, uint32_t* idx, bool ck = false) {
   const Env& env = *j.env;
   size_t i = Mix(reinterpret_cast<uintptr_t>(mat)) & (kMatTable - 1);
   for (uint32_t p = 0; p < kMatTable; ++p, i = (i + 1) & (kMatTable - 1)) {
@@ -1114,6 +1295,8 @@ MatRec* MatFor(Job& j, uint8_t* mat, uint32_t* idx) {
       m.last = -1;
       m.why = -1;
       m.excluded = false;
+      m.ck = ck;
+      m.mixed = false;
       m.animN = 0;
       m.rec = 0;
       m.segStamp = 0;
@@ -1122,7 +1305,7 @@ MatRec* MatFor(Job& j, uint8_t* mat, uint32_t* idx) {
       m.transparent = props && props[0x33] != 0;
       m.shader = *reinterpret_cast<uint8_t**>(mat + 0x30);
       m.shaderOk = m.shader && *reinterpret_cast<void**>(m.shader) == env.shaderVt;
-      m.tech = *reinterpret_cast<uint64_t*>(mat + 0x1d8);
+      m.tech = *reinterpret_cast<uint64_t*>(mat + (ck ? 0x1e0 : 0x1d8));
       m.effect = m.shaderOk ? *reinterpret_cast<void**>(m.shader + 0x50) : nullptr;
       m.techBegin = m.shaderOk ? *reinterpret_cast<void**>(m.shader + 0xb0) : nullptr;
       memcpy(m.cb, mat + kCbOff, kCbLen);
@@ -1246,6 +1429,11 @@ const PreMat* PreMatFor(Job& j, int t, uint8_t* mat, PreMat* scratch) {
     s->techBegin = *reinterpret_cast<void**>(s->shader + 0xb0);
     s->rd = FindReads(*j.tab, s->shader, s->tech, s->effect, s->techBegin);
     s->key = FindKey(*j.tab, s->shader, s->tech, j.flags, s->effect, s->techBegin, j.keyScope);
+    if (j.cockpit) {
+      s->techCk = *reinterpret_cast<uint64_t*>(mat + 0x1e0);
+      s->rdCk = FindReads(*j.tab, s->shader, s->techCk, s->effect, s->techBegin);
+      s->keyCk = FindKey(*j.tab, s->shader, s->techCk, j.flags, s->effect, s->techBegin, j.keyScope);
+    }
   }
   return s;
 }
@@ -1308,11 +1496,12 @@ void PreOne(Job& j, int t, size_t i) {
   const PreMat* pm = PreMatFor(j, t, mat, &scratch);
   if (pm == &scratch) return;  // the cache is full: the commit sees no reads (residual)
   p.pm = pm;
-  if (!p.pass1 || p.cockpit || pm->transparent || !pm->shaderOk) return;
+  if (!p.pass1 || (p.cockpit && !j.cockpit) || pm->transparent || !pm->shaderOk) return;
+  const bool ck = p.cockpit != 0;
   const uint32_t page = *reinterpret_cast<uint32_t*>(item + 0xd0);
   p.pageIdx = page;
   p.pageOk = PageBuffer(env, page) ? 1 : 0;
-  const ReadsEntry* rd = pm->rd;
+  const ReadsEntry* rd = PmReads(pm, ck);
   const uint32_t ntex = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
   const uint8_t* en = ntex ? EntriesOf(mat, item) : nullptr;
   if (rd && rd->state > 0) {
@@ -1325,11 +1514,12 @@ void PreOne(Job& j, int t, size_t i) {
     for (uint32_t w = 0; w < kRecWords; ++w)
       if (rd->mask[w] & ~set[w]) p.inherit = 1;
   }
-  const GbKey* key = pm->key;
+  const GbKey* key = PmKey(pm, ck);
   if (!key || key->state.load(std::memory_order_acquire) <= 0 || !rd || rd->state <= 0 || p.inherit || !p.pageOk)
     return;  // the commit gives the reason
   p.key = key;
-  const shrec::MeshEntry* me = shrec::FindMesh(j.tab->mesh, p.mesh, pm->shader, pm->tech, pm->effect, pm->techBegin);
+  const shrec::MeshEntry* me =
+      shrec::FindMesh(j.tab->mesh, p.mesh, pm->shader, PmTech(pm, ck), pm->effect, pm->techBegin);
   if (!me) return;  // kRMeshPending
   if (me->state.load(std::memory_order_acquire) <= 0) {
     p.meshCode = kRMeshRejected;
@@ -1433,14 +1623,14 @@ int Pass2Commit(Job& j, size_t i) {
   Item& it = j.items[i];
   MatRec& m = j.mats[it.mat];
   const Pre& p = j.pre[i];
-  if (m.excluded) return kRMatExcluded;
+  if (m.excluded) return m.mixed ? kRCockpitMix : kRMatExcluded;
   if (j.shaders[it.shader].unclean) return kRUnclean;
   if (m.why < 0) DecideMat(j, m);
   if (m.why != kRecorded) {
     if (m.why == kRKeyPending || m.why == kRKeyCooling) WantProbe(j, i, m.shader, m.tech, p.mesh);
     return m.why;
   }
-  if (!p.key || p.key != m.key || !p.pm || p.pm->shader != m.shader || p.pm->tech != m.tech)
+  if (!p.key || p.key != m.key || !p.pm || p.pm->shader != m.shader || PmTech(p.pm, m.ck) != m.tech)
     return kRKeyPending;  // read against another key state (published meanwhile)
   if (p.meshCode != kRecorded) {
     if (p.meshCode == kRMeshPending) WantProbe(j, i, m.shader, m.tech, p.mesh);
@@ -1481,7 +1671,8 @@ int CommitBuild(Job& j) {
     const Pre& p = j.pre[i];
     if (p.kind != kPreModel) continue;
     uint32_t mi = 0;
-    MatRec* m = MatFor(j, p.mat, &mi);
+    const bool ck = j.cockpit && p.cockpit;  // a cockpit candidate (cockpit jobs)
+    MatRec* m = MatFor(j, p.mat, &mi, ck);
     if (!m) return j.result = kBuildOversize;  // a material untracked: its end state could not be restored
     it.mat = mi;
     it.shader = m->shaderIdx;
@@ -1493,9 +1684,15 @@ int CommitBuild(Job& j) {
       it.reason = static_cast<uint8_t>(!p.pass1 ? kRPass : kRTransparent);
       continue;
     }
-    if (p.cockpit) {
+    if (p.cockpit && !j.cockpit) {
       if (sh) sh->unclean = 1;  // normal_cockpit*: its pass index and reads are not analysed here
       it.reason = kRCockpit;
+      continue;
+    }
+    if (j.cockpit && m->ck != ck) {  // one material, two techniques in this vector: DCS draws it
+      m->excluded = m->mixed = true;
+      if (sh) sh->unclean = 1;
+      it.reason = kRCockpitMix;
       continue;
     }
     if (!m->shaderOk) {
@@ -1506,7 +1703,8 @@ int CommitBuild(Job& j) {
     it.writer = 1;
     it.reason = kRecorded;  // candidate so far
     if (sh->unclean) continue;
-    const ReadsEntry* rd = p.pm && p.pm->shader == m->shader && p.pm->tech == m->tech ? p.pm->rd : nullptr;
+    const ReadsEntry* rd =
+        p.pm && p.pm->shader == m->shader && PmTech(p.pm, ck) == m->tech ? PmReads(p.pm, ck) : nullptr;
     if (!rd) {
       WantReads(j, m->shader, m->tech);
       sh->unclean = 1;
@@ -2142,6 +2340,54 @@ bool ReplayRtGuarded(const Job& j, const Seg& s, uint32_t* calls) {
   }
 }
 
+// Cockpit jobs (R24 3.4): segment s's render-target textures (MFD and
+// indicator targets): counted, with those DCS drew to since their last mip
+// generation (vt[18]'s condition: [inner+0x54] 0 and [[inner+8]+0x44] & 0x10
+// [V shadow_rec.h InitInnerRt]); one whose view is a view of a target of the
+// pass (a feedback loop D3D would resolve on each context) makes the segment
+// stock. Their contents are not recorded: the list samples them when it
+// executes, at the stock draws' place, after every earlier writer. Plain.
+int RtCheckRaw(const Job& j, const Seg& s, uint32_t* seen, uint32_t* drawn) {
+  ID3D11Resource* tgt[kRtv + 1] = {};
+  bool haveTgt = false;
+  int why = kSExecuted;
+  for (uint32_t k = s.entFirst; k < s.entEnd && !why; ++k) {
+    const TexEntry* e = j.segEnts[k];
+    if (!e->rt) continue;
+    ++*seen;
+    const uint8_t* inner = *reinterpret_cast<uint8_t* const*>(e->tex + 0x10);
+    if (inner && !inner[0x54]) {
+      const uint8_t* d = *reinterpret_cast<const uint8_t* const*>(inner + 8);
+      if (d && (d[0x44] & 0x10)) ++*drawn;
+    }
+    if (!haveTgt) {
+      for (UINT q = 0; q < kRtv; ++q)
+        if (j.rtv[q]) j.rtv[q]->GetResource(&tgt[q]);
+      if (j.dsv) j.dsv->GetResource(&tgt[kRtv]);
+      haveTgt = true;
+    }
+    for (int v = -1; v < static_cast<int>(e->nviews) && v < kTexViews && !why; ++v) {
+      auto* view = v < 0 ? static_cast<ID3D11ShaderResourceView*>(e->g190) : e->views[v];
+      if (!view) continue;
+      ID3D11Resource* r = nullptr;
+      view->GetResource(&r);
+      for (ID3D11Resource* t : tgt)
+        if (r && t == r) why = kSRtBound;
+      SafeRel(r);
+    }
+  }
+  for (auto*& t : tgt) SafeRel(t);
+  return why;
+}
+
+int RtCheckGuarded(const Job& j, const Seg& s, uint32_t* seen, uint32_t* drawn) {
+  __try {
+    return RtCheckRaw(j, s, seen, drawn);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return kSFault;
+  }
+}
+
 int ReplayAndCheckGuarded(const Job& j, const Seg& s, uint32_t* replays) {
   __try {
     *replays += ReplayRaw(j, s);
@@ -2639,6 +2885,16 @@ std::atomic<uint32_t> g_maxSeg{kDefaultMaxSeg};  // [Model] GBufferRecorderMaxSe
 std::atomic<bool> g_redoOn{true};      // [Model] GBufferRecorderRedo: re-record segments whose textures changed
 std::atomic<bool> g_swapAhead{true};   // [Model] GBufferRecorderSwapAhead: do a due mip-set swap at the entry
 std::atomic<uint32_t> g_helpers{kThreads - 1};   // [Model] GBufferRecorderHelpers (0-2 per job)
+std::atomic<bool> g_cockpit{false};    // [Model] GBufferRecorderCockpit (R24 4; read at install for the pool size)
+std::atomic<bool> g_byOrdinal{false};  // [Model] GBufferRecorderByOrdinal: slots by plain ordinal (before R24)
+bool g_idMode = false;                 // executions bound by identity (install: not by ordinal and the build matches)
+int g_poolSlots = kScopeSlots;         // slots with workers: 4, 8 with the cockpit (install)
+// Workers per slot (the primary and its helpers): 3; 2 with the cockpit slots, so that g_poolSlots * g_threads
+// fits defrec::Pool::kMaxWorkers (16; a larger request is clamped by the pool and worker indexes past it are
+// outside its array: the R24 F1 crash, PumpRedo reading and releasing worker 16 + s).
+int g_threads = kThreads;
+Binder g_bind;                         // render thread
+std::atomic<uint64_t> g_bindChanges{0}, g_idFail{0};
 std::atomic<int> g_state{0};        // 0 = not tried (retried), 1 = ready, -1 = unavailable
 std::atomic<bool> g_disabled{false};
 std::atomic<bool> g_shutdown{false};
@@ -2653,17 +2909,22 @@ Env g_env;
 Tables g_tab;
 TexTable g_tex;
 SRWLOCK g_texLock = SRWLOCK_INIT;
-defrec::Pool g_pool;  // worker s + kSlots * k: slot s's primary (k 0) and helpers (k 1, 2)
-inline int Wk(int s, int k) { return s + kSlots * k; }
+defrec::Pool g_pool;  // worker s + g_poolSlots * k: slot s's primary (k 0) and helpers (k 1, 2)
+inline int Wk(int s, int k) { return s + g_poolSlots * k; }
+// Worker k of slot s exists (a slot past the pool's slots has none).
+inline bool WkOk(int s, int k) {
+  return s >= 0 && s < g_poolSlots && k >= 0 && k < g_threads && Wk(s, k) < g_pool.Workers();
+}
 inline bool SlotBusy(int s) {
-  for (int k = 0; k < kThreads; ++k)
-    if (g_pool.Busy(Wk(s, k))) return true;
+  for (int k = 0; k < g_threads; ++k)
+    if (WkOk(s, k) && g_pool.Busy(Wk(s, k))) return true;
   return false;
 }
 // Drops whatever the slot's workers left (they finish their own lists; the pool's are empty).
 inline void DropPoolLists(int s) {
-  for (int k = 0; k < kThreads; ++k)
-    if (ID3D11CommandList* l = g_pool.TakeList(Wk(s, k))) l->Release();
+  for (int k = 0; k < g_threads; ++k)
+    if (WkOk(s, k))
+      if (ID3D11CommandList* l = g_pool.TakeList(Wk(s, k))) l->Release();
 }
 ID3D11DeviceContext* g_ctx = nullptr;
 ID3D11Device* g_dev = nullptr;
@@ -2677,6 +2938,40 @@ constexpr uint32_t kEvictAge = 1500;  // render entries an unused texture entry 
 
 void Disable(const char* why) {
   if (!g_disabled.exchange(true)) Log("gbuffer recorder: disabled for this session (%s)", why);
+}
+
+// ---- Fault containment (R24 crash follow-up) ----
+// Every entry point DCS calls (the pass wrap, the loop entries, the item
+// override, the render and sort observers) runs our code under SEH: a fault
+// in our code latches the recorder off and DCS's work is done stock. Calls
+// into DCS from our code raise t_dcs; a fault while it is above the entry's
+// level is DCS's own and is left to DCS's handlers (as without us).
+thread_local int t_dcs = 0;
+thread_local bool t_passRan = false;    // the wrap: DCS's pass function was called
+thread_local bool t_itemDrawn = false;  // the override: DCS's draw of the item was called
+thread_local bool t_segExecuted = false;  // an exec entry: its lists were executed
+std::atomic<uint64_t> g_contained{0};
+int GbFilter(unsigned long code, int lvl) {
+  if (t_dcs != lvl) return EXCEPTION_CONTINUE_SEARCH;
+  switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_PRIV_INSTRUCTION:
+      return EXCEPTION_EXECUTE_HANDLER;
+    default:
+      return EXCEPTION_CONTINUE_SEARCH;
+  }
+}
+void Contained(const char* where, unsigned long code, int lvl) {
+  t_dcs = lvl;
+  g_contained++;
+  char why[96];
+  snprintf(why, sizeof(why), "exception 0x%08lx in %s, contained", code, where);
+  Disable(why);
 }
 
 bool Active() {
@@ -2737,12 +3032,16 @@ struct Stat {
   std::atomic<uint64_t> redoPlanned{0}, redoExecuted{0}, redoLate{0}, redoFail{0}, swapsAhead{0}, redoNs{0};
   std::atomic<uint64_t> slackJobs{0};  // jobs armed with the slack settings (smaller island, more segments)
   std::atomic<uint64_t> rtReplays{0};  // render-target textures' vt[18] replayed at exec entries
+  // Cockpit jobs: render-target textures at exec entries: seen, drawn to since their last mip generation, bound
+  // as a target of the pass (R24 3.4).
+  std::atomic<uint64_t> rtSeen{0}, rtDrawn{0}, rtBound{0};
   std::atomic<uint64_t> verifyAa{0}, verifyAb{0}, verifyAaBad{0}, verifyAbBad{0}, verifyTexels{0}, verifyBadTexels{0},
       verifySkipped{0}, verifyErrors{0}, verifyStateBad{0}, verifyExecs{0};
 };
 
 struct Slot {
   Learned learn;
+  CollKey id;  // the execution it is bound to (identity mode)
   Job* job = nullptr;
   bool armed = false;
   uint32_t passGen = 0;
@@ -2757,6 +3056,14 @@ struct Slot {
   Stat st;
 };
 Slot g_slot[kSlots];
+
+// Keys are learnt per execution: its identity, or its collection index.
+inline uint32_t KeyScopeOf(int s) { return g_idMode ? CollHash(g_slot[s].id) : g_slot[s].learn.idx; }
+// The scope ordinal a slot serves (a cockpit slot: its view's slot's), and its log name.
+inline int SlotOrdinal(int s) { return OrdinalOfSlot(g_scope.load(), s % kScopeSlots); }
+inline void SlotName(int s, char* out, size_t n) {
+  snprintf(out, n, "execution #%d%s", SlotOrdinal(s), s >= kScopeSlots ? " cockpit" : "");
+}
 
 // Helpers per job from the slot's measured work: a helper costs a wake-up and
 // a share of the stage A chunks, worth it only for long jobs [I].
@@ -2953,10 +3260,10 @@ struct PassCtx {
 PassCtx* g_pass = nullptr;
 void PlanRedo(PassCtx& pc, uint32_t from, uint32_t to);
 
-uint64_t __fastcall FrontVt1(void* self, void* ctx) {
+void FrontBody(void* self, void* ctx) {
   (void)ctx;
   PassCtx* pc = g_pass;
-  if (!pc || GetCurrentThreadId() != g_renderTid || static_cast<LoopObj*>(self)->slot != pc->slot) return 0;
+  if (!pc || GetCurrentThreadId() != g_renderTid || static_cast<LoopObj*>(self)->slot != pc->slot) return;
   const int64_t t0 = defrec::Qpc();
   pc->front = true;
   Slot& sl = g_slot[pc->slot];
@@ -2999,18 +3306,31 @@ uint64_t __fastcall FrontVt1(void* self, void* ctx) {
   }
   ReleaseTarget(t);
   pc->frontNs = NsSince(t0);
+  return;
+}
+
+uint64_t __fastcall FrontVt1(void* self, void* ctx) {
+  const int lvl = t_dcs;
+  __try {
+    FrontBody(self, ctx);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("the front entry", GetExceptionCode(), lvl);
+    if (PassCtx* pc = g_pass) pc->state = kPsStock;  // the exec entries draw their segments stock
+  }
   return 0;
 }
 
 // DCS draws segment k's items itself, in order (their own vt[1]).
 void DrawSegmentStock(const Job& j, int k, void* ctx) {
   const Seg& s = j.segs[k];
+  ++t_dcs;
   for (uint32_t c = s.candFirst; c < s.candEnd; ++c) {
     const Cand& cd = j.cands[c];
     if (!cd.alive) continue;
     void* r = j.snap[cd.item];
     (*reinterpret_cast<Vt1Fn**>(r))[1](r, ctx);
   }
+  --t_dcs;
 }
 
 // What a residual between segments could have changed in the state the lists
@@ -3147,12 +3467,12 @@ bool PlanSegsGuarded(Job& j, uint32_t from, uint32_t to, bool swapAhead, Stat& s
 }
 
 // Queued segments onto the slot's idle workers, in segment order.
-void PumpRedo(int s, Job& j) {
+void PumpRedoRaw(int s, Job& j) {
   for (uint32_t k = 0; k < j.segCount; ++k) {
     if (j.redoState[k].load(std::memory_order_acquire) != kRedoWant) continue;
     int wk = -1;
-    for (int t = 0; t < kThreads && wk < 0; ++t)
-      if (!g_pool.Busy(Wk(s, t))) wk = t;
+    for (int t = 0; t < g_threads && wk < 0; ++t)
+      if (WkOk(s, t) && !g_pool.Busy(Wk(s, t))) wk = t;
     if (wk < 0) return;
     j.redoArg[k] = {&j, static_cast<uint8_t>(k), static_cast<uint8_t>(wk)};
     j.redoState[k].store(kRedoRun, std::memory_order_release);
@@ -3162,15 +3482,48 @@ void PumpRedo(int s, Job& j) {
   }
 }
 
+// Nothing more is queued: a segment waiting for its list draws stock. Guarded (j may be what faulted).
+void FailWantsRaw(Job& j) {
+  for (auto& st : j.redoState) {
+    int want = kRedoWant;
+    st.compare_exchange_strong(want, kRedoFail);
+  }
+}
+void FailWantsGuarded(Job& j) {
+  __try {
+    FailWantsRaw(j);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+}
+
+void PumpRedo(int s, Job& j) {
+  const int lvl = t_dcs;
+  __try {
+    PumpRedoRaw(s, j);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("PumpRedo", GetExceptionCode(), lvl);
+    FailWantsGuarded(j);
+  }
+}
+
 // Render thread: plans segments [from, to) and starts the queued ones.
-void PlanRedo(PassCtx& pc, uint32_t from, uint32_t to) {
-  if (!g_redoOn.load(std::memory_order_relaxed)) return;
+void PlanRedoRaw(PassCtx& pc, uint32_t from, uint32_t to) {
+  if (!g_redoOn.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed)) return;
   Job& j = *pc.job;
   Stat& st = g_slot[pc.slot].st;
   const int64_t t0 = defrec::Qpc();
   if (!PlanSegsGuarded(j, from, to, g_swapAhead.load(std::memory_order_relaxed), st)) g_faults++;
   PumpRedo(pc.slot, j);
   st.redoNs += NsSince(t0);
+}
+
+void PlanRedo(PassCtx& pc, uint32_t from, uint32_t to) {
+  const int lvl = t_dcs;
+  __try {
+    PlanRedoRaw(pc, from, to);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("PlanRedo", GetExceptionCode(), lvl);
+  }
 }
 
 // Segment k's list(s) at its exec entry: its pieces, or its re-recorded list
@@ -3229,6 +3582,14 @@ int ExecSegment(PassCtx& pc, int k) {
     for (auto& row : now)
       for (auto*& p : row) SafeRel(p);
   }
+  if (!why && j.cockpit) {
+    uint32_t seen = 0, drawn = 0;
+    why = RtCheckGuarded(j, j.segs[k], &seen, &drawn);
+    sl.st.rtSeen += seen;
+    sl.st.rtDrawn += drawn;
+    if (why == kSRtBound) sl.st.rtBound++;
+    if (why == kSFault) g_faults++;
+  }
   if (!why) {
     uint32_t rt = 0;
     if (!ReplayRtGuarded(j, j.segs[k], &rt)) {
@@ -3248,7 +3609,9 @@ int ExecSegment(PassCtx& pc, int k) {
     } else {
       for (uint32_t q = j.segs[k].pieceFirst; q < j.segs[k].pieceEnd; ++q) g_ctx->ExecuteCommandList(pc.cl[q], TRUE);
     }
+    t_segExecuted = true;
     pc.executeNs += NsSince(e0);
+    pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
     if (t9) {
       defrec::Capture(g_ctx, &after);
       if (!defrec::Equal(before, after)) pc.stateBad = true;
@@ -3261,21 +3624,37 @@ int ExecSegment(PassCtx& pc, int k) {
   return why;
 }
 
-uint64_t __fastcall ExecVt1(void* self, void* ctx) {
+void ExecBody(void* self, void* ctx) {
   PassCtx* pc = g_pass;
   const LoopObj* o = static_cast<LoopObj*>(self);
-  if (!pc || GetCurrentThreadId() != g_renderTid || o->slot != pc->slot || !pc->job) return 0;
+  if (!pc || GetCurrentThreadId() != g_renderTid || o->slot != pc->slot || !pc->job) return;
   const int k = o->seg;
-  if (k < 0 || k >= static_cast<int>(pc->job->segCount)) return 0;
-  if (pc->state == kPsLive) {
+  if (k < 0 || k >= static_cast<int>(pc->job->segCount)) return;
+  if (pc->state == kPsLive && !g_disabled.load(std::memory_order_relaxed)) {
     const int why = ExecSegment(*pc, k);
     pc->segWhy[k] = static_cast<uint8_t>(why);
     if (!why) {
       pc->segDone[k] = 1;
-      return 0;
+      return;
     }
   }
   DrawSegmentStock(*pc->job, k, ctx);
+}
+
+uint64_t __fastcall ExecVt1(void* self, void* ctx) {
+  const int lvl = t_dcs;
+  t_segExecuted = false;
+  __try {
+    ExecBody(self, ctx);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("an exec entry", GetExceptionCode(), lvl);
+    PassCtx* pc = g_pass;
+    const LoopObj* o = static_cast<LoopObj*>(self);
+    if (pc && pc->job && o->seg >= 0 && o->seg < static_cast<int>(pc->job->segCount)) {
+      pc->state = kPsStock;
+      if (!t_segExecuted) DrawSegmentStock(*pc->job, o->seg, ctx);  // DCS's own draws (a fault there is DCS's)
+    }
+  }
   return 0;
 }
 
@@ -3565,7 +3944,9 @@ bool ReadProbeInRaw(void* self, ProbeIn& in, const Env& env) {
   __try {
     in.r = static_cast<uint8_t*>(self);
     if (*reinterpret_cast<void**>(in.r) != env.srVt) return false;
-    if (*reinterpret_cast<uint32_t*>(in.r + 0x60) != 1 || in.r[0x64]) return false;
+    const bool ck = in.r[0x64] != 0;
+    if (*reinterpret_cast<uint32_t*>(in.r + 0x60) != 1 || (ck && !g_cockpit.load(std::memory_order_relaxed)))
+      return false;
     in.item = *reinterpret_cast<uint8_t**>(in.r + 0x10);
     in.mat = in.item ? *reinterpret_cast<uint8_t**>(in.item + 0x10) : nullptr;
     if (!in.mat || *reinterpret_cast<void**>(in.mat) != env.modelVt) return false;
@@ -3573,7 +3954,7 @@ bool ReadProbeInRaw(void* self, ProbeIn& in, const Env& env) {
     if (!props || props[0x33]) return false;
     in.shader = *reinterpret_cast<uint8_t**>(in.mat + 0x30);
     if (!in.shader || *reinterpret_cast<void**>(in.shader) != env.shaderVt) return false;
-    in.tech = *reinterpret_cast<uint64_t*>(in.mat + 0x1d8);
+    in.tech = *reinterpret_cast<uint64_t*>(in.mat + (ck ? 0x1e0 : 0x1d8));  // normal_cockpit* in the cockpit [V 0x16084]
     in.mesh = *reinterpret_cast<uint8_t**>(in.item + 0xc0);
     in.page = *reinterpret_cast<uint32_t*>(in.item + 0xd0);
     in.effect = *reinterpret_cast<void**>(in.shader + 0x50);
@@ -3592,6 +3973,7 @@ bool ProbeCallRaw(void* self, void* ctx, uint64_t* ret) {
     shadowbatch::t_after = &DrawAfter;
     *shadowbatch::g_rendererObj = shadowbatch::g_myVtbl;
     vt = true;
+    t_itemDrawn = true;
     *ret = gbcount::g_orig(self, ctx);
   } __finally {
     if (vt) *shadowbatch::g_rendererObj = shadowbatch::g_rendererVtbl;
@@ -3616,8 +3998,8 @@ bool ProbeCall(void* self, void* ctx, uint64_t* ret) {
 bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
   ProbeIn in;
   if (!ReadProbeInRaw(self, in, g_env)) return false;
-  in.scope = g_slot[pc.slot].learn.idx;
-  in.ordinal = OrdinalOfSlot(g_scope.load(), pc.slot);
+  in.scope = KeyScopeOf(pc.slot);
+  in.ordinal = SlotOrdinal(pc.slot);
   const GbKey* k = FindKey(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, in.scope);
   if (k && k->state.load() <= 0) return false;
   if (!k && KeyCooling(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, in.scope, g_entryGen, false))
@@ -3687,10 +4069,13 @@ bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
 }
 
 // The 12 bytes DCS's own draw just wrote at mat+0x110 (pass 1 opaque, not
-// cockpit), for this execution's inputs. Plain.
+// cockpit; cockpit too with the cockpit on: 0x15e20 writes them before the
+// technique choice [V 0x15ff5-0x1600d]), for this execution's inputs. Plain.
 bool LearnRatioRaw(void* self, uint8_t out[kRatioLen]) {
   auto* r = static_cast<uint8_t*>(self);
-  if (*reinterpret_cast<void**>(r) != g_env.srVt || *reinterpret_cast<uint32_t*>(r + 0x60) != 1 || r[0x64]) return false;
+  if (*reinterpret_cast<void**>(r) != g_env.srVt || *reinterpret_cast<uint32_t*>(r + 0x60) != 1 ||
+      (r[0x64] && !g_cockpit.load(std::memory_order_relaxed)))
+    return false;
   auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
   auto* mat = item ? *reinterpret_cast<uint8_t**>(item + 0x10) : nullptr;
   if (!mat || *reinterpret_cast<void**>(mat) != g_env.modelVt) return false;
@@ -3709,13 +4094,19 @@ bool LearnRatioGuarded(void* self, uint8_t out[kRatioLen]) {
 }
 
 uint64_t CallItem(void* self, void* ctx) {
-  uint64_t r;
-  if (gbcount::OverrideFn p = g_prevOverride)
-    if (p(self, ctx, &r)) return r;
-  return gbcount::g_orig(self, ctx);
+  uint64_t r = 0;
+  t_itemDrawn = true;
+  ++t_dcs;
+  if (gbcount::OverrideFn p = g_prevOverride) {
+    if (!p(self, ctx, &r)) r = gbcount::g_orig(self, ctx);
+  } else {
+    r = gbcount::g_orig(self, ctx);
+  }
+  --t_dcs;
+  return r;
 }
 
-bool Override(void* self, void* ctx, uint64_t* ret) {
+bool OverrideBody(void* self, void* ctx, uint64_t* ret) {
   PassCtx* pc = g_pass;
   if (pc && GetCurrentThreadId() == g_renderTid) {
     if (pc->probesLeft > 0 && pc->job) {
@@ -3741,11 +4132,26 @@ bool Override(void* self, void* ctx, uint64_t* ret) {
   return false;
 }
 
+bool Override(void* self, void* ctx, uint64_t* ret) {
+  const int lvl = t_dcs;
+  t_itemDrawn = false;
+  __try {
+    return OverrideBody(self, ctx, ret);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("the item override", GetExceptionCode(), lvl);
+  }
+  if (!t_itemDrawn) *ret = CallItem(self, ctx);  // DCS's own draw of the item (a fault there is DCS's)
+  return true;
+}
+
 void PrevWrap(void* pass, void* ctx, gbpass::ExecFn orig) {
+  t_passRan = true;
+  ++t_dcs;
   if (gbpass::WrapFn p = g_prevWrap)
     p(pass, ctx, orig);
   else
     orig(pass, ctx);
+  --t_dcs;
 }
 
 // DCS's loop runs over our list: {begin, end} of the vector swapped for the
@@ -4109,8 +4515,86 @@ void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
 
 bool EnsureSlot(int s);
 
-void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
-  g_inside.fetch_add(1);
+// The identity of the execution whose item vector is vec (render graph rg). Plain.
+bool ExecKeyRaw(void** vec, void* ctx, CollKey* k, void** rgOut) {
+  void* rg = nullptr;
+  uint32_t idx = 0;
+  if (!shadowbatch::LearnRaw(vec, ctx, &rg, &idx)) return false;
+  size_t n = 0;
+  const uint8_t* d = CollDescs(rg, &n);
+  if (!CollKeyAt(d, n, idx, k)) return false;
+  *rgOut = rg;
+  return true;
+}
+bool ExecKeyGuarded(void** vec, void* ctx, CollKey* k, void** rgOut) {
+  __try {
+    return ExecKeyRaw(vec, ctx, k, rgOut);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *k = CollKey();
+    return false;
+  }
+}
+int CollFindGuarded(void* rg, const CollKey& k) {
+  __try {
+    size_t n = 0;
+    const uint8_t* d = CollDescs(rg, &n);
+    return CollFindIn(d, n, k);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+bool CollIsGuarded(void* rg, uint32_t idx, const CollKey& k) {
+  __try {
+    size_t n = 0;
+    const uint8_t* d = CollDescs(rg, &n);
+    return CollIsAt(d, n, idx, k);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// The slot bound to identity k (identity mode), or -1.
+int SlotOfKey(const CollKey& k) {
+  if (!k.ok) return -1;
+  for (int s = 0; s < g_poolSlots; ++s)
+    if (g_slot[s].id.ok && SameKey(g_slot[s].id, k)) return s;
+  return -1;
+}
+
+const char* SmName(uint16_t sm) {
+  return sm == kSmGbuffer ? "SM_GBUFFER_PBR" : sm == kSmDecal ? "SM_GBUFFER_PBR_DECAL"
+                                         : sm == kSmCockpit ? "SM_GBUFFER_PBR_COCKPIT" : "other";
+}
+
+bool DropStale(int s);
+
+// A confirmed base sequence: (re)binds the slots (render thread). A slot
+// whose identity changes forgets what it learnt for the old execution.
+void Rebind() {
+  CollKey want[kSlots];
+  BindSlots(g_scope.load(), g_cockpit.load() && g_poolSlots > kScopeSlots, g_bind.base, want);
+  for (int s = 0; s < g_poolSlots; ++s) {
+    Slot& sl = g_slot[s];
+    if (SameKey(sl.id, want[s])) continue;
+    if (sl.armed && sl.job && !DropStale(s)) continue;  // its job still runs: next base frame
+    if (want[s].ok && !EnsureSlot(s)) continue;
+    sl.id = want[s];
+    sl.learn.haveVec = false;
+    sl.learn.target = false;
+    sl.learn.ratioOk = false;
+    g_bindChanges++;
+    char name[48];
+    SlotName(s, name, sizeof(name));
+    if (want[s].ok)
+      Log("gbuffer recorder: slot %d (%s) bound to the G-buffer execution with %s, viewport tag 0x%x, rank %u", s,
+          name, SmName(want[s].sm), want[s].tag, want[s].rank);
+    else
+      Log("gbuffer recorder: slot %d (%s) unbound (no such execution in the base frame: %u non-cockpit, %u cockpit)",
+          s, name, g_bind.base.n, g_bind.base.nck);
+  }
+}
+
+void WrapBody(void* pass, void* ctx, gbpass::ExecFn orig) {
   if (Active() && g_pool.Disabled()) Disable("worker fault (see the deferred rec line above)");
   if (!Active()) {
     PrevWrap(pass, ctx, orig);
@@ -4122,12 +4606,41 @@ void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
       const int ord = g_ordinal++;
       g_gbExecs++;
       NoteMax(g_ordMax, static_cast<uint64_t>(ord));
-      const int s = SlotOfOrdinal(g_scope.load(), ord);
+      int s = -1;
+      if (g_idMode) {
+        CollKey k;
+        void* rg = nullptr;
+        void** vec = gbpass::ItemVector(pass, ctx);
+        if (vec && ExecKeyGuarded(vec, ctx, &k, &rg)) {
+          if (!g_gbRg) g_gbRg = rg;  // the frame's graph (every view's passes, MFD views too [V SceneRenderer 0x1f7a0])
+        } else {
+          g_idFail++;
+        }
+        if (!k.ok || rg == g_gbRg) {
+          SeqAdd(g_bind.cur, k);
+          s = SlotOfKey(k);
+        }
+      } else {
+        s = SlotOfOrdinal(g_scope.load(), ord);
+      }
       if (s < 0 || !EnsureSlot(s))
         PrevWrap(pass, ctx, orig);
       else
         WrapSlot(s, pass, ctx, orig);
     }
+  }
+}
+
+void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
+  const int lvl = t_dcs;
+  t_passRan = false;
+  g_inside.fetch_add(1);
+  __try {
+    WrapBody(pass, ctx, orig);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("the G-buffer pass wrap", GetExceptionCode(), lvl);
+    g_pass = nullptr;
+    if (!t_passRan) PrevWrap(pass, ctx, orig);  // DCS's pass, stock (a fault there is DCS's)
   }
   g_inside.fetch_sub(1);
 }
@@ -4182,7 +4695,10 @@ bool Arm(int s) {
   j.scope = g_scope.load();
   j.island = g_island.load();
   const bool slack = sl.slackMs > kSlackMs;
-  j.keyScope = l.idx;
+  j.keyScope = KeyScopeOf(s);
+  j.cockpit = g_cockpit.load();
+  j.armById = g_idMode;
+  j.armKey = sl.id;
   j.maxSeg = g_maxSeg.load();
   if (slack) {
     j.island = (std::min)(j.island, kSlackIsland);
@@ -4234,10 +4750,11 @@ bool Arm(int s) {
   j.startState.store(kStartArmed, std::memory_order_release);  // the sort hook may start it from here on
   // Helpers first (they wait for stage A to open); a busy one (a late job) is left out.
   j.helpers = 0;
-  const uint32_t helpers = HelpersFor(sl.workUs, (std::min)(g_helpers.load(), static_cast<uint32_t>(kThreads - 1)));
+  const uint32_t helpers = HelpersFor(sl.workUs, (std::min)(g_helpers.load(), static_cast<uint32_t>(g_threads - 1)));
   static const defrec::JobFn kHelper[kThreads - 1] = {&HelperMain<1>, &HelperMain<2>};
   for (uint32_t h = 0; h < helpers; ++h)
-    if (g_pool.Submit(Wk(s, static_cast<int>(h) + 1), kHelper[h], &j, nullptr)) ++j.helpers;
+    if (WkOk(s, static_cast<int>(h) + 1) && g_pool.Submit(Wk(s, static_cast<int>(h) + 1), kHelper[h], &j, nullptr))
+      ++j.helpers;
   if (!g_pool.Submit(s, &JobMain, &j, nullptr)) {
     int st = kStartArmed;
     if (!j.startState.compare_exchange_strong(st, kStartIdle)) j.startState.store(kStartIdle);
@@ -4265,8 +4782,7 @@ bool DropStale(int s) {
   return true;
 }
 
-void OnRender(void* rg, void* renderables) {
-  if (shadowbatch::RenderObserverFn p = g_prevObserver) p(rg, renderables);
+void OnRenderBody(void* rg, void* renderables) {
   if (!g_renderTid || GetCurrentThreadId() != g_renderTid) return;
   g_inside.fetch_add(1);
   g_entries++;
@@ -4274,6 +4790,7 @@ void OnRender(void* rg, void* renderables) {
     g_ordinal = 0;
     ++g_entryGen;
     g_entryQpc = defrec::Qpc();
+    if (g_idMode && EndFrame(g_bind) && Active()) Rebind();
   }
   if (Active() && rg == g_gbRg) {
     const int64_t prevEntry = g_lastPassQpc > g_gbEntryQpc ? g_lastPassQpc : g_gbEntryQpc;
@@ -4292,6 +4809,11 @@ void OnRender(void* rg, void* renderables) {
       }
       if (!sl.armed && !Arm(s)) continue;
       if (count == SIZE_MAX) count = VectorCountGuarded(rg, renderables);
+      if (g_idMode) {  // this frame's index of the slot's execution (MFD frames shift them)
+        const int idx = CollFindGuarded(rg, sl.id);
+        if (idx < 0) continue;
+        sl.learn.idx = static_cast<uint32_t>(idx);
+      }
       if (sl.learn.idx >= count) continue;
       StartJob(j, reinterpret_cast<void**>(static_cast<uint8_t*>(renderables) + sl.learn.idx * 24), false);
       j.entryGen = g_entryGen;
@@ -4300,9 +4822,20 @@ void OnRender(void* rg, void* renderables) {
   g_inside.fetch_sub(1);
 }
 
+void OnRender(void* rg, void* renderables) {
+  if (shadowbatch::RenderObserverFn p = g_prevObserver) p(rg, renderables);
+  const int lvl = t_dcs;
+  __try {
+    OnRenderBody(rg, renderables);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("the render entry", GetExceptionCode(), lvl);
+    g_inside.fetch_sub(1);  // the body's own decrement did not run
+  }
+}
+
 // A collection's vector is final (Scene's sort, pool thread): start the armed
 // job watching it.
-void OnSorted(void** out) {
+void OnSortedBody(void** out) {
   if (!g_on.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed) ||
       g_shutdown.load(std::memory_order_relaxed))
     return;
@@ -4310,7 +4843,24 @@ void OnSorted(void** out) {
     Job* j = g_jobPub[s].load(std::memory_order_acquire);
     if (!j || j->startState.load(std::memory_order_acquire) != kStartArmed) continue;
     uint8_t* base = shrec::ArrayBaseGuarded(j->armRg);
-    if (base && reinterpret_cast<uint8_t*>(out) == base + static_cast<size_t>(j->armIdx) * 24) StartJob(*j, out, true);
+    if (!base) continue;
+    if (j->armById) {
+      const intptr_t d = reinterpret_cast<uint8_t*>(out) - base;
+      if (d >= 0 && d % 24 == 0 && d / 24 <= 0xffff &&
+          CollIsGuarded(j->armRg, static_cast<uint32_t>(d / 24), j->armKey))
+        StartJob(*j, out, true);
+    } else if (reinterpret_cast<uint8_t*>(out) == base + static_cast<size_t>(j->armIdx) * 24) {
+      StartJob(*j, out, true);
+    }
+  }
+}
+
+void OnSorted(void** out) {
+  const int lvl = t_dcs;
+  __try {
+    OnSortedBody(out);
+  } __except (GbFilter(GetExceptionCode(), lvl)) {
+    Contained("the sort observer", GetExceptionCode(), lvl);
   }
 }
 
@@ -4345,6 +4895,33 @@ bool EnsureSlots() {
   for (int s = 0; s < kSlots; ++s)
     if (OrdinalOfSlot(scope, s) >= 0 && !EnsureSlot(s)) return false;
   return true;
+}
+
+// Slots with workers and workers per slot: 4 x 3, or 8 x 2 with the cockpit
+// slots (the pool has at most defrec::Pool::kMaxWorkers = 16; R24 crash).
+void PoolShape(bool cockpitSlots, int* slots, int* threads) {
+  *slots = cockpitSlots ? kSlots : kScopeSlots;
+  *threads = kThreads;
+  while (*slots * *threads > defrec::Pool::kMaxWorkers && *threads > 1) --*threads;
+}
+
+// GraphicsCore's collection descriptors as R24 2 read them [V 2.9.30]; nullptr
+// or why not (then executions are taken by plain ordinal).
+const char* CollBuildWhy() {
+  static const struct {
+    uint32_t begin, end;
+    uint64_t hash;
+  } kCode[] = {
+      {0x56a74, 0x56aee, 0x2a1c1d647e5002e5ull},  // node and descriptor pushed together, word +0x38 = index
+      {0x40a30, 0x40a52, 0x87c79dd0df9dd11bull},  // descriptor +0: the shading model
+      {0x40aea, 0x40af6, 0x0b9b7cd978e36a57ull},  // descriptor +0x690: the viewport tag
+      {0x50fa4, 0x5101d, 0x3e6a336882e78f05ull},  // node k, descriptor k (0x6d8 bytes) and vector k read together
+  };
+  auto* gc = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"GraphicsCore.dll"));
+  if (!gc) return "GraphicsCore.dll not loaded";
+  for (const auto& c : kCode)
+    if (!shadowtex::CodeIs(gc, c.begin, c.end, c.hash)) return "GraphicsCore's collection descriptors differ from R24's";
+  return nullptr;
 }
 
 // Installed on first use; false = not now (retried every second by main.cpp)
@@ -4413,12 +4990,24 @@ bool Install() {
     g_slot[s].front = {g_frontVtbl, s, -1};
     for (int k = 0; k < kMaxSegments; ++k) g_slot[s].exec[k] = {g_execVtbl, s, k};
   }
+  // Execution identity (R24 2): the collection descriptors as analysed, else plain ordinals.
+  const char* idWhy = g_byOrdinal.load() ? "[Model] GBufferRecorderByOrdinal=1" : CollBuildWhy();
+  g_idMode = !idWhy;
+  PoolShape(g_cockpit.load() && g_idMode, &g_poolSlots, &g_threads);
+  if (g_cockpit.load() && !g_idMode) {
+    Log("gbuffer recorder: cockpit executions need the execution identity (%s); cockpit items are recorded only in "
+        "scoped executions", idWhy);
+  }
   defrec::PoolConfig pc;
-  pc.workers = kSlots * kThreads;
+  pc.workers = g_poolSlots * g_threads;
   pc.cb.mode = defrec::CbMode::kOffsets;
   pc.priority = THREAD_PRIORITY_NORMAL;
   pc.name = "gbuffer recorder";
   if (!g_pool.Start(dev, pc)) return fail("its workers did not start");
+  if (g_pool.Workers() < g_poolSlots * g_threads) {
+    g_pool.Stop();
+    return fail("fewer workers than slots x threads");
+  }
   if (g_pool.At(0).ring.Mode() != defrec::CbMode::kOffsets) {
     g_pool.Stop();
     return fail("constant-buffer offsets unavailable on the worker contexts");
@@ -4450,8 +5039,14 @@ bool Install() {
   Log("gbuffer recorder: ready (scope 0x%x: executions by ordinal bits 0-15, A2C bit 16; %d workers; DCS's G-buffer "
       "loop runs over [front, residual items, one exec entry per segment]; island %u, at most %d segments; wait "
       "budget %u us; jobs start %s)",
-      g_scope.load(), kSlots * kThreads, g_island.load(), static_cast<int>(g_maxSeg.load()), g_waitUs.load(),
+      g_scope.load(), g_poolSlots * g_threads, g_island.load(), static_cast<int>(g_maxSeg.load()), g_waitUs.load(),
       early ? "when Scene's sort finishes their vector" : "at RenderGraph::render entry");
+  Log("gbuffer recorder: executions %s; cockpit %s",
+      g_idMode ? "bound by identity (shading model, viewport tag, rank) from a base frame's ordinals"
+               : "by plain ordinal",
+      g_cockpit.load() ? (g_poolSlots > kScopeSlots ? "on (items and the scoped views' cockpit executions)"
+                                                    : "on (items only)")
+                       : "off");
   PollStateDump();
   return true;
 }
@@ -4542,7 +5137,7 @@ void ResetCounters() {
     s.staleStart = s.misses = s.refreshes = 0;
     s.aaClean = 0;
     s.redoPlanned = s.redoExecuted = s.redoLate = s.redoFail = s.swapsAhead = s.redoNs = s.slackJobs = 0;
-    s.rtReplays = 0;
+    s.rtReplays = s.rtSeen = s.rtDrawn = s.rtBound = 0;
     s.verifyAa = s.verifyAb = s.verifyAaBad = s.verifyAbBad = s.verifyTexels = s.verifyBadTexels = 0;
     s.verifySkipped = s.verifyErrors = s.verifyStateBad = s.verifyExecs = 0;
   }
@@ -4578,15 +5173,20 @@ void LogCounters(const char* label, double frames) {
       static_cast<unsigned long long>(g_texWhy[kTw678]), static_cast<unsigned long long>(g_texWhy[kTwMipSet]),
       static_cast<unsigned long long>(g_texWhy[kTwSwap]), static_cast<unsigned long long>(g_texWhy[kTwFault]));
   for (int s = 0; s < kSlots; ++s) {
-    const int ord = OrdinalOfSlot(scope, s);
-    if (ord < 0) continue;
+    const int ord = OrdinalOfSlot(scope, s % kScopeSlots);
+    if (ord < 0 || (s >= kScopeSlots && !g_slot[s].id.ok && !g_slot[s].st.passes.load())) continue;
+    char name[48];
+    SlotName(s, name, sizeof(name));
+    if (g_idMode)
+      Log("  gbuffer recorder %s %s: slot %d, bound to %s, viewport tag 0x%x, rank %u", label, name, s,
+          g_slot[s].id.ok ? SmName(g_slot[s].id.sm) : "nothing", g_slot[s].id.tag, g_slot[s].id.rank);
     const Stat& st = g_slot[s].st;
     const uint64_t passes = st.passes.load(), exec = st.passReason[kPExecuted].load(), used = st.jobsUsed.load();
     auto ms = [&](const std::atomic<uint64_t>& ns) { return ns.load() / 1e6 / f; };
-    Log("  gbuffer recorder %s execution #%d: %.2f passes/frame, %llu of %llu fully executed, %llu partly; items in "
+    Log("  gbuffer recorder %s %s: %.2f passes/frame, %llu of %llu fully executed, %llu partly; items in "
         "the jobs used %.0f/frame, drawn from command lists %.0f/frame (%.1f%%); segments %.2f per used job, %llu "
         "executed of %llu; %llu jobs, %llu used, %llu refused (worker busy)",
-        label, ord, passes / f, static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
+        label, name, passes / f, static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
         static_cast<unsigned long long>(st.partial.load()), st.items.load() / f, st.draws.load() / f,
         st.items.load() ? 100.0 * st.draws.load() / st.items.load() : 0.0,
         used ? static_cast<double>(st.segPlanned.load()) / used : 0.0,
@@ -4595,19 +5195,19 @@ void LogCounters(const char* label, double frames) {
         static_cast<unsigned long long>(st.refused.load()));
     const double tl = st.tlSamples.load() ? 1e6 * st.tlSamples.load() : 1.0;
     const double u = used ? static_cast<double>(used) : 1.0;
-    Log("  gbuffer recorder %s execution #%d times (ms/frame): workers build %.3f + record %.3f (per job: stage A %.3f "
+    Log("  gbuffer recorder %s %s times (ms/frame): workers build %.3f + record %.3f (per job: stage A %.3f "
         "= reads %.3f + commit %.3f; record %.3f summed, %.3f on the slowest worker); render thread: wait %.3f (max "
         "%.3f ms), front %.3f, replay + checks + copies + execute %.3f (execute %.3f), restore %.3f, table upkeep %.3f; "
         "CB ring %.2f MB/frame; streaming replays %.0f/frame; texture misses %.0f/frame, unusable %.0f/frame",
-        label, ord, ms(st.buildNs), ms(st.recordNs), st.buildNs.load() / 1e6 / u, st.preNs.load() / 1e6 / u,
+        label, name, ms(st.buildNs), ms(st.recordNs), st.buildNs.load() / 1e6 / u, st.preNs.load() / 1e6 / u,
         st.commitNs.load() / 1e6 / u, st.recordNs.load() / 1e6 / u, st.recMaxNs.load() / 1e6 / u, ms(st.waitNs),
         st.waitMaxNs.load() / 1e6, ms(st.frontNs), ms(st.execNs), ms(st.executeNs), ms(st.restoreNs), ms(st.maintNs),
         st.cbBytes.load() / 1048576.0 / f, st.vt23.load() / f, st.misses.load() / f, st.refreshes.load() / f);
-    Log("  gbuffer recorder %s execution #%d timeline from RenderGraph::render entry (ms, mean per used job, negative = "
+    Log("  gbuffer recorder %s %s timeline from RenderGraph::render entry (ms, mean per used job, negative = "
         "before): vector final / job start %.3f (%llu of %llu by Scene's sort, the rest at entry), stage-A reads done "
         "%.3f, commit done %.3f, recording done %.3f, job done %.3f, pass %.3f; %.0f items per job, %.1f%% read by "
         "helpers (%.2f helpers queued), %.2f recording workers and %.2f lists per job; stale early starts %llu",
-        label, ord, st.tlStart.load() / tl, static_cast<unsigned long long>(st.early.load()),
+        label, name, st.tlStart.load() / tl, static_cast<unsigned long long>(st.early.load()),
         static_cast<unsigned long long>(st.tlSamples.load()), st.tlPre.load() / tl, st.tlBuilt.load() / tl,
         st.tlRec.load() / tl, st.tlDone.load() / tl, st.tlPass.load() / tl, st.jobItems.load() / u,
         st.jobItems.load() ? 100.0 * st.helperItems.load() / st.jobItems.load() : 0.0, st.helpersQueued.load() / u,
@@ -4620,7 +5220,7 @@ void LogCounters(const char* label, double frames) {
                static_cast<unsigned long long>(st.passReason[r].load()));
       line += buf;
     }
-    Log("  gbuffer recorder %s execution #%d drawn stock: %s", label, ord, line.empty() ? "none" : line.c_str());
+    Log("  gbuffer recorder %s %s drawn stock: %s", label, name, line.empty() ? "none" : line.c_str());
     line.clear();
     for (int r = 1; r < kSegReasons; ++r) {
       if (!st.segReason[r].load()) continue;
@@ -4628,20 +5228,20 @@ void LogCounters(const char* label, double frames) {
                static_cast<unsigned long long>(st.segReason[r].load()));
       line += buf;
     }
-    Log("  gbuffer recorder %s execution #%d segments drawn stock: %s", label, ord, line.empty() ? "none" : line.c_str());
+    Log("  gbuffer recorder %s %s segments drawn stock: %s", label, name, line.empty() ? "none" : line.c_str());
     line.clear();
     for (int r = 1; r < kReasons; ++r) {
       if (!st.itemReason[r].load()) continue;
       snprintf(buf, sizeof(buf), "%s%s %.1f", line.empty() ? "" : "; ", kReasonName[r], st.itemReason[r].load() / f);
       line += buf;
     }
-    Log("  gbuffer recorder %s execution #%d residual items/frame (DCS draws them): %s", label, ord,
+    Log("  gbuffer recorder %s %s residual items/frame (DCS draws them): %s", label, name,
         line.empty() ? "none" : line.c_str());
     if (st.verifyAa.load() || st.verifyAb.load() || st.verifySkipped.load() || g_verify.load())
-      Log("  gbuffer recorder %s execution #%d verify: stock vs stock %llu (%llu differ), stock vs recorded %llu (%llu "
+      Log("  gbuffer recorder %s %s verify: stock vs stock %llu (%llu differ), stock vs recorded %llu (%llu "
           "differ), %llu of %llu texels/samples differ; %llu not compared, %llu errors; state after Execute differs "
           "%llu of %llu",
-          label, ord, static_cast<unsigned long long>(st.verifyAa.load()),
+          label, name, static_cast<unsigned long long>(st.verifyAa.load()),
           static_cast<unsigned long long>(st.verifyAaBad.load()), static_cast<unsigned long long>(st.verifyAb.load()),
           static_cast<unsigned long long>(st.verifyAbBad.load()),
           static_cast<unsigned long long>(st.verifyBadTexels.load()),
@@ -4654,8 +5254,23 @@ void LogCounters(const char* label, double frames) {
   if (!gbverify::g_lastFormats.empty() && (g_verify.load() || g_slot[0].st.verifyAb.load()))
     Log("  gbuffer recorder %s verify: last captured targets: %s", label, gbverify::g_lastFormats.c_str());
   if (g_verifyWhy) Log("  gbuffer recorder %s verify: last capture failure: %s", label, g_verifyWhy);
-  uint64_t rt = 0;
-  for (int k = 0; k < kSlots; ++k) rt += g_slot[k].st.rtReplays.load();
+  uint64_t rt = 0, rtSeen = 0, rtDrawn = 0, rtBound = 0;
+  for (int k = 0; k < kSlots; ++k) {
+    rt += g_slot[k].st.rtReplays.load();
+    rtSeen += g_slot[k].st.rtSeen.load();
+    rtDrawn += g_slot[k].st.rtDrawn.load();
+    rtBound += g_slot[k].st.rtBound.load();
+  }
+  if (g_idMode)
+    Log("  gbuffer recorder %s identity: %llu frames, %llu base, %llu with more executions (MFD frames); last base "
+        "frame %u non-cockpit and %u cockpit executions; %llu bindings changed; %llu executions not identified",
+        label, static_cast<unsigned long long>(g_bind.frames), static_cast<unsigned long long>(g_bind.baseFrames),
+        static_cast<unsigned long long>(g_bind.extraFrames), g_bind.base.n, g_bind.base.nck,
+        static_cast<unsigned long long>(g_bindChanges.load()), static_cast<unsigned long long>(g_idFail.load()));
+  if (g_cockpit.load())
+    Log("  gbuffer recorder %s cockpit: render-target textures at exec entries %.2f/frame, drawn to since their last "
+        "mip generation %.2f/frame, a target of the pass %.2f/frame",
+        label, rtSeen / f, rtDrawn / f, rtBound / f);
   Log("  gbuffer recorder %s: render-target mip replays %.2f/frame (%s); texture classes the table refused (since "
       "start): %s",
       label, rt / f, shrec::g_innerRt ? "class supported" : "class not supported", shrec::CensusText(g_census).c_str());

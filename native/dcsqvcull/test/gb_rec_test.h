@@ -1294,7 +1294,8 @@ void DrawDcs(Dev& d, World& w, int i, const TexTable& tt) {
   c->PSSetSamplers(0, 1, &d.samp);
   c->VSSetShader(d.vs, nullptr, 0);
   c->PSSetShader(s == 3 ? d.psA2c : d.ps, nullptr, 0);
-  c->OMSetDepthStencilState(d.dss[s == 0 ? 0 : s == 3 ? 1 : 2], s == 0 ? 3 : s == 3 ? 5 : 7);
+  // A cockpit item (gb_rec_cockpit_test.h): normal_cockpit*'s stencil ref 40 (STENCIL_COMPOSITION_COCKPIT).
+  c->OMSetDepthStencilState(d.dss[s == 0 ? 0 : s == 3 ? 1 : 2], w.rend[i][0x64] ? 40 : s == 0 ? 3 : s == 3 ? 5 : 7);
   c->OMSetBlendState(s == 3 ? d.bsA2c : d.bsNone, nullptr, 0xffffffff);
   c->RSSetState(d.rs);
   c->IASetInputLayout(d.il);
@@ -1368,7 +1369,7 @@ void ProbeOn(Dev& d, World& w, Tables& t, int i, const TexTable& tt) {
   in.item = w.item[i];
   in.mat = w.mat[w.MatOf(i)];
   in.shader = *reinterpret_cast<uint8_t**>(in.mat + 0x30);
-  in.tech = 1;
+  in.tech = w.rend[i][0x64] ? 2 : 1;  // a cockpit item: [mat+0x1e0] (gb_rec_cockpit_test.h)
   in.mesh = w.mesh[World::MeshOf(i)];
   in.page = static_cast<uint32_t>(World::PageOf(i));
   in.effect = *reinterpret_cast<void**>(in.shader + 0x50);
@@ -1379,7 +1380,7 @@ void ProbeOn(Dev& d, World& w, Tables& t, int i, const TexTable& tt) {
   f.meshWhy = shrec::ReadMesh(in.mesh, f.mesh);
   f.passCtx[0][0] = f.passCtx[1][0] = d.b6;
   f.passCtx[0][1] = f.passCtx[1][1] = d.b7;
-  f.reads = FindReads(t, in.shader, 1, in.effect, in.techBegin);
+  f.reads = FindReads(t, in.shader, in.tech, in.effect, in.techBegin);
   if (f.reads) ReadSetsRaw(in, *f.reads, f);
   static void* list[1];
   list[0] = f.mesh.vbObj;

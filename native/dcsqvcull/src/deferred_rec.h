@@ -502,6 +502,7 @@ class CbRing {
   }
 
   uint64_t maps = 0, discards = 0, overflows = 0, bytesUsed = 0, created = 0;
+  uint64_t createdBytes = 0;  // ByteWidth summed over the buffers created (vram_count.h)
 
  private:
   static constexpr int kMaxChunks = 256;
@@ -571,7 +572,10 @@ class CbRing {
     d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     d.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     const bool ok = SUCCEEDED(dev_->CreateBuffer(&d, nullptr, out)) && *out;  // free-threaded
-    if (ok) ++created;
+    if (ok) {
+      ++created;
+      createdBytes += size;
+    }
     return ok;
   }
 
@@ -611,6 +615,11 @@ struct Worker;
 using JobFn = bool (*)(Worker& w, void* user);
 
 enum JobState : int { kIdle = 0, kQueued, kRunning, kOk, kFailed, kFaulted };
+
+// Measurement hook ([Suite] RunnableThreads, run_threads.h): called on the
+// worker thread at the start of every job while set (null otherwise: one
+// relaxed load per job).
+inline std::atomic<void (*)()> g_jobStartHook{nullptr};
 
 inline const char* StateName(int s) {
   static const char* const k[] = {"idle", "queued", "running", "ok", "failed", "faulted"};
@@ -715,6 +724,13 @@ class Pool {
 
   bool Started() const { return started_; }
   int Workers() const { return n_; }
+  // Thread ids of the running workers (at most cap); the count written.
+  int ThreadIds(DWORD* out, int cap) const {
+    int k = 0;
+    for (int i = 0; i < n_ && k < cap; ++i)
+      if (w_[i].thread) out[k++] = GetThreadId(w_[i].thread);
+    return k;
+  }
   const Caps& DeviceCaps() const { return caps_; }
   bool Disabled() const { return disabled_.load(std::memory_order_relaxed); }
   Worker& At(int i) { return w_[i]; }
@@ -867,6 +883,7 @@ class Pool {
   }
 
   static void RunJob(Worker& w) {
+    if (void (*hook)() = g_jobStartHook.load(std::memory_order_relaxed)) hook();
     w.ring.Reset();
     w.lastRecordUs = w.lastFinishUs = 0;
     const int r = RunGuarded(&w);

@@ -128,6 +128,7 @@ public static class ConfigurationWriters
         ShadowRecorderPriority=0
         ShadowRecorderSplit=0xf
         ShadowRecorderInstancing=1
+        ShadowRecorderHelpers=3
         GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}
         GBufferRecorderScope=0x10055
         GBufferRecorderMaxSegments=12
@@ -136,6 +137,10 @@ public static class ConfigurationWriters
         GBufferRecorderIsland=30
         GBufferRecorderRedo=1
         GBufferRecorderSwapAhead=1
+        GBufferRecorderCockpit=0
+        GBufferRecorderByOrdinal=0
+        SrvTailTrim=0
+        PassFlush=0
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
@@ -208,6 +213,21 @@ public static class ConfigurationWriters
         RotationProfile=0
         RotationDegPerSec=60
         RotationSeconds=20
+        FrameStartGap=0
+        FrameStartGapSec=10
+        RunnableThreads=0
+        RunnableThreadsSec=10
+        RunnableThreadsEvery=16
+        VramCount=0
+        VramCountSec=20
+        VramCountCreates=1
+        GpuPassStats=0
+        ForwardRecCount=0
+        BenchPassFlush=0
+        BenchPassFlushMask=0
+        SrvTailTrimVerify=0
+        SrvTailTrimVerifySec=10
+        BenchSrvTailTrim=0
         BenchSplitFilter=0
         JoinTailCount=0
         SrvSpanCount=0

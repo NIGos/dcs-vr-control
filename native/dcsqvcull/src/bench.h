@@ -184,6 +184,11 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
 }
 
 std::atomic<int> g_benchActiveMode{0};  // read by SetBenchVariant
+// Optional per-block callbacks (suite thread), set by a mode's phase around
+// RunBenchmark: after the settle time, right before a block records; after it
+// recorded (valid = not discarded).
+void (*g_benchBlockBegin)(bool on) = nullptr;
+void (*g_benchBlockEnd)(bool on, bool valid) = nullptr;
 
 // Blocks until done. mode: 0 = exclusion OFF/ON, 1 = collect threads.
 // Returns false if aborted.
@@ -222,6 +227,8 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 27 ? "bench: mode split-path D3D11 state filter, OFF = stock (no patch or hook), ON = redundant state calls skipped at the dx11backend sites"
         : mode == 28 ? "bench: mode shadow recorder, OFF = DCS draws every caster, ON = recorded casters from a worker's command list"
         : mode == 29 ? "bench: mode g-buffer recorder, OFF = DCS draws every item, ON = recorded G-buffer draws from command lists"
+        : mode == 30 ? "bench: mode pass flush, OFF = no Flush, ON = Flush at the configured pass boundaries"
+        : mode == 31 ? "bench: mode setShaderResources tail trim, OFF = stock call sites, ON = identical tail not rebound"
                     : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
@@ -243,6 +250,7 @@ bool RunBenchmark(int mode, bool beeps) {
     bool on = (i % 2) == 1;
     SetBenchVariant(on);
     Sleep(settleMs);
+    if (g_benchBlockBegin) g_benchBlockBegin(on);
     uint64_t losses0 = g_focusLosses.load();
     bool focusedAtStart = g_xrFocused.load();
     LARGE_INTEGER a, b;
@@ -280,6 +288,7 @@ bool RunBenchmark(int mode, bool beeps) {
       Log("bench: block %d/%d discarded (OpenXR session not FOCUSED)", i + 1, blocks);
       blk.frames = 0;
     }
+    if (g_benchBlockEnd) g_benchBlockEnd(on, blk.frames != 0);
     Log("bench: block %d/%d %s frames=%llu", i + 1, blocks, on ? "ON " : "OFF",
         static_cast<unsigned long long>(blk.frames));
     done.push_back(std::move(blk));
@@ -308,6 +317,8 @@ bool RunBenchmark(int mode, bool beeps) {
   if (mode == 27) ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
   if (mode == 28) ApplyShadowRecorder();
   if (mode == 29) ApplyGBufferRecorder();
+  if (mode == 30) ApplyPassFlush();
+  if (mode == 31) ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
   if (mode == 23) ApplyGBufferBatch();
   if (mode == 19) {
     g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
@@ -371,6 +382,8 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 27 ? "split-path D3D11 state filter"
             : mode == 28 ? "shadow recorder (R17 S3)"
             : mode == 29 ? "g-buffer recorder (R18 S3)"
+            : mode == 30 ? "Flush at pass boundaries (R20 h)"
+            : mode == 31 ? "setShaderResources identical-tail trim (R15 F2)"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

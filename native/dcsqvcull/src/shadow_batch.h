@@ -744,10 +744,13 @@ using RenderObserverFn = void (*)(void* rg, void* renderables);
 std::atomic<RenderObserverFn> g_renderObserver{nullptr};
 // The shadow recorder's job queue (shadow_rec.h), same call point.
 std::atomic<RenderObserverFn> g_recObserver{nullptr};
+// Measurement counters (run_threads.h: render entry), same call point, first.
+std::atomic<RenderObserverFn> g_measureObserver{nullptr};
 
 void __fastcall HookRender(void* rg, void* renderables, void* lights, void* params) {
   g_inQueue.fetch_add(1);
   g_qEntries++;
+  if (RenderObserverFn ob = g_measureObserver.load(std::memory_order_relaxed)) ob(rg, renderables);
   if (RenderObserverFn ob = g_renderObserver.load(std::memory_order_relaxed)) ob(rg, renderables);
   if (RenderObserverFn ob = g_recObserver.load(std::memory_order_relaxed)) ob(rg, renderables);
   if (!g_shutdown.load() && g_async.load(std::memory_order_relaxed) && g_on.load(std::memory_order_relaxed) &&

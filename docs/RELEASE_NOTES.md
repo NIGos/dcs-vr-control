@@ -1,3 +1,15 @@
+# 0.5.1 preview
+
+**Sturdier multi-threaded G-buffer**: every place where it runs on DCS's render thread is now protected, so a fault turns it off for the session ("exception … contained" on the Engine Optimizations page) and DCS keeps running; worker counts are bounded; the frames it records are recognized by what they are rather than by their order, so in the cockpit (F1) MFD frames no longer shift it. Verified pixel-identical live, also in F1 (F-14B, F-16C).
+
+**Faster multi-threaded shadows**: up to three helper threads per cascade, adaptive, with finer work items: at a heavy view, late shadow passes fell from about 0.4 to 0.1 per frame.
+
+All together, same airfield scene: 42.9 → 62.7 FPS (+46.0 % ±1.1) and 41.9 → 62.7 (+49.9 % ±3.7), p95 −34 %, the GPU 96-97 % busy (it is now the limit). About +50-60 % depending on the scene.
+
+**CPU Boost follows DCS's launcher**: when DCS ends and starts again within 30 s (DCS's own launcher after Play, the Steam restart), CPU Boost moves to the new process instead of restoring everything.
+
+**Fixes**: uninstalling from the installed copy works (it stopped half way on its own files); Optimizations only keeps the VR settings for the next VR flight and is never blocked by them; the interface is reorganized (Every pilot / VR / Setup & safety) with clearer wording. See the commit history for details.
+
 # 0.5.0 preview
 
 **DCS VR Control is now DCS Control.** It is no longer only for VR: the CPU optimizations are for every pilot, on a monitor or with any headset. The app is `DcsControl.exe`, installed under `%LOCALAPPDATA%\Programs\DcsControl`; `Install DCS Control.cmd` replaces an earlier DCS VR Control install and its Start menu entry. An existing state folder (`%LOCALAPPDATA%\DcsVrControl`, with the record of original files and the applied profile) keeps being used, so Back to stock DCS keeps working; new installs use `%LOCALAPPDATA%\DcsControl`. The repository moved to github.com/NIGos/dcs-control (the old address redirects).

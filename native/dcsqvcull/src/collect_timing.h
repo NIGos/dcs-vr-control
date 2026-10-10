@@ -42,6 +42,9 @@ using AggregatedFn = void(__cdecl*)(uint32_t, void*, void*, bool, void*);
 ProviderFn g_provider = nullptr;
 SortFn g_sort = nullptr;
 AggregatedFn g_aggregated = nullptr;
+// Measurement observer (frame_start.h: culling start / end on the render
+// thread): called with the QPC before (begin) and after the call; null = off.
+std::atomic<void (*)(int64_t, bool)> g_aggObserver{nullptr};
 
 bool __fastcall HookProvider(void* self, uint32_t n, void* infos, void* outs, void* tq, uint32_t f) {
   int64_t t0 = Now();
@@ -58,8 +61,12 @@ void __fastcall HookSort(void* self, uint32_t n, void* infos, void* outs, void* 
 
 void __cdecl HookAggregated(uint32_t n, void* req, void* tq, bool b, void* stats) {
   int64_t t0 = Now();
+  void (*ob)(int64_t, bool) = g_aggObserver.load(std::memory_order_relaxed);
+  if (ob) ob(t0, true);
   g_aggregated(n, req, tq, b, stats);
-  Add(kAggregated, t0, Now());
+  const int64_t t1 = Now();
+  Add(kAggregated, t0, t1);
+  if (ob) ob(t1, false);
 }
 
 bool PatchPtr(void** slot, void* hook, void** orig) { return HookSlot(slot, hook, orig); }
